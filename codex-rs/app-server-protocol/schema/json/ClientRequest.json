@@ -1503,6 +1503,142 @@
       ],
       "type": "object"
     },
+    "GameAiLimit": {
+      "properties": {
+        "groupName": {
+          "type": "string"
+        },
+        "limitKind": {
+          "type": "string"
+        },
+        "maxValue": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "periodExpr": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "groupName",
+        "limitKind",
+        "maxValue",
+        "periodExpr"
+      ],
+      "type": "object"
+    },
+    "GameAiModel": {
+      "properties": {
+        "apiPath": {
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "limits": {
+          "items": {
+            "$ref": "#/definitions/GameAiLimit"
+          },
+          "type": "array"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "paramsJson": {
+          "type": "string"
+        },
+        "providerCode": {
+          "type": "string"
+        },
+        "remark": {
+          "type": "string"
+        },
+        "sortNo": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "apiPath",
+        "capabilities",
+        "displayName",
+        "driver",
+        "enabled",
+        "id",
+        "limits",
+        "modelId",
+        "paramsJson",
+        "providerCode",
+        "remark",
+        "sortNo"
+      ],
+      "type": "object"
+    },
+    "GameAiProvider": {
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "hasKey": {
+          "type": "boolean"
+        },
+        "keyMask": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "$ref": "#/definitions/GameAiModel"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "priority": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "baseUrl",
+        "code",
+        "driver",
+        "enabled",
+        "hasKey",
+        "models",
+        "name",
+        "priority"
+      ],
+      "type": "object"
+    },
     "GameFocusAction": {
       "enum": [
         "submitClarification",

@@ -1,8 +1,10 @@
+mod ai_config;
 mod artifacts;
 mod entities;
 mod ids;
 mod workflow;
 
+pub use ai_config::*;
 pub use artifacts::*;
 pub use entities::*;
 pub use ids::*;

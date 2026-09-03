@@ -318,7 +318,7 @@ mod tests {
         assert!(destination.join("characters").is_dir());
         assert!(destination.join("maps").is_dir());
         assert!(!destination.join("maps/legacy.json").exists());
-        assert!(destination.join(".codex-game/project.db").is_file());
+        assert!(destination.join(".codex-game/local/project.db").is_file());
         assert!(!destination.join("config.db").exists());
         let store = ProjectStore::open(&destination)
             .await

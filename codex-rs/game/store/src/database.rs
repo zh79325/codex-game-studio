@@ -37,6 +37,7 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -231,10 +232,16 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("project database does not exist for read-only access: {0}")]
     MissingReadOnlyDatabase(PathBuf),
+    #[error("cannot migrate project database because both paths exist: {legacy} and {local}")]
+    StorageMigrationConflict { legacy: PathBuf, local: PathBuf },
     #[error("project store is read-only")]
     ReadOnly,
     #[error("store record was not found: {0}")]
     NotFound(String),
+    #[error("store conflict: {0}")]
+    Conflict(String),
+    #[error("invalid store data: {0}")]
+    InvalidData(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -260,16 +267,21 @@ impl ProjectStore {
         force_read_only: bool,
     ) -> Result<Self, StoreError> {
         let state_dir = project_root.join(".codex-game");
-        if force_read_only && !state_dir.is_dir() {
-            return Err(StoreError::MissingReadOnlyDatabase(
-                state_dir.join("project.db"),
-            ));
+        let local_dir = state_dir.join("local");
+        let legacy_database_path = state_dir.join("project.db");
+        let local_database_path = local_dir.join("project.db");
+        if force_read_only && !local_database_path.exists() && !legacy_database_path.exists() {
+            return Err(StoreError::MissingReadOnlyDatabase(local_database_path));
         }
-        fs::create_dir_all(&state_dir)?;
+        if !force_read_only {
+            fs::create_dir_all(&local_dir)?;
+            ensure_local_storage_ignored(project_root)?;
+            migrate_project_database(&legacy_database_path, &local_database_path)?;
+        }
         let (access, writer_lock) = if force_read_only {
             (ProjectAccess::ReadOnly, None)
         } else {
-            let lock_path = state_dir.join("project.lock");
+            let lock_path = local_dir.join("project.lock");
             let lock = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -282,7 +294,11 @@ impl ProjectStore {
                 Err(std::fs::TryLockError::Error(err)) => return Err(StoreError::Io(err)),
             }
         };
-        let database_path = state_dir.join("project.db");
+        let database_path = if local_database_path.exists() || !force_read_only {
+            local_database_path
+        } else {
+            legacy_database_path
+        };
         if access == ProjectAccess::ReadOnly && !database_path.exists() {
             return Err(StoreError::MissingReadOnlyDatabase(database_path));
         }
@@ -1256,10 +1272,53 @@ pub async fn list_registered_projects(
         .collect()
 }
 
+fn ensure_local_storage_ignored(project_root: &Path) -> Result<(), StoreError> {
+    const IGNORE_ENTRY: &str = "/.codex-game/local/";
+    let path = project_root.join(".gitignore");
+    let existing = match fs::read_to_string(&path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if existing.lines().any(|line| line.trim() == IGNORE_ENTRY) {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        file.write_all(b"\n")?;
+    }
+    file.write_all(format!("{IGNORE_ENTRY}\n").as_bytes())?;
+    Ok(())
+}
+
+fn migrate_project_database(legacy: &Path, local: &Path) -> Result<(), StoreError> {
+    if !legacy.exists() {
+        return Ok(());
+    }
+    if local.exists() {
+        return Err(StoreError::StorageMigrationConflict {
+            legacy: legacy.to_path_buf(),
+            local: local.to_path_buf(),
+        });
+    }
+    fs::rename(legacy, local)?;
+    for suffix in ["-shm", "-wal"] {
+        let legacy_sidecar = PathBuf::from(format!("{}{suffix}", legacy.display()));
+        if legacy_sidecar.exists() {
+            fs::rename(
+                &legacy_sidecar,
+                PathBuf::from(format!("{}{suffix}", local.display())),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn open_studio_store(app_storage: &Path) -> Result<SqlitePool, StoreError> {
     fs::create_dir_all(app_storage)?;
     let pool = open_pool(&app_storage.join("studio.db"), ProjectAccess::ReadWrite).await?;
     run_schema(&pool, STUDIO_SCHEMA).await?;
+    crate::initialize_ai_config_schema(&pool).await?;
     Ok(pool)
 }
 
@@ -1472,5 +1531,58 @@ mod tests {
             store.recover_incomplete_attempts().await.expect("recover"),
             1
         );
+    }
+
+    #[test]
+    fn appends_local_storage_ignore_without_overwriting_existing_rules() {
+        let directory = tempdir().expect("tempdir");
+        let gitignore = directory.path().join(".gitignore");
+        fs::write(&gitignore, "target/\n").expect("seed gitignore");
+
+        ensure_local_storage_ignored(directory.path()).expect("append ignore rule");
+        ensure_local_storage_ignored(directory.path()).expect("keep ignore rule idempotent");
+
+        assert_eq!(
+            fs::read_to_string(gitignore).expect("read gitignore"),
+            "target/\n/.codex-game/local/\n"
+        );
+    }
+
+    #[test]
+    fn migrates_legacy_project_database_and_sidecars() {
+        let directory = tempdir().expect("tempdir");
+        let legacy = directory.path().join("project.db");
+        let local_dir = directory.path().join("local");
+        let local = local_dir.join("project.db");
+        fs::create_dir_all(&local_dir).expect("create local directory");
+        fs::write(&legacy, b"database").expect("seed database");
+        fs::write(format!("{}-wal", legacy.display()), b"wal").expect("seed wal");
+        fs::write(format!("{}-shm", legacy.display()), b"shm").expect("seed shm");
+
+        migrate_project_database(&legacy, &local).expect("migrate database");
+
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read(&local).expect("read migrated database"),
+            b"database"
+        );
+        assert!(PathBuf::from(format!("{}-wal", local.display())).exists());
+        assert!(PathBuf::from(format!("{}-shm", local.display())).exists());
+    }
+
+    #[test]
+    fn rejects_project_database_migration_conflict() {
+        let directory = tempdir().expect("tempdir");
+        let legacy = directory.path().join("project.db");
+        let local = directory.path().join("local.db");
+        fs::write(&legacy, b"legacy").expect("seed legacy database");
+        fs::write(&local, b"local").expect("seed local database");
+
+        assert!(matches!(
+            migrate_project_database(&legacy, &local),
+            Err(StoreError::StorageMigrationConflict { .. })
+        ));
+        assert_eq!(fs::read(legacy).expect("read legacy database"), b"legacy");
+        assert_eq!(fs::read(local).expect("read local database"), b"local");
     }
 }

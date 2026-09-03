@@ -13,6 +13,7 @@ use crate::StartThreadRequest;
 use crate::StartTurnRequest;
 use crate::SteerTurnRequest;
 use crate::bundled_agent_definition;
+use codex_game_domain::AiCapability;
 use codex_game_domain::ContextPackage;
 use codex_game_domain::ConversationCodexThread;
 use codex_game_domain::ConversationCodexThreadId;
@@ -32,10 +33,15 @@ use codex_game_store::ProviderAccountMetadata;
 use codex_game_store::StoreError;
 use codex_game_store::StoredRouteBinding;
 use codex_game_store::StudioUsageEntry;
+use codex_game_store::list_ai_providers;
+use codex_game_store::load_ai_route_models;
 use codex_game_store::load_route_binding;
 use codex_game_store::open_studio_store;
+use codex_game_store::record_ai_route_failure;
+use codex_game_store::record_ai_route_success;
 use codex_game_store::record_route_selection;
 use codex_game_store::record_usage;
+use codex_game_store::reserve_ai_usage;
 use codex_game_store::upsert_provider_accounts;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -118,14 +124,15 @@ impl TaskOrchestrator {
         self.routes.set_quota(account_id, metric, amount)
     }
 
-    pub fn report_route_outcome(
+    pub async fn report_route_outcome(
         &self,
         conversation_id: &str,
         outcome: RouteOutcome,
-    ) -> Result<(), RouteError> {
+    ) -> Result<(), OrchestrationError> {
         let scope = format!("conversation:{conversation_id}");
         if let Some(decision) = self.routes.current_binding(&scope)? {
-            self.routes.report(&decision, outcome)?;
+            self.report_route(&decision, outcome, "turn execution failed")
+                .await?;
         }
         Ok(())
     }
@@ -143,6 +150,7 @@ impl TaskOrchestrator {
         if !request.context.is_bounded() {
             return Err(OrchestrationError::ContextTooLarge);
         }
+        self.routes.reset_transient_failures()?;
 
         let lock = self
             .binding_lock(&request.conversation_id, &request.agent_code)
@@ -217,7 +225,8 @@ impl TaskOrchestrator {
             Ok(turn) => turn,
             Err(error) => {
                 if let Some(kind) = route_failure_kind(&error) {
-                    self.routes.report(&route, RouteOutcome::Failed(kind))?;
+                    self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
+                        .await?;
                 }
                 store
                     .mark_attempt_status(attempt.id.as_str(), TaskAttemptStatus::Failed)
@@ -257,6 +266,7 @@ impl TaskOrchestrator {
         let mut context = retryable.context;
         context.context_version = workflow.input_version;
         context.workflow_version = workflow.workflow_version;
+        self.routes.reset_transient_failures()?;
         let request = ExecuteTaskRequest {
             project_root,
             conversation_id: retryable.conversation_id,
@@ -324,7 +334,8 @@ impl TaskOrchestrator {
             Ok(turn) => turn,
             Err(error) => {
                 if let Some(kind) = route_failure_kind(&error) {
-                    self.routes.report(&route, RouteOutcome::Failed(kind))?;
+                    self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
+                        .await?;
                 }
                 store
                     .mark_attempt_status(attempt.id.as_str(), TaskAttemptStatus::Failed)
@@ -395,7 +406,9 @@ impl TaskOrchestrator {
             .active_thread(&request.conversation_id, &request.agent_code)
             .await?;
         let scope = format!("conversation:{}", request.conversation_id);
-        let (route, event) = self.select_route(request.capability, &scope).await?;
+        let (route, event) = self
+            .select_route(request.capability, &scope, &request.agent_code)
+            .await?;
         if matches!(event, RouteEvent::Selected { .. })
             && let Some(binding) = &previous
             && execution.thread_available(&binding.codex_thread_id).await
@@ -425,8 +438,12 @@ impl TaskOrchestrator {
                 let Some(kind) = route_failure_kind(&error) else {
                     return Err(error.into());
                 };
-                self.routes.report(&route, RouteOutcome::Failed(kind))?;
-                let next_route = self.select_route(request.capability, &scope).await?.0;
+                self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
+                    .await?;
+                let next_route = self
+                    .select_route(request.capability, &scope, &request.agent_code)
+                    .await?
+                    .0;
                 self.start_replacement_thread(execution, store, request, previous, next_route)
                     .await
             }
@@ -459,11 +476,13 @@ impl TaskOrchestrator {
                     let Some(kind) = route_failure_kind(&error) else {
                         return Err(error.into());
                     };
-                    self.routes.report(&route, RouteOutcome::Failed(kind))?;
+                    self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
+                        .await?;
                     route = self
                         .select_route(
                             request.capability,
                             &format!("conversation:{}", request.conversation_id),
+                            &request.agent_code,
                         )
                         .await?
                         .0;
@@ -513,17 +532,36 @@ impl TaskOrchestrator {
         &self,
         capability: Capability,
         scope: &str,
+        agent_code: &str,
     ) -> Result<(RouteDecision, RouteEvent), OrchestrationError> {
         if let Some(studio_storage) = &self.studio_storage {
             let studio = open_studio_store(studio_storage).await?;
+            let candidates = load_ai_route_models(&studio, agent_code, now())
+                .await?
+                .into_iter()
+                .map(|candidate| RouteCandidate {
+                    account_id: candidate.id,
+                    provider: candidate.provider,
+                    model: candidate.model,
+                    capabilities: candidate
+                        .capabilities
+                        .into_iter()
+                        .map(runtime_capability)
+                        .collect(),
+                    available: candidate.available,
+                })
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() || !list_ai_providers(&studio).await?.is_empty() {
+                self.routes.replace_candidates(candidates)?;
+            }
             let accounts = self
                 .routes
-                .candidates()
-                .iter()
+                .candidates()?
+                .into_iter()
                 .map(|candidate| ProviderAccountMetadata {
-                    id: candidate.account_id.clone(),
-                    provider: candidate.provider.clone(),
-                    model: candidate.model.clone(),
+                    id: candidate.account_id,
+                    provider: candidate.provider,
+                    model: candidate.model,
                     enabled: candidate.available,
                 })
                 .collect::<Vec<_>>();
@@ -590,17 +628,40 @@ impl TaskOrchestrator {
         decision: &RouteDecision,
         idempotency_key: &str,
     ) -> Result<(), OrchestrationError> {
-        let events = self.routes.reserve_usage(
-            decision,
-            idempotency_key,
-            &[QuotaRequirement {
-                metric: "requests".to_string(),
-                amount: 1,
-            }],
-        )?;
+        let requirements = [QuotaRequirement {
+            metric: "calls".to_string(),
+            amount: 1,
+        }];
         let Some(studio_storage) = &self.studio_storage else {
+            self.routes
+                .reserve_usage(decision, idempotency_key, &requirements)?;
             return Ok(());
         };
+        let studio = open_studio_store(studio_storage).await?;
+        let reserved = reserve_ai_usage(
+            &studio,
+            &decision.account_id,
+            idempotency_key,
+            &[(codex_game_domain::LimitKind::Calls, 1)],
+            now(),
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::Conflict(_) => RouteError::QuotaExceeded {
+                account_id: decision.account_id.clone(),
+                metric: "calls".to_string(),
+            }
+            .into(),
+            other => OrchestrationError::Store(other),
+        })?;
+        if !reserved {
+            return Ok(());
+        }
+        let events = vec![RouteEvent::UsageUpdated {
+            account_id: decision.account_id.clone(),
+            metric: "calls".to_string(),
+            amount: 1,
+        }];
         let entries = events
             .into_iter()
             .filter_map(|event| {
@@ -616,7 +677,6 @@ impl TaskOrchestrator {
             })
             .collect::<Vec<_>>();
         if !entries.is_empty() {
-            let studio = open_studio_store(studio_storage).await?;
             record_usage(
                 &studio,
                 &decision.account_id,
@@ -629,10 +689,47 @@ impl TaskOrchestrator {
         Ok(())
     }
 
+    async fn report_route(
+        &self,
+        decision: &RouteDecision,
+        outcome: RouteOutcome,
+        reason: &str,
+    ) -> Result<(), OrchestrationError> {
+        self.routes.report(decision, outcome)?;
+        if let Some(studio_storage) = &self.studio_storage {
+            let studio = open_studio_store(studio_storage).await?;
+            match outcome {
+                RouteOutcome::Succeeded => {
+                    record_ai_route_success(&studio, &decision.account_id).await?
+                }
+                RouteOutcome::Failed(
+                    RouteFailureKind::Retryable
+                    | RouteFailureKind::CapabilityUnavailable
+                    | RouteFailureKind::Fatal,
+                ) => record_ai_route_failure(&studio, &decision.account_id, reason, now()).await?,
+                RouteOutcome::Failed(
+                    RouteFailureKind::ContextTooLarge | RouteFailureKind::InvalidRequest,
+                ) => {}
+            }
+        }
+        Ok(())
+    }
+
     async fn binding_lock(&self, conversation_id: &str, agent_code: &str) -> Arc<Mutex<()>> {
         let key = format!("{conversation_id}\u{1f}{agent_code}");
         let mut locks = self.binding_locks.lock().await;
         Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    }
+}
+
+fn runtime_capability(capability: AiCapability) -> Capability {
+    match capability {
+        AiCapability::TextReasoning => Capability::TextReasoning,
+        AiCapability::TextStructuredOutput => Capability::TextStructuredOutput,
+        AiCapability::VisionAnalysis => Capability::VisionAnalysis,
+        AiCapability::ImageTextToImage => Capability::ImageTextToImage,
+        AiCapability::ImageImageToImage => Capability::ImageImageToImage,
+        AiCapability::ImageReferenceConsistency => Capability::ImageReferenceConsistency,
     }
 }
 

@@ -1,0 +1,379 @@
+import {
+  ApiOutlined,
+  CloudDownloadOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  ExportOutlined,
+  ImportOutlined,
+  PlusOutlined,
+} from "@ant-design/icons";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Collapse,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Popconfirm,
+  Select,
+  Space,
+  Switch,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { useMemo, useState } from "react";
+import { aiApi } from "./api";
+import { useStudio } from "./AppShell";
+import type { AiLimit, AiModel, AiProvider, ModelRecommendation } from "./types";
+
+const capabilityOptions = [
+  "text_reasoning",
+  "text_structured_output",
+  "vision_analysis",
+  "image_text_to_image",
+  "image_image_to_image",
+  "image_reference_consistency",
+].map((value) => ({ value, label: value }));
+const limitKinds = ["calls", "input_tokens", "output_tokens", "total_tokens"];
+
+type ProviderValues = Pick<AiProvider, "code" | "name" | "baseUrl" | "driver" | "priority" | "enabled"> & {
+  apiKey?: string;
+};
+type ModelValues = Omit<AiModel, "id" | "providerCode" | "limits"> & { id?: string; limits?: AiLimit[] };
+
+export default function ProvidersPage() {
+  const { message } = App.useApp();
+  const { canWrite } = useStudio();
+  const queryClient = useQueryClient();
+  const [providerForm] = Form.useForm<ProviderValues>();
+  const [modelForm] = Form.useForm<ModelValues>();
+  const [providerEditing, setProviderEditing] = useState<AiProvider>();
+  const [providerOpen, setProviderOpen] = useState(false);
+  const [modelEditing, setModelEditing] = useState<AiModel>();
+  const [modelProvider, setModelProvider] = useState<AiProvider>();
+  const [modelOpen, setModelOpen] = useState(false);
+  const [recommendationOpen, setRecommendationOpen] = useState(false);
+  const [transferMode, setTransferMode] = useState<"export" | "import">();
+  const [transferText, setTransferText] = useState("");
+  const [importPreview, setImportPreview] = useState<{ providerCount: number; modelCount: number }>();
+
+  const providers = useQuery({ queryKey: ["ai-providers"], queryFn: aiApi.listProviders });
+  const recommendations = useQuery({
+    queryKey: ["model-recommendations"],
+    queryFn: aiApi.recommendations,
+  });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["ai-providers"] });
+
+  const saveProvider = useMutation({
+    mutationFn: async (values: ProviderValues) => {
+      const provider: AiProvider = {
+        code: values.code.trim(),
+        name: values.name.trim(),
+        baseUrl: values.baseUrl.trim(),
+        driver: values.driver.trim(),
+        priority: values.priority ?? 0,
+        enabled: values.enabled ?? true,
+        hasKey: providerEditing?.hasKey ?? false,
+        keyMask: providerEditing?.keyMask ?? null,
+        models: providerEditing?.models ?? [],
+      };
+      return aiApi.writeProvider(providerEditing ? "update" : "create", provider, values.apiKey);
+    },
+    onSuccess: async () => {
+      message.success("Provider 已保存");
+      setProviderOpen(false);
+      await refresh();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const saveModel = useMutation({
+    mutationFn: async (values: ModelValues) => {
+      if (!modelProvider) throw new Error("未选择 Provider");
+      const model: AiModel = {
+        id: values.id || crypto.randomUUID(),
+        providerCode: modelProvider.code,
+        modelId: values.modelId.trim(),
+        displayName: values.displayName.trim(),
+        capabilities: values.capabilities,
+        driver: values.driver.trim(),
+        apiPath: values.apiPath.trim(),
+        enabled: values.enabled ?? true,
+        sortNo: values.sortNo ?? 0,
+        paramsJson: values.paramsJson || "{}",
+        remark: values.remark || "",
+        limits: values.limits ?? [],
+      };
+      return aiApi.writeModel(modelEditing ? "update" : "create", model);
+    },
+    onSuccess: async () => {
+      message.success("模型已保存");
+      setModelOpen(false);
+      await refresh();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const removeProvider = useMutation({
+    mutationFn: aiApi.deleteProvider,
+    onSuccess: refresh,
+    onError: (error: Error) => message.error(error.message),
+  });
+  const removeModel = useMutation({
+    mutationFn: aiApi.deleteModel,
+    onSuccess: refresh,
+    onError: (error: Error) => message.error(error.message),
+  });
+  const toggleProvider = useMutation({
+    mutationFn: (provider: AiProvider) => aiApi.writeProvider("update", { ...provider, enabled: !provider.enabled }),
+    onSuccess: refresh,
+    onError: (error: Error) => message.error(error.message),
+  });
+  const toggleModel = useMutation({
+    mutationFn: (model: AiModel) => aiApi.writeModel("update", { ...model, enabled: !model.enabled }),
+    onSuccess: refresh,
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const openProvider = (provider?: AiProvider) => {
+    setProviderEditing(provider);
+    providerForm.setFieldsValue(
+      provider
+        ? { ...provider, apiKey: undefined }
+        : { code: "", name: "", baseUrl: "", driver: "openai", priority: 0, enabled: true },
+    );
+    setProviderOpen(true);
+  };
+  const openModel = (provider: AiProvider, model?: AiModel) => {
+    setModelProvider(provider);
+    setModelEditing(model);
+    modelForm.setFieldsValue(
+      model ?? {
+        modelId: "",
+        displayName: "",
+        capabilities: ["text_reasoning"],
+        driver: provider.driver,
+        apiPath: "/v1/responses",
+        enabled: true,
+        sortNo: provider.models.length,
+        paramsJson: "{}",
+        remark: "",
+        limits: [],
+      },
+    );
+    setModelOpen(true);
+  };
+
+  const addRecommendation = async (recommendation: ModelRecommendation) => {
+    const existingProvider = providers.data?.find((provider) => provider.code === recommendation.providerCode);
+    const provider =
+      existingProvider ??
+      (await aiApi.writeProvider("create", {
+        code: recommendation.providerCode,
+        name: recommendation.providerName,
+        baseUrl: recommendation.defaultBaseUrl,
+        driver: recommendation.driver,
+        priority: providers.data?.length ?? 0,
+        enabled: true,
+        hasKey: false,
+        keyMask: null,
+        models: [],
+      }));
+    if (provider.models.some((model) => model.modelId === recommendation.modelId)) {
+      throw new Error("该模型已存在");
+    }
+    await aiApi.writeModel("create", {
+      id: crypto.randomUUID(),
+      providerCode: provider.code,
+      modelId: recommendation.modelId,
+      displayName: recommendation.displayName,
+      capabilities: recommendation.capabilities,
+      driver: recommendation.driver,
+      apiPath: "/v1/responses",
+      enabled: true,
+      sortNo: provider.models.length,
+      paramsJson: "{}",
+      remark: "从公共推荐清单添加",
+      limits: recommendation.defaultLimits,
+    });
+    await refresh();
+    message.success("推荐模型已添加");
+  };
+
+  const exportConfig = async () => {
+    setTransferMode("export");
+    setTransferText(await aiApi.exportConfig());
+  };
+  const previewImport = async () => {
+    const preview = await aiApi.importConfig(transferText, true);
+    setImportPreview(preview);
+  };
+  const applyImport = async () => {
+    await aiApi.importConfig(transferText, false);
+    message.success("配置已导入，已保留仍存在 Provider 的 API Key");
+    setTransferMode(undefined);
+    setImportPreview(undefined);
+    await refresh();
+  };
+
+  const modelColumns: ColumnsType<AiModel> = useMemo(
+    () => [
+      {
+        title: "模型",
+        render: (_, model) => (
+          <Space direction="vertical" size={0}>
+            <Typography.Text strong>{model.displayName}</Typography.Text>
+            <Typography.Text type="secondary">{model.modelId}</Typography.Text>
+          </Space>
+        ),
+      },
+      { title: "能力", render: (_, model) => <Space wrap>{model.capabilities.map((item) => <Tag key={item}>{item}</Tag>)}</Space> },
+      { title: "限额", render: (_, model) => model.limits.length ? `${model.limits.length} 项` : "不限量" },
+      { title: "启用", width: 72, render: (_, model) => <Switch size="small" checked={model.enabled} disabled={!canWrite} onChange={() => toggleModel.mutate(model)} /> },
+      {
+        title: "操作",
+        width: 120,
+        render: (_, model) => (
+          <Space>
+            <Button type="text" icon={<EditOutlined />} disabled={!canWrite} onClick={() => openModel(providers.data!.find((item) => item.code === model.providerCode)!, model)} />
+            <Popconfirm title="删除该模型？" onConfirm={() => removeModel.mutate(model.id)}>
+              <Button type="text" danger icon={<DeleteOutlined />} disabled={!canWrite} />
+            </Popconfirm>
+          </Space>
+        ),
+      },
+    ],
+    [canWrite, providers.data],
+  );
+
+  return (
+    <div className="page-stack">
+      <section className="page-heading">
+        <div>
+          <Typography.Title level={2}>Provider 与模型</Typography.Title>
+          <Typography.Text type="secondary">私有配置保存在 .codex-game/local，公共推荐清单可提交 Git。</Typography.Text>
+        </div>
+        <Space wrap>
+          <Button icon={<ExportOutlined />} onClick={() => void exportConfig()}>导出配置</Button>
+          <Button icon={<ImportOutlined />} disabled={!canWrite} onClick={() => { setTransferMode("import"); setTransferText(""); }}>导入配置</Button>
+          <Button icon={<CloudDownloadOutlined />} onClick={() => setRecommendationOpen(true)}>公共推荐</Button>
+          <Button type="primary" icon={<PlusOutlined />} disabled={!canWrite} onClick={() => openProvider()}>新建 Provider</Button>
+        </Space>
+      </section>
+
+      {recommendations.error && <Alert type="error" showIcon message="公共推荐文件校验失败" description={(recommendations.error as Error).message} />}
+      {recommendations.data && <Alert type="info" showIcon message={`公共推荐：${recommendations.data.path}`} description="该文件只包含公开元数据；API Key、启停、绑定、用量和熔断状态不会写入 Git。" />}
+
+      <Space direction="vertical" size="middle" className="workspace-main">
+        {(providers.data ?? []).map((provider) => (
+          <Card
+            key={provider.code}
+            className="content-card"
+            title={<Space><ApiOutlined /><span>{provider.name}</span><Tag>{provider.code}</Tag>{provider.hasKey ? <Tag color="success">Key {provider.keyMask}</Tag> : <Tag color="warning">未配置 Key</Tag>}</Space>}
+            extra={
+              <Space>
+                <Switch checked={provider.enabled} disabled={!canWrite} onChange={() => toggleProvider.mutate(provider)} />
+                <Button icon={<PlusOutlined />} disabled={!canWrite} onClick={() => openModel(provider)}>添加模型</Button>
+                <Button icon={<EditOutlined />} disabled={!canWrite} onClick={() => openProvider(provider)}>编辑</Button>
+                <Popconfirm title="删除 Provider 及其模型？" onConfirm={() => removeProvider.mutate(provider.code)}>
+                  <Button danger icon={<DeleteOutlined />} disabled={!canWrite}>删除</Button>
+                </Popconfirm>
+              </Space>
+            }
+          >
+            <Typography.Paragraph type="secondary">{provider.driver} · 优先级 {provider.priority} · {provider.baseUrl || "默认 Base URL"}</Typography.Paragraph>
+            <Table rowKey="id" size="small" pagination={false} dataSource={provider.models} columns={modelColumns} locale={{ emptyText: "尚未配置模型" }} />
+          </Card>
+        ))}
+        {!providers.isLoading && !providers.data?.length && <Card><Typography.Text type="secondary">尚未配置 Provider，可从公共推荐快速添加。</Typography.Text></Card>}
+      </Space>
+
+      <Modal title={providerEditing ? "编辑 Provider" : "新建 Provider"} open={providerOpen} confirmLoading={saveProvider.isPending} onCancel={() => setProviderOpen(false)} onOk={() => providerForm.submit()}>
+        <Form form={providerForm} layout="vertical" onFinish={(values) => saveProvider.mutate(values)}>
+          <Form.Item name="code" label="Code" rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]+$/ }]}><Input disabled={Boolean(providerEditing)} /></Form.Item>
+          <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="baseUrl" label="Base URL"><Input placeholder="https://api.example.com" /></Form.Item>
+          <Space className="form-row" align="start">
+            <Form.Item name="driver" label="Driver" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item name="priority" label="优先级"><InputNumber /></Form.Item>
+            <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+          </Space>
+          <Form.Item name="apiKey" label="API Key" extra={providerEditing?.hasKey ? `留空保持现有 Key（${providerEditing.keyMask}）；输入新值将替换。` : "明文只写入 ignored local secret 文件。"}><Input.Password /></Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal width={720} title={modelEditing ? "编辑模型" : "添加模型"} open={modelOpen} confirmLoading={saveModel.isPending} onCancel={() => setModelOpen(false)} onOk={() => modelForm.submit()}>
+        <Form form={modelForm} layout="vertical" onFinish={(values) => saveModel.mutate(values)}>
+          <Form.Item name="id" hidden><Input /></Form.Item>
+          <Space className="form-row" align="start">
+            <Form.Item name="modelId" label="模型 ID" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item name="displayName" label="展示名" rules={[{ required: true }]}><Input /></Form.Item>
+          </Space>
+          <Form.Item name="capabilities" label="能力" rules={[{ required: true }]}><Select mode="multiple" options={capabilityOptions} /></Form.Item>
+          <Space className="form-row" align="start">
+            <Form.Item name="driver" label="Driver" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item name="apiPath" label="API Path"><Input /></Form.Item>
+            <Form.Item name="sortNo" label="排序"><InputNumber /></Form.Item>
+            <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+          </Space>
+          <Form.Item name="paramsJson" label="参数 JSON" rules={[{ validator: (_, value) => { try { JSON.parse(value || "{}"); return Promise.resolve(); } catch { return Promise.reject(new Error("请输入合法 JSON")); } } }]}><Input.TextArea rows={3} /></Form.Item>
+          <Form.Item name="remark" label="备注"><Input /></Form.Item>
+          <Collapse items={[{ key: "limits", label: "模型限额", children: <LimitFields /> }]} />
+        </Form>
+      </Modal>
+
+      <Modal width={760} title="公共模型推荐" open={recommendationOpen} footer={null} onCancel={() => setRecommendationOpen(false)}>
+        <Table<ModelRecommendation>
+          rowKey={(item) => `${item.providerCode}:${item.modelId}`}
+          dataSource={recommendations.data?.recommendations ?? []}
+          pagination={false}
+          columns={[
+            { title: "Provider", dataIndex: "providerName" },
+            { title: "模型", render: (_, item) => <Space direction="vertical" size={0}><Typography.Text strong>{item.displayName}</Typography.Text><Typography.Text type="secondary">{item.modelId}</Typography.Text></Space> },
+            { title: "能力", render: (_, item) => <Space wrap>{item.capabilities.map((value) => <Tag key={value}>{value}</Tag>)}</Space> },
+            { title: "", render: (_, item) => <Button type="link" disabled={!canWrite} onClick={() => void addRecommendation(item).catch((error: Error) => message.error(error.message))}>快速添加</Button> },
+          ]}
+        />
+      </Modal>
+
+      <Modal
+        width={720}
+        title={transferMode === "export" ? "导出无密钥配置" : "导入无密钥配置"}
+        open={Boolean(transferMode)}
+        onCancel={() => { setTransferMode(undefined); setImportPreview(undefined); }}
+        footer={transferMode === "import" ? <Space><Button onClick={() => setTransferMode(undefined)}>取消</Button><Button onClick={() => void previewImport().catch((error: Error) => message.error(error.message))}>校验预览</Button><Button type="primary" disabled={!importPreview} onClick={() => void applyImport().catch((error: Error) => message.error(error.message))}>确认覆盖</Button></Space> : <Button onClick={() => setTransferMode(undefined)}>关闭</Button>}
+      >
+        <Alert type="warning" showIcon message="导入导出不包含任何 API Key" />
+        {importPreview && <Alert className="modal-alert" type="success" showIcon message={`校验通过：${importPreview.providerCount} 个 Provider，${importPreview.modelCount} 个模型`} />}
+        <Input.TextArea className="config-json" rows={18} readOnly={transferMode === "export"} value={transferText} onChange={(event) => { setTransferText(event.target.value); setImportPreview(undefined); }} />
+      </Modal>
+    </div>
+  );
+}
+
+function LimitFields() {
+  return (
+    <Form.List name="limits">
+      {(fields, { add, remove }) => (
+        <Space direction="vertical" className="workspace-main">
+          {fields.map((field) => (
+            <Space key={field.key} align="start" wrap>
+              <Form.Item name={[field.name, "limitKind"]} rules={[{ required: true }]}><Select placeholder="口径" options={limitKinds.map((value) => ({ value, label: value }))} style={{ width: 150 }} /></Form.Item>
+              <Form.Item name={[field.name, "maxValue"]} rules={[{ required: true }]}><InputNumber min={0} placeholder="0 为不限" /></Form.Item>
+              <Form.Item name={[field.name, "periodExpr"]} rules={[{ required: true }]}><Input placeholder="例如 1d" /></Form.Item>
+              <Form.Item name={[field.name, "groupName"]} rules={[{ required: true }]}><Input placeholder="共享组" /></Form.Item>
+              <Button danger type="text" icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
+            </Space>
+          ))}
+          <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ limitKind: "calls", maxValue: 0, periodExpr: "1d", groupName: "default" })}>增加限额</Button>
+        </Space>
+      )}
+    </Form.List>
+  );
+}

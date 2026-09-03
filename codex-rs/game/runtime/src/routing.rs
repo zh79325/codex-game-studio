@@ -92,7 +92,7 @@ pub struct RouteHealth {
 
 #[derive(Debug)]
 pub struct RouteSelector {
-    candidates: Vec<RouteCandidate>,
+    candidates: Mutex<Vec<RouteCandidate>>,
     bindings: Mutex<HashMap<String, RouteDecision>>,
     unavailable_accounts: Mutex<HashSet<String>>,
     remaining_quota: Mutex<HashMap<(String, String), u64>>,
@@ -102,7 +102,7 @@ pub struct RouteSelector {
 impl RouteSelector {
     pub fn new(candidates: Vec<RouteCandidate>) -> Self {
         Self {
-            candidates,
+            candidates: Mutex::new(candidates),
             bindings: Mutex::new(HashMap::new()),
             unavailable_accounts: Mutex::new(HashSet::new()),
             remaining_quota: Mutex::new(HashMap::new()),
@@ -110,8 +110,38 @@ impl RouteSelector {
         }
     }
 
-    pub fn candidates(&self) -> &[RouteCandidate] {
-        &self.candidates
+    pub fn candidates(&self) -> Result<Vec<RouteCandidate>, RouteError> {
+        self.candidates
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)
+            .map(|candidates| candidates.clone())
+    }
+
+    pub fn replace_candidates(&self, candidates: Vec<RouteCandidate>) -> Result<(), RouteError> {
+        let mut current = self
+            .candidates
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)?;
+        if *current != candidates {
+            let candidate_ids = candidates
+                .iter()
+                .map(|candidate| candidate.account_id.as_str())
+                .collect::<HashSet<_>>();
+            self.unavailable_accounts
+                .lock()
+                .map_err(|_| RouteError::StateUnavailable)?
+                .retain(|account_id| candidate_ids.contains(account_id.as_str()));
+            *current = candidates;
+        }
+        Ok(())
+    }
+
+    pub fn reset_transient_failures(&self) -> Result<(), RouteError> {
+        self.unavailable_accounts
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)?
+            .clear();
+        Ok(())
     }
 
     pub fn current_binding(&self, scope: &str) -> Result<Option<RouteDecision>, RouteError> {
@@ -147,6 +177,10 @@ impl RouteSelector {
         capability: Capability,
         binding_scope: &str,
     ) -> Result<(RouteDecision, RouteEvent), RouteError> {
+        let candidates = self
+            .candidates
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)?;
         let mut bindings = self
             .bindings
             .lock()
@@ -156,7 +190,7 @@ impl RouteSelector {
             .lock()
             .map_err(|_| RouteError::StateUnavailable)?;
         if let Some(bound) = bindings.get(binding_scope)
-            && self.candidates.iter().any(|candidate| {
+            && candidates.iter().any(|candidate| {
                 candidate.available
                     && !unavailable.contains(&candidate.account_id)
                     && candidate.account_id == bound.account_id
@@ -179,13 +213,13 @@ impl RouteSelector {
         };
         let candidate = previous
             .and_then(|bound| {
-                self.candidates.iter().find(|candidate| {
+                candidates.iter().find(|candidate| {
                     available(candidate)
                         && candidate.provider == bound.provider
                         && candidate.model == bound.model
                 })
             })
-            .or_else(|| self.candidates.iter().find(available))
+            .or_else(|| candidates.iter().find(available))
             .ok_or(RouteError::CapabilityUnavailable)?;
         let decision = RouteDecision {
             account_id: candidate.account_id.clone(),
@@ -222,16 +256,19 @@ impl RouteSelector {
         decision: &RouteDecision,
         outcome: RouteOutcome,
     ) -> Result<(), RouteError> {
-        if matches!(
+        let mut unavailable = self
+            .unavailable_accounts
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)?;
+        if matches!(outcome, RouteOutcome::Succeeded) {
+            unavailable.remove(&decision.account_id);
+        } else if matches!(
             outcome,
             RouteOutcome::Failed(RouteFailureKind::Retryable)
                 | RouteOutcome::Failed(RouteFailureKind::CapabilityUnavailable)
                 | RouteOutcome::Failed(RouteFailureKind::Fatal)
         ) {
-            self.unavailable_accounts
-                .lock()
-                .map_err(|_| RouteError::StateUnavailable)?
-                .insert(decision.account_id.clone());
+            unavailable.insert(decision.account_id.clone());
         }
         Ok(())
     }
@@ -285,14 +322,17 @@ impl RouteSelector {
     }
 
     pub fn health(&self, capability: Capability) -> Result<RouteHealth, RouteError> {
+        let candidates = self
+            .candidates
+            .lock()
+            .map_err(|_| RouteError::StateUnavailable)?;
         let unavailable = self
             .unavailable_accounts
             .lock()
             .map_err(|_| RouteError::StateUnavailable)?;
         Ok(RouteHealth {
             capability,
-            available_candidates: self
-                .candidates
+            available_candidates: candidates
                 .iter()
                 .filter(|candidate| {
                     candidate.available
@@ -329,6 +369,25 @@ mod tests {
             .select(Capability::TextReasoning, "conversation:1")
             .expect("fallback route");
         assert_eq!(switched.account_id, "b");
+        assert!(matches!(event, RouteEvent::Switched { .. }));
+    }
+
+    #[test]
+    fn refreshes_candidates_and_switches_an_invalid_sticky_route() {
+        let selector = RouteSelector::new(vec![candidate("a", "model-a")]);
+        let (first, _) = selector
+            .select(Capability::TextReasoning, "conversation:1")
+            .expect("initial route");
+        assert_eq!(first.account_id, "a");
+
+        selector
+            .replace_candidates(vec![candidate("b", "model-b")])
+            .expect("replace candidates");
+        let (second, event) = selector
+            .select(Capability::TextReasoning, "conversation:1")
+            .expect("refreshed route");
+
+        assert_eq!(second.account_id, "b");
         assert!(matches!(event, RouteEvent::Switched { .. }));
     }
 

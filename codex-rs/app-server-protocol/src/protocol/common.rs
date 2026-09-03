@@ -611,6 +611,96 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameArtBibleReadResponse,
     },
+    #[experimental("game/aiProvider/list")]
+    GameAiProviderList => "game/aiProvider/list" {
+        params: v2::GameAiProviderListParams,
+        serialization: global_shared_read("game-ai"),
+        response: v2::GameAiProviderListResponse,
+    },
+    #[experimental("game/aiProvider/create")]
+    GameAiProviderCreate => "game/aiProvider/create" {
+        params: v2::GameAiProviderWriteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiProviderCreateResponse,
+    },
+    #[experimental("game/aiProvider/update")]
+    GameAiProviderUpdate => "game/aiProvider/update" {
+        params: v2::GameAiProviderWriteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiProviderUpdateResponse,
+    },
+    #[experimental("game/aiProvider/delete")]
+    GameAiProviderDelete => "game/aiProvider/delete" {
+        params: v2::GameAiProviderDeleteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiProviderDeleteResponse,
+    },
+    #[experimental("game/aiModel/create")]
+    GameAiModelCreate => "game/aiModel/create" {
+        params: v2::GameAiModelWriteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiModelCreateResponse,
+    },
+    #[experimental("game/aiModel/update")]
+    GameAiModelUpdate => "game/aiModel/update" {
+        params: v2::GameAiModelWriteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiModelUpdateResponse,
+    },
+    #[experimental("game/aiModel/delete")]
+    GameAiModelDelete => "game/aiModel/delete" {
+        params: v2::GameAiModelDeleteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiModelDeleteResponse,
+    },
+    #[experimental("game/aiAgent/list")]
+    GameAiAgentList => "game/aiAgent/list" {
+        params: v2::GameAiAgentListParams,
+        serialization: global_shared_read("game-ai"),
+        response: v2::GameAiAgentListResponse,
+    },
+    #[experimental("game/aiAgentBinding/write")]
+    GameAiAgentBindingWrite => "game/aiAgentBinding/write" {
+        params: v2::GameAiAgentBindingWriteParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiAgentBindingWriteResponse,
+    },
+    #[experimental("game/aiUsage/read")]
+    GameAiUsageRead => "game/aiUsage/read" {
+        params: v2::GameAiUsageReadParams,
+        serialization: global_shared_read("game-ai"),
+        response: v2::GameAiUsageReadResponse,
+    },
+    #[experimental("game/aiUsage/reset")]
+    GameAiUsageReset => "game/aiUsage/reset" {
+        params: v2::GameAiUsageResetParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiUsageResetResponse,
+    },
+    #[experimental("game/aiBreaker/clear")]
+    GameAiBreakerClear => "game/aiBreaker/clear" {
+        params: v2::GameAiBreakerClearParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiBreakerClearResponse,
+    },
+    #[experimental("game/modelRecommendation/list")]
+    GameModelRecommendationList => "game/modelRecommendation/list" {
+        params: v2::GameModelRecommendationListParams,
+        serialization: global_shared_read("game-ai"),
+        response: v2::GameModelRecommendationListResponse,
+    },
+    #[experimental("game/aiConfig/export")]
+    GameAiConfigExport => "game/aiConfig/export" {
+        params: v2::GameAiConfigExportParams,
+        serialization: global_shared_read("game-ai"),
+        response: v2::GameAiConfigExportResponse,
+    },
+    #[experimental("game/aiConfig/import")]
+    GameAiConfigImport => "game/aiConfig/import" {
+        params: v2::GameAiConfigImportParams,
+        serialization: global("game-ai"),
+        response: v2::GameAiConfigImportResponse,
+    },
 
     /// NEW APIs
     // Thread lifecycle

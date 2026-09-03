@@ -223,9 +223,15 @@ mod tests {
             event_payload_json: "{}".to_string(),
         };
         assert!(
-            record_usage(&studio, "account-a", "attempt-a", std::slice::from_ref(&usage), 2)
-                .await
-                .expect("first usage")
+            record_usage(
+                &studio,
+                "account-a",
+                "attempt-a",
+                std::slice::from_ref(&usage),
+                2
+            )
+            .await
+            .expect("first usage")
         );
         assert!(
             !record_usage(&studio, "account-a", "attempt-a", &[usage], 3)

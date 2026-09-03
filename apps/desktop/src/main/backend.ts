@@ -1,6 +1,8 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
   BackendState,
   GamePingResponse,
@@ -22,7 +24,11 @@ export class BackendSupervisor extends EventEmitter {
   private state: BackendState = { type: "starting" };
   private stopping = false;
 
-  constructor(private readonly executable: string) {
+  constructor(
+    private readonly executable: string,
+    private readonly workspaceRoot: string,
+    private readonly codexHome: string,
+  ) {
     super();
   }
 
@@ -51,7 +57,38 @@ export class BackendSupervisor extends EventEmitter {
     if (this.state.type === "readOnly" && !isReadOnlyMethod(method)) {
       throw new Error("项目当前以只读模式打开，不能执行写操作");
     }
-    return this.send<T>(method, params);
+    const result = await this.send<T>(method, params);
+    if (RESTART_AFTER_METHODS.has(method)) {
+      setTimeout(() => this.restart(), 0);
+    }
+    return result;
+  }
+
+  private restart(): void {
+    if (!this.child) {
+      this.spawnBackend();
+      return;
+    }
+    this.initialized = false;
+    this.emitState({ type: "recovering" });
+    this.child.kill();
+  }
+
+  private providerEnvironment(): NodeJS.ProcessEnv {
+    const path = join(dirname(this.codexHome), "ai-secrets.json");
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+        providerKeys?: Record<string, string>;
+      };
+      return Object.fromEntries(
+        Object.entries(parsed.providerKeys ?? {}).map(([code, key]) => [
+          providerKeyEnvironment(code),
+          key,
+        ]),
+      );
+    } catch {
+      return {};
+    }
   }
 
   private spawnBackend(): void {
@@ -59,7 +96,12 @@ export class BackendSupervisor extends EventEmitter {
     this.initialized = false;
     const child = spawn(this.executable, ["--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      cwd: this.workspaceRoot,
+      env: {
+        ...process.env,
+        ...this.providerEnvironment(),
+        CODEX_HOME: this.codexHome,
+      },
     });
     this.child = child;
     createInterface({ input: child.stdout }).on("line", (line) =>
@@ -161,6 +203,13 @@ export class BackendSupervisor extends EventEmitter {
   }
 }
 
+const RESTART_AFTER_METHODS = new Set([
+  "game/aiProvider/create",
+  "game/aiProvider/update",
+  "game/aiProvider/delete",
+  "game/aiConfig/import",
+]);
+
 const READ_ONLY_METHODS = new Set([
   "game/ping",
   "game/project/create",
@@ -173,7 +222,16 @@ const READ_ONLY_METHODS = new Set([
   "game/task/list",
   "game/artBible/list",
   "game/artBible/read",
+  "game/aiProvider/list",
+  "game/aiAgent/list",
+  "game/aiUsage/read",
+  "game/modelRecommendation/list",
+  "game/aiConfig/export",
 ]);
+
+function providerKeyEnvironment(code: string): string {
+  return `CODEX_GAME_PROVIDER_${code.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}_API_KEY`;
+}
 
 function isReadOnlyMethod(method: string): boolean {
   return READ_ONLY_METHODS.has(method);

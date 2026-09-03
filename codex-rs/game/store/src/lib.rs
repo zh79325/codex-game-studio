@@ -1,7 +1,9 @@
+mod ai_config;
 mod database;
 mod project_files;
 mod studio;
 
+pub use ai_config::*;
 pub use database::*;
 pub use project_files::*;
 pub use studio::*;

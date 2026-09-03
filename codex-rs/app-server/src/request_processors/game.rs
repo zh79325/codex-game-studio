@@ -346,6 +346,153 @@ impl GameRequestProcessor {
         self.adapter.art_bible_read(params).map_err(game_error)
     }
 
+    pub(crate) async fn ai_provider_list(
+        &self,
+        params: GameAiProviderListParams,
+    ) -> std::result::Result<GameAiProviderListResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_provider_list(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_provider_create(
+        &self,
+        params: GameAiProviderWriteParams,
+    ) -> std::result::Result<GameAiProviderCreateResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_provider_write(params)
+            .await
+            .map(|provider| GameAiProviderCreateResponse { provider })
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_provider_update(
+        &self,
+        params: GameAiProviderWriteParams,
+    ) -> std::result::Result<GameAiProviderUpdateResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_provider_write(params)
+            .await
+            .map(|provider| GameAiProviderUpdateResponse { provider })
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_provider_delete(
+        &self,
+        params: GameAiProviderDeleteParams,
+    ) -> std::result::Result<GameAiProviderDeleteResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_provider_delete(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_model_create(
+        &self,
+        params: GameAiModelWriteParams,
+    ) -> std::result::Result<GameAiModelCreateResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_model_write(params)
+            .await
+            .map(|model| GameAiModelCreateResponse { model })
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_model_update(
+        &self,
+        params: GameAiModelWriteParams,
+    ) -> std::result::Result<GameAiModelUpdateResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_model_write(params)
+            .await
+            .map(|model| GameAiModelUpdateResponse { model })
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_model_delete(
+        &self,
+        params: GameAiModelDeleteParams,
+    ) -> std::result::Result<GameAiModelDeleteResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_model_delete(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_agent_list(
+        &self,
+        params: GameAiAgentListParams,
+    ) -> std::result::Result<GameAiAgentListResponse, JSONRPCErrorError> {
+        self.adapter.ai_agent_list(params).await.map_err(game_error)
+    }
+
+    pub(crate) async fn ai_agent_binding_write(
+        &self,
+        params: GameAiAgentBindingWriteParams,
+    ) -> std::result::Result<GameAiAgentBindingWriteResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_agent_binding_write(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_usage_read(
+        &self,
+        params: GameAiUsageReadParams,
+    ) -> std::result::Result<GameAiUsageReadResponse, JSONRPCErrorError> {
+        self.adapter.ai_usage_read(params).await.map_err(game_error)
+    }
+
+    pub(crate) async fn ai_usage_reset(
+        &self,
+        params: GameAiUsageResetParams,
+    ) -> std::result::Result<GameAiUsageResetResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_usage_reset(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_breaker_clear(
+        &self,
+        params: GameAiBreakerClearParams,
+    ) -> std::result::Result<GameAiBreakerClearResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_breaker_clear(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) fn model_recommendation_list(
+        &self,
+        params: GameModelRecommendationListParams,
+    ) -> std::result::Result<GameModelRecommendationListResponse, JSONRPCErrorError> {
+        self.adapter
+            .model_recommendation_list(params)
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_config_export(
+        &self,
+        params: GameAiConfigExportParams,
+    ) -> std::result::Result<GameAiConfigExportResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_config_export(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn ai_config_import(
+        &self,
+        params: GameAiConfigImportParams,
+    ) -> std::result::Result<GameAiConfigImportResponse, JSONRPCErrorError> {
+        self.adapter
+            .ai_config_import(params)
+            .await
+            .map_err(game_error)
+    }
+
     async fn notify_task_started(
         &self,
         conversation_id: &str,

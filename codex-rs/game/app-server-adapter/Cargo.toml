@@ -17,6 +17,13 @@ codex-game-app-server-protocol = { workspace = true }
 codex-game-domain = { workspace = true }
 codex-game-import = { workspace = true }
 codex-game-runtime = { workspace = true }
+codex-game-store = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+toml = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

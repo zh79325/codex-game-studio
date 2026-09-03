@@ -230,3 +230,148 @@ game_dto!(GameArtBibleReadResponse {
     version: GameArtBibleVersion,
     markdown: String
 });
+
+game_dto!(GameAiLimit {
+    limit_kind: String,
+    max_value: u64,
+    period_expr: String,
+    group_name: String
+});
+game_dto!(GameAiModel {
+    id: String,
+    provider_code: String,
+    model_id: String,
+    display_name: String,
+    capabilities: Vec<String>,
+    driver: String,
+    api_path: String,
+    enabled: bool,
+    sort_no: i64,
+    params_json: String,
+    remark: String,
+    limits: Vec<GameAiLimit>
+});
+game_dto!(GameAiProvider {
+    code: String,
+    name: String,
+    base_url: String,
+    driver: String,
+    priority: i64,
+    enabled: bool,
+    has_key: bool,
+    key_mask: Option<String>,
+    models: Vec<GameAiModel>
+});
+game_dto!(GameAiAgent {
+    agent_code: String,
+    role: String,
+    capability: String,
+    output_contract: String,
+    source_file: String,
+    model_ids: Vec<String>
+});
+game_dto!(GameAiUsageBudget {
+    limit_kind: String,
+    used: u64,
+    limit: u64,
+    period_expr: String,
+    window_key: String,
+    group_name: String,
+    source: String,
+    exhausted: bool,
+    unlimited: bool
+});
+game_dto!(GameAiBreaker {
+    failure_count: u32,
+    last_reason: Option<String>,
+    opened_at: Option<i64>,
+    retry_at: Option<i64>
+});
+game_dto!(GameAiModelUsage {
+    provider_code: String,
+    provider_name: String,
+    provider_model_id: String,
+    model_id: String,
+    provider_enabled: bool,
+    enabled: bool,
+    has_key: bool,
+    agents: Vec<String>,
+    budgets: Vec<GameAiUsageBudget>,
+    breaker: Option<GameAiBreaker>
+});
+game_dto!(GameModelRecommendation {
+    provider_code: String,
+    provider_name: String,
+    driver: String,
+    default_base_url: String,
+    model_id: String,
+    display_name: String,
+    capabilities: Vec<String>,
+    recommended: bool,
+    default_limits: Vec<GameAiLimit>
+});
+
+empty_params!(GameAiProviderListParams);
+game_dto!(GameAiProviderListResponse { providers: Vec<GameAiProvider> });
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct GameAiProviderWriteParams {
+    pub provider: GameAiProvider,
+    #[ts(optional = nullable)]
+    pub api_key: Option<String>,
+}
+game_dto!(GameAiProviderCreateResponse {
+    provider: GameAiProvider
+});
+game_dto!(GameAiProviderUpdateResponse {
+    provider: GameAiProvider
+});
+game_dto!(GameAiProviderDeleteParams { code: String });
+empty_params!(GameAiProviderDeleteResponse);
+
+game_dto!(GameAiModelWriteParams { model: GameAiModel });
+game_dto!(GameAiModelCreateResponse { model: GameAiModel });
+game_dto!(GameAiModelUpdateResponse { model: GameAiModel });
+game_dto!(GameAiModelDeleteParams { model_id: String });
+empty_params!(GameAiModelDeleteResponse);
+
+empty_params!(GameAiAgentListParams);
+game_dto!(GameAiAgentListResponse { agents: Vec<GameAiAgent> });
+game_dto!(GameAiAgentBindingWriteParams {
+    agent_code: String,
+    model_ids: Vec<String>
+});
+empty_params!(GameAiAgentBindingWriteResponse);
+
+empty_params!(GameAiUsageReadParams);
+game_dto!(GameAiUsageReadResponse { items: Vec<GameAiModelUsage> });
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct GameAiUsageResetParams {
+    pub model_id: String,
+    #[ts(optional = nullable)]
+    pub limit_kind: Option<String>,
+}
+game_dto!(GameAiUsageResetResponse { cleared: u64 });
+game_dto!(GameAiBreakerClearParams { model_id: String });
+empty_params!(GameAiBreakerClearResponse);
+
+empty_params!(GameModelRecommendationListParams);
+game_dto!(GameModelRecommendationListResponse {
+    recommendations: Vec<GameModelRecommendation>,
+    path: String
+});
+empty_params!(GameAiConfigExportParams);
+game_dto!(GameAiConfigExportResponse { json: String });
+game_dto!(GameAiConfigImportParams {
+    json: String,
+    dry_run: bool
+});
+game_dto!(GameAiConfigImportResponse {
+    provider_count: u64,
+    model_count: u64,
+    applied: bool
+});

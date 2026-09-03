@@ -29,6 +29,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod ai_config;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameTurnProjection {
     pub attempt_id: String,
@@ -51,18 +53,21 @@ pub struct CancelledTaskAttempt {
 #[derive(Debug, Default)]
 pub struct GameAppServerAdapter {
     runtime: GameRuntime,
+    studio_storage: PathBuf,
 }
 
 impl GameAppServerAdapter {
     pub fn new(studio_storage: PathBuf) -> Self {
         Self {
-            runtime: GameRuntime::new(studio_storage),
+            runtime: GameRuntime::new(studio_storage.clone()),
+            studio_storage,
         }
     }
 
     pub fn new_with_routes(studio_storage: PathBuf, candidates: Vec<RouteCandidate>) -> Self {
         Self {
-            runtime: GameRuntime::new_with_routes(studio_storage, candidates),
+            runtime: GameRuntime::new_with_routes(studio_storage.clone(), candidates),
+            studio_storage,
         }
     }
 
@@ -98,6 +103,13 @@ impl GameAppServerAdapter {
                     &completion.conversation_id,
                     RouteOutcome::Failed(RouteFailureKind::Retryable),
                 )
+                .await
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+        } else if let Some(completion) = &completion {
+            self.runtime
+                .orchestrator()
+                .report_route_outcome(&completion.conversation_id, RouteOutcome::Succeeded)
+                .await
                 .map_err(|_| GameServiceError::StateUnavailable)?;
         }
         Ok(completion.map(turn_projection))

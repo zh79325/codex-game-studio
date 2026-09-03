@@ -1128,6 +1128,80 @@ impl MessageProcessor {
                 .game_processor
                 .art_bible_read(params)
                 .map(|response| Some(response.into())),
+            ClientRequest::GameAiProviderList { params, .. } => self
+                .game_processor
+                .ai_provider_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiProviderCreate { params, .. } => self
+                .game_processor
+                .ai_provider_create(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiProviderUpdate { params, .. } => self
+                .game_processor
+                .ai_provider_update(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiProviderDelete { params, .. } => self
+                .game_processor
+                .ai_provider_delete(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiModelCreate { params, .. } => self
+                .game_processor
+                .ai_model_create(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiModelUpdate { params, .. } => self
+                .game_processor
+                .ai_model_update(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiModelDelete { params, .. } => self
+                .game_processor
+                .ai_model_delete(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiAgentList { params, .. } => self
+                .game_processor
+                .ai_agent_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiAgentBindingWrite { params, .. } => self
+                .game_processor
+                .ai_agent_binding_write(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiUsageRead { params, .. } => self
+                .game_processor
+                .ai_usage_read(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiUsageReset { params, .. } => self
+                .game_processor
+                .ai_usage_reset(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiBreakerClear { params, .. } => self
+                .game_processor
+                .ai_breaker_clear(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameModelRecommendationList { params, .. } => self
+                .game_processor
+                .model_recommendation_list(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiConfigExport { params, .. } => self
+                .game_processor
+                .ai_config_export(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameAiConfigImport { params, .. } => self
+                .game_processor
+                .ai_config_import(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)

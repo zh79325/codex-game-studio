@@ -94,3 +94,9 @@ CHANGELOG.ignore.md
 # Python bytecode files
 __pycache__/
 *.pyc
+
+# Codex Game Studio workspace-local runtime data
+/.codex-game/local/
+/.codex-game/*.db
+/.codex-game/*.db-*
+/.codex-game/*.lock

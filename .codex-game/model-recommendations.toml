@@ -1,0 +1,55 @@
+schema_version = 1
+
+[[providers]]
+code = "openai"
+name = "OpenAI"
+driver = "openai"
+default_base_url = "https://api.openai.com/v1"
+
+[[providers.models]]
+model_id = "gpt-5"
+display_name = "GPT-5"
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
+recommended = true
+
+[[providers.models.default_limits]]
+limit_kind = "calls"
+max_value = 0
+period = "day"
+group_name = "default"
+
+[[providers]]
+code = "anthropic"
+name = "Anthropic"
+driver = "anthropic"
+default_base_url = "https://api.anthropic.com"
+
+[[providers.models]]
+model_id = "claude-sonnet-4-5"
+display_name = "Claude Sonnet 4.5"
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
+recommended = true
+
+[[providers.models.default_limits]]
+limit_kind = "calls"
+max_value = 0
+period = "day"
+group_name = "default"
+
+[[providers]]
+code = "google"
+name = "Google AI"
+driver = "google"
+default_base_url = "https://generativelanguage.googleapis.com"
+
+[[providers.models]]
+model_id = "gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro"
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
+recommended = true
+
+[[providers.models.default_limits]]
+limit_kind = "calls"
+max_value = 0
+period = "day"
+group_name = "default"

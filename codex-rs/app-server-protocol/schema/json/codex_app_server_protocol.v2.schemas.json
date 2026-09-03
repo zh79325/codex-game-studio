@@ -8246,6 +8246,389 @@
       "title": "FuzzyFileSearchSessionUpdatedNotification",
       "type": "object"
     },
+    "GameArtBibleVersion": {
+      "properties": {
+        "contentHash": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contentHash",
+        "createdAt",
+        "id",
+        "projectId",
+        "version"
+      ],
+      "type": "object"
+    },
+    "GameArtifactCommittedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "artifactType": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "artifactType",
+        "conversationId"
+      ],
+      "title": "GameArtifactCommittedNotification",
+      "type": "object"
+    },
+    "GameAttemptUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attemptId",
+        "conversationId",
+        "status",
+        "taskId"
+      ],
+      "title": "GameAttemptUpdatedNotification",
+      "type": "object"
+    },
+    "GameBackendStatus": {
+      "enum": [
+        "starting",
+        "recovering",
+        "ready",
+        "readOnly"
+      ],
+      "type": "string"
+    },
+    "GameConflict": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "highImpact": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "description",
+        "highImpact",
+        "key",
+        "options"
+      ],
+      "type": "object"
+    },
+    "GameConversation": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "targetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "createdAt",
+        "id",
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "GameDesignConfirmationRequiredNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "conflictCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "workflowId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conflictCount",
+        "conversationId",
+        "workflowId"
+      ],
+      "title": "GameDesignConfirmationRequiredNotification",
+      "type": "object"
+    },
+    "GameFocusAction": {
+      "enum": [
+        "submitClarification",
+        "acceptBrief",
+        "completeReviews",
+        "completeMerge",
+        "recordConflictDecision",
+        "confirmArtBible",
+        "versionArtBible"
+      ],
+      "type": "string"
+    },
+    "GameFocusWorkflow": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "workflowVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "id",
+        "inputVersion",
+        "projectId",
+        "state",
+        "workflowVersion"
+      ],
+      "type": "object"
+    },
+    "GameMessage": {
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "createdAt",
+        "id",
+        "role"
+      ],
+      "type": "object"
+    },
+    "GameProject": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "root",
+        "state"
+      ],
+      "type": "object"
+    },
+    "GameRecoveryStatusNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/GameBackendStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "GameRecoveryStatusNotification",
+      "type": "object"
+    },
+    "GameReviewReport": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
+        },
+        "findings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "recommendations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "risks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentCode",
+        "findings",
+        "recommendations",
+        "risks"
+      ],
+      "type": "object"
+    },
+    "GameTask": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentCode",
+        "id",
+        "stage",
+        "status"
+      ],
+      "type": "object"
+    },
+    "GameTaskUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "status",
+        "taskId"
+      ],
+      "title": "GameTaskUpdatedNotification",
+      "type": "object"
+    },
+    "GameUserDecision": {
+      "properties": {
+        "conflictKey": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOption": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conflictKey",
+        "selectedOption"
+      ],
+      "type": "object"
+    },
+    "GameWorkflowUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "workflow": {
+          "$ref": "#/definitions/GameFocusWorkflow"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "title": "GameWorkflowUpdatedNotification",
+      "type": "object"
+    },
     "GetAccountParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -15762,6 +16145,126 @@
             "params"
           ],
           "title": "Project/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/workflow/updated"
+              ],
+              "title": "Game/workflow/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameWorkflowUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/workflow/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/task/updated"
+              ],
+              "title": "Game/task/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameTaskUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/task/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/attempt/updated"
+              ],
+              "title": "Game/attempt/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameAttemptUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/attempt/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/artifact/committed"
+              ],
+              "title": "Game/artifact/committedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameArtifactCommittedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/artifact/committedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/designConfirmation/required"
+              ],
+              "title": "Game/designConfirmation/requiredNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameDesignConfirmationRequiredNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/designConfirmation/requiredNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/recovery/status"
+              ],
+              "title": "Game/recovery/statusNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GameRecoveryStatusNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/recovery/statusNotification",
           "type": "object"
         },
         {

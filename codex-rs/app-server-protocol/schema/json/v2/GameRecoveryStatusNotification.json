@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "GameBackendStatus": {
+      "enum": [
+        "starting",
+        "recovering",
+        "ready",
+        "readOnly"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "status": {
+      "$ref": "#/definitions/GameBackendStatus"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "GameRecoveryStatusNotification",
+  "type": "object"
+}

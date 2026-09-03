@@ -1071,6 +1071,7 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            game_event_sender: None,
         }
     }
 
@@ -1202,6 +1203,7 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            game_event_sender: None,
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();

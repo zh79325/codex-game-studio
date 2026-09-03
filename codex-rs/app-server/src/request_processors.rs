@@ -547,6 +547,7 @@ mod feedback_doctor_report;
 mod feedback_processor;
 mod feedback_thread_index;
 mod fs_processor;
+mod game;
 mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;
@@ -577,6 +578,7 @@ pub(crate) use diagnostics::read_server_diagnostics;
 pub(crate) use environment_processor::EnvironmentRequestProcessor;
 pub(crate) use feedback_processor::FeedbackRequestProcessor;
 pub(crate) use fs_processor::FsRequestProcessor;
+pub(crate) use game::GameRequestProcessor;
 pub(crate) use git_processor::GitRequestProcessor;
 pub(crate) use initialize_processor::InitializeRequestProcessor;
 pub(crate) use marketplace_processor::MarketplaceRequestProcessor;
@@ -696,6 +698,8 @@ use self::thread_lifecycle::*;
 use self::thread_resume_redaction::*;
 use self::thread_summary::*;
 
+pub(crate) use self::thread_lifecycle::ListenerTaskContext;
+pub(crate) use self::thread_lifecycle::ensure_conversation_listener;
 pub(crate) use self::thread_lifecycle::populate_thread_turns_from_history;
 pub(crate) use self::thread_processor::thread_from_stored_thread;
 #[cfg(test)]

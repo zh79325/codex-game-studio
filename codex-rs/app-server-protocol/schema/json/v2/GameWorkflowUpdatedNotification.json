@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "GameFocusWorkflow": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "workflowVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "id",
+        "inputVersion",
+        "projectId",
+        "state",
+        "workflowVersion"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "workflow": {
+      "$ref": "#/definitions/GameFocusWorkflow"
+    }
+  },
+  "required": [
+    "workflow"
+  ],
+  "title": "GameWorkflowUpdatedNotification",
+  "type": "object"
+}

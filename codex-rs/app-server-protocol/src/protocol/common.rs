@@ -508,6 +508,110 @@ client_request_definitions! {
         response: v2::ServerDiagnosticsResponse,
     },
 
+    #[experimental("game/ping")]
+    /// Probe the game backend and its protocol version.
+    GamePing => "game/ping" {
+        params: v2::GamePingParams,
+        serialization: global_shared_read("game"),
+        response: v2::GamePingResponse,
+    },
+    #[experimental("game/project/create")]
+    GameProjectCreate => "game/project/create" {
+        params: v2::GameProjectCreateParams,
+        serialization: global("game"),
+        response: v2::GameProjectCreateResponse,
+    },
+    #[experimental("game/project/open")]
+    GameProjectOpen => "game/project/open" {
+        params: v2::GameProjectOpenParams,
+        serialization: global("game"),
+        response: v2::GameProjectOpenResponse,
+    },
+    #[experimental("game/project/read")]
+    GameProjectRead => "game/project/read" {
+        params: v2::GameProjectReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameProjectReadResponse,
+    },
+    #[experimental("game/project/list")]
+    GameProjectList => "game/project/list" {
+        params: v2::GameProjectListParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameProjectListResponse,
+    },
+    #[experimental("game/project/import")]
+    GameProjectImport => "game/project/import" {
+        params: v2::GameProjectImportParams,
+        serialization: global("game"),
+        response: v2::GameProjectImportResponse,
+    },
+    #[experimental("game/conversation/ensure")]
+    GameConversationEnsure => "game/conversation/ensure" {
+        params: v2::GameConversationEnsureParams,
+        serialization: global("game"),
+        response: v2::GameConversationEnsureResponse,
+    },
+    #[experimental("game/conversation/submit")]
+    GameConversationSubmit => "game/conversation/submit" {
+        params: v2::GameConversationSubmitParams,
+        serialization: global("game"),
+        response: v2::GameConversationSubmitResponse,
+    },
+    #[experimental("game/conversation/read")]
+    GameConversationRead => "game/conversation/read" {
+        params: v2::GameConversationReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameConversationReadResponse,
+    },
+    #[experimental("game/focus/start")]
+    GameFocusStart => "game/focus/start" {
+        params: v2::GameFocusStartParams,
+        serialization: global("game"),
+        response: v2::GameFocusStartResponse,
+    },
+    #[experimental("game/focus/read")]
+    GameFocusRead => "game/focus/read" {
+        params: v2::GameFocusReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameFocusReadResponse,
+    },
+    #[experimental("game/focus/decide")]
+    GameFocusDecide => "game/focus/decide" {
+        params: v2::GameFocusDecideParams,
+        serialization: global("game"),
+        response: v2::GameFocusDecideResponse,
+    },
+    #[experimental("game/focus/retry")]
+    GameFocusRetry => "game/focus/retry" {
+        params: v2::GameFocusRetryParams,
+        serialization: global("game"),
+        response: v2::GameFocusRetryResponse,
+    },
+    #[experimental("game/focus/cancel")]
+    GameFocusCancel => "game/focus/cancel" {
+        params: v2::GameFocusCancelParams,
+        serialization: global("game"),
+        response: v2::GameFocusCancelResponse,
+    },
+    #[experimental("game/task/list")]
+    GameTaskList => "game/task/list" {
+        params: v2::GameTaskListParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameTaskListResponse,
+    },
+    #[experimental("game/artBible/list")]
+    GameArtBibleList => "game/artBible/list" {
+        params: v2::GameArtBibleListParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameArtBibleListResponse,
+    },
+    #[experimental("game/artBible/read")]
+    GameArtBibleRead => "game/artBible/read" {
+        params: v2::GameArtBibleReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameArtBibleReadResponse,
+    },
+
     /// NEW APIs
     // Thread lifecycle
     // Uses `inspect_params` because only some fields are experimental.
@@ -1856,6 +1960,18 @@ server_notification_definitions! {
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
     #[experimental("project/changed")]
     ProjectChanged => "project/changed" (v2::ProjectChangedNotification),
+    #[experimental("game/workflow/updated")]
+    GameWorkflowUpdated => "game/workflow/updated" (v2::GameWorkflowUpdatedNotification),
+    #[experimental("game/task/updated")]
+    GameTaskUpdated => "game/task/updated" (v2::GameTaskUpdatedNotification),
+    #[experimental("game/attempt/updated")]
+    GameAttemptUpdated => "game/attempt/updated" (v2::GameAttemptUpdatedNotification),
+    #[experimental("game/artifact/committed")]
+    GameArtifactCommitted => "game/artifact/committed" (v2::GameArtifactCommittedNotification),
+    #[experimental("game/designConfirmation/required")]
+    GameDesignConfirmationRequired => "game/designConfirmation/required" (v2::GameDesignConfirmationRequiredNotification),
+    #[experimental("game/recovery/status")]
+    GameRecoveryStatus => "game/recovery/status" (v2::GameRecoveryStatusNotification),
     #[experimental("thread/project/updated")]
     ThreadProjectUpdated => "thread/project/updated" (v2::ThreadProjectUpdatedNotification),
     #[experimental("thread/environment/connected")]

@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "attemptId": {
+      "type": "string"
+    },
+    "conversationId": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "attemptId",
+    "conversationId",
+    "status",
+    "taskId"
+  ],
+  "title": "GameAttemptUpdatedNotification",
+  "type": "object"
+}

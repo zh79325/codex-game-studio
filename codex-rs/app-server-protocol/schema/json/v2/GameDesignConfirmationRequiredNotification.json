@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "conflictCount": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "conversationId": {
+      "type": "string"
+    },
+    "workflowId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "conflictCount",
+    "conversationId",
+    "workflowId"
+  ],
+  "title": "GameDesignConfirmationRequiredNotification",
+  "type": "object"
+}

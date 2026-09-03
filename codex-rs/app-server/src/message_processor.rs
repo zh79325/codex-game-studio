@@ -32,8 +32,10 @@ use crate::request_processors::ConfigRequestProcessor;
 use crate::request_processors::EnvironmentRequestProcessor;
 use crate::request_processors::FeedbackRequestProcessor;
 use crate::request_processors::FsRequestProcessor;
+use crate::request_processors::GameRequestProcessor;
 use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
+use crate::request_processors::ListenerTaskContext;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpEventStreamReady;
 use crate::request_processors::McpEventStreams;
@@ -78,6 +80,8 @@ use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_game_runtime::Capability;
+use codex_game_runtime::RouteCandidate;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
@@ -102,6 +106,30 @@ use tracing::Instrument;
 use crate::models_refresh_worker::ModelsRefreshWorker;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
+fn game_route_candidates(config: &Config) -> Vec<RouteCandidate> {
+    let mut providers = config.model_providers.keys().cloned().collect::<Vec<_>>();
+    providers.sort();
+    if let Some(position) = providers
+        .iter()
+        .position(|provider| provider == &config.model_provider_id)
+    {
+        providers.swap(0, position);
+    } else {
+        providers.insert(0, config.model_provider_id.clone());
+    }
+    let model = config.model.clone().unwrap_or_default();
+    providers
+        .into_iter()
+        .map(|provider| RouteCandidate {
+            account_id: provider.clone(),
+            provider,
+            model: model.clone(),
+            capabilities: vec![Capability::TextReasoning, Capability::TextStructuredOutput],
+            available: true,
+        })
+        .collect()
+}
 
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
     reject_obsolete_request_fields(&request)?;
@@ -149,6 +177,7 @@ pub(crate) struct MessageProcessor {
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
     feedback_processor: FeedbackRequestProcessor,
     fs_processor: FsRequestProcessor,
+    game_processor: GameRequestProcessor,
     git_processor: GitRequestProcessor,
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
@@ -439,6 +468,45 @@ impl MessageProcessor {
             log_db.clone(),
             state_db.clone(),
         );
+        let game_adapter = Arc::new(
+            codex_game_app_server_adapter::GameAppServerAdapter::new_with_routes(
+                config.codex_home.to_path_buf(),
+                game_route_candidates(&config),
+            ),
+        );
+        let (game_event_sender, game_event_receiver) = crate::game_events::game_event_channel();
+        let game_listener_context = ListenerTaskContext {
+            thread_manager: Arc::clone(&thread_manager),
+            thread_state_manager: thread_state_manager.clone(),
+            outgoing: outgoing.clone(),
+            pending_thread_unloads: Arc::clone(&pending_thread_unloads),
+            thread_watch_manager: thread_watch_manager.clone(),
+            thread_list_state_permit: Arc::clone(&thread_list_state_permit),
+            fallback_model_provider: config.model_provider_id.clone(),
+            codex_home: config.codex_home.to_path_buf(),
+            skills_watcher: Arc::clone(&skills_watcher),
+            turn_cost_worker: turn_cost_worker.as_ref().map(TurnCostWorker::handle),
+            game_event_sender: Some(game_event_sender),
+        };
+        let game_execution = Arc::new(
+            crate::game_execution_port::AppServerCodexExecutionPort::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&config),
+                game_listener_context,
+            ),
+        );
+        crate::game_events::spawn_game_event_observer(
+            game_event_receiver,
+            Arc::clone(&game_adapter),
+            Arc::clone(&game_execution),
+            outgoing.clone(),
+        );
+        let game_processor = GameRequestProcessor::new(
+            game_adapter,
+            game_execution,
+            Arc::clone(&thread_store),
+            outgoing.clone(),
+        );
         let git_processor = GitRequestProcessor::new();
         let initialize_processor = InitializeRequestProcessor::new(
             outgoing.clone(),
@@ -581,6 +649,7 @@ impl MessageProcessor {
             external_agent_config_processor,
             feedback_processor,
             fs_processor,
+            game_processor,
             git_processor,
             initialize_processor,
             marketplace_processor,
@@ -980,6 +1049,85 @@ impl MessageProcessor {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::GamePing { params, .. } => {
+                Ok(Some(self.game_processor.ping(params).into()))
+            }
+            ClientRequest::GameProjectCreate { params, .. } => self
+                .game_processor
+                .project_create(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameProjectOpen { params, .. } => self
+                .game_processor
+                .project_open(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameProjectRead { params, .. } => self
+                .game_processor
+                .project_read(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::GameProjectList { params, .. } => self
+                .game_processor
+                .project_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameProjectImport { params, .. } => self
+                .game_processor
+                .project_import(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameConversationEnsure { params, .. } => self
+                .game_processor
+                .conversation_ensure(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameConversationSubmit { params, .. } => self
+                .game_processor
+                .conversation_submit(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameConversationRead { params, .. } => self
+                .game_processor
+                .conversation_read(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::GameFocusStart { params, .. } => self
+                .game_processor
+                .focus_start(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameFocusRead { params, .. } => self
+                .game_processor
+                .focus_read(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameFocusDecide { params, .. } => self
+                .game_processor
+                .focus_decide(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameFocusRetry { params, .. } => self
+                .game_processor
+                .focus_retry(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameFocusCancel { params, .. } => self
+                .game_processor
+                .focus_cancel(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameTaskList { params, .. } => self
+                .game_processor
+                .task_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameArtBibleList { params, .. } => self
+                .game_processor
+                .art_bible_list(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::GameArtBibleRead { params, .. } => self
+                .game_processor
+                .art_bible_read(params)
+                .map(|response| Some(response.into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)

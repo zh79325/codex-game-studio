@@ -50,6 +50,8 @@ codex-extension-api = { workspace = true }
 codex-external-agent-migration = { workspace = true }
 codex-features = { workspace = true }
 codex-goal-extension = { workspace = true }
+codex-game-app-server-adapter = { workspace = true }
+codex-game-runtime = { workspace = true }
 codex-git-attribution = { workspace = true }
 codex-guardian-v2 = { workspace = true }
 codex-git-utils = { workspace = true }

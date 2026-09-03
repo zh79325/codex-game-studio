@@ -7,17 +7,18 @@ use codex_protocol::config_types::MultiAgentMode;
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
-pub(super) struct ListenerTaskContext {
-    pub(super) thread_manager: Arc<ThreadManager>,
-    pub(super) thread_state_manager: ThreadStateManager,
-    pub(super) outgoing: Arc<OutgoingMessageSender>,
-    pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
-    pub(super) thread_watch_manager: ThreadWatchManager,
-    pub(super) thread_list_state_permit: Arc<Semaphore>,
-    pub(super) fallback_model_provider: String,
-    pub(super) codex_home: PathBuf,
-    pub(super) skills_watcher: Arc<SkillsWatcher>,
-    pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+pub(crate) struct ListenerTaskContext {
+    pub(crate) thread_manager: Arc<ThreadManager>,
+    pub(crate) thread_state_manager: ThreadStateManager,
+    pub(crate) outgoing: Arc<OutgoingMessageSender>,
+    pub(crate) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+    pub(crate) thread_watch_manager: ThreadWatchManager,
+    pub(crate) thread_list_state_permit: Arc<Semaphore>,
+    pub(crate) fallback_model_provider: String,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) skills_watcher: Arc<SkillsWatcher>,
+    pub(crate) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    pub(crate) game_event_sender: Option<crate::game_events::GameEventSender>,
 }
 
 struct UnloadingState {
@@ -130,7 +131,7 @@ pub(super) enum ThreadShutdownResult {
     TimedOut,
 }
 
-pub(super) enum EnsureConversationListenerResult {
+pub(crate) enum EnsureConversationListenerResult {
     Attached,
     ConnectionClosed,
 }
@@ -139,7 +140,7 @@ pub(super) enum EnsureConversationListenerResult {
     clippy::await_holding_invalid_type,
     reason = "listener subscription must be serialized against pending unloads"
 )]
-pub(super) async fn ensure_conversation_listener(
+pub(crate) async fn ensure_conversation_listener(
     listener_task_context: ListenerTaskContext,
     conversation_id: ThreadId,
     connection_id: ConnectionId,
@@ -276,6 +277,7 @@ pub(super) async fn ensure_listener_task_running(
         fallback_model_provider,
         codex_home,
         turn_cost_worker,
+        game_event_sender,
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
@@ -342,9 +344,16 @@ pub(super) async fn ensure_listener_task_running(
                         .await;
                     let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
                         outgoing_for_task.clone(),
-                        subscribed_connection_ids,
+                        subscribed_connection_ids.clone(),
                         conversation_id,
                     );
+                    if let Some(sender) = &game_event_sender {
+                        let _ = sender.send(crate::game_events::GameThreadEvent {
+                            thread_id: conversation_id,
+                            connection_ids: subscribed_connection_ids,
+                            event: event.clone(),
+                        });
+                    }
 
                     apply_bespoke_event_handling(
                         event.clone(),

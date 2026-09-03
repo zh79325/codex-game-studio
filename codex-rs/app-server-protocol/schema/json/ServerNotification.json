@@ -1911,6 +1911,160 @@
       ],
       "type": "object"
     },
+    "GameArtifactCommittedNotification": {
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "artifactType": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "artifactType",
+        "conversationId"
+      ],
+      "type": "object"
+    },
+    "GameAttemptUpdatedNotification": {
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attemptId",
+        "conversationId",
+        "status",
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "GameBackendStatus": {
+      "enum": [
+        "starting",
+        "recovering",
+        "ready",
+        "readOnly"
+      ],
+      "type": "string"
+    },
+    "GameDesignConfirmationRequiredNotification": {
+      "properties": {
+        "conflictCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "workflowId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conflictCount",
+        "conversationId",
+        "workflowId"
+      ],
+      "type": "object"
+    },
+    "GameFocusWorkflow": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "workflowVersion": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "id",
+        "inputVersion",
+        "projectId",
+        "state",
+        "workflowVersion"
+      ],
+      "type": "object"
+    },
+    "GameRecoveryStatusNotification": {
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/GameBackendStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "GameTaskUpdatedNotification": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "status",
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "GameWorkflowUpdatedNotification": {
+      "properties": {
+        "workflow": {
+          "$ref": "#/definitions/GameFocusWorkflow"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "type": "object"
+    },
     "GitInfo": {
       "properties": {
         "branch": {
@@ -6983,6 +7137,126 @@
         "params"
       ],
       "title": "Project/changedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/workflow/updated"
+          ],
+          "title": "Game/workflow/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameWorkflowUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/workflow/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/task/updated"
+          ],
+          "title": "Game/task/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameTaskUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/task/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/attempt/updated"
+          ],
+          "title": "Game/attempt/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameAttemptUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/attempt/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/artifact/committed"
+          ],
+          "title": "Game/artifact/committedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameArtifactCommittedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/artifact/committedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/designConfirmation/required"
+          ],
+          "title": "Game/designConfirmation/requiredNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameDesignConfirmationRequiredNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/designConfirmation/requiredNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/recovery/status"
+          ],
+          "title": "Game/recovery/statusNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameRecoveryStatusNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/recovery/statusNotification",
       "type": "object"
     },
     {

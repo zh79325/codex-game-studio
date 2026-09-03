@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "conversationId": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "conversationId",
+    "status",
+    "taskId"
+  ],
+  "title": "GameTaskUpdatedNotification",
+  "type": "object"
+}

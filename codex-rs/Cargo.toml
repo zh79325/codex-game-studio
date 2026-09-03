@@ -21,6 +21,12 @@ members = [
     "arg0",
     "feedback",
     "features",
+    "game/app-server-adapter",
+    "game/app-server-protocol",
+    "game/domain",
+    "game/import",
+    "game/runtime",
+    "game/store",
     "install-context",
     "codex-backend-openapi-models",
     "code-mode",
@@ -219,6 +225,12 @@ codex-install-context = { path = "install-context" }
 codex-file-search = { path = "file-search" }
 codex-file-watcher = { path = "file-watcher" }
 codex-git-utils = { path = "git-utils" }
+codex-game-app-server-adapter = { path = "game/app-server-adapter" }
+codex-game-app-server-protocol = { path = "game/app-server-protocol" }
+codex-game-domain = { path = "game/domain" }
+codex-game-import = { path = "game/import" }
+codex-game-runtime = { path = "game/runtime" }
+codex-game-store = { path = "game/store" }
 codex-guardian-context = { path = "guardian-context" }
 codex-hooks = { path = "hooks" }
 codex-history = { path = "history" }

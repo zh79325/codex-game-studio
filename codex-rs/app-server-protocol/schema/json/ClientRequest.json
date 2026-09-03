@@ -1503,6 +1503,39 @@
       ],
       "type": "object"
     },
+    "GameFocusAction": {
+      "enum": [
+        "submitClarification",
+        "acceptBrief",
+        "completeReviews",
+        "completeMerge",
+        "recordConflictDecision",
+        "confirmArtBible",
+        "versionArtBible"
+      ],
+      "type": "string"
+    },
+    "GameUserDecision": {
+      "properties": {
+        "conflictKey": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOption": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conflictKey",
+        "selectedOption"
+      ],
+      "type": "object"
+    },
     "GetAccountParams": {
       "properties": {
         "refreshToken": {

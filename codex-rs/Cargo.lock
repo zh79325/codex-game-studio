@@ -2052,6 +2052,8 @@ dependencies = [
  "codex-feedback",
  "codex-file-search",
  "codex-file-watcher",
+ "codex-game-app-server-adapter",
+ "codex-game-runtime",
  "codex-git-attribution",
  "codex-git-utils",
  "codex-goal-extension",
@@ -2178,6 +2180,7 @@ dependencies = [
  "codex-app-server-protocol-noop-macros",
  "codex-experimental-api-macros",
  "codex-extension-items",
+ "codex-game-app-server-protocol",
  "codex-history",
  "codex-protocol",
  "codex-rollout",
@@ -3305,6 +3308,81 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "codex-game-app-server-adapter"
+version = "0.0.0"
+dependencies = [
+ "codex-game-app-server-protocol",
+ "codex-game-domain",
+ "codex-game-import",
+ "codex-game-runtime",
+ "futures",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "codex-game-app-server-protocol"
+version = "0.0.0"
+dependencies = [
+ "codex-game-domain",
+ "schemars 0.8.22",
+ "serde",
+ "ts-rs",
+]
+
+[[package]]
+name = "codex-game-domain"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codex-game-import"
+version = "0.0.0"
+dependencies = [
+ "codex-game-domain",
+ "codex-game-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "codex-game-runtime"
+version = "0.0.0"
+dependencies = [
+ "codex-game-domain",
+ "codex-game-store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "codex-game-store"
+version = "0.0.0"
+dependencies = [
+ "codex-game-domain",
+ "codex-utils-path",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

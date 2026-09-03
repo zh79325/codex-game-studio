@@ -46,6 +46,15 @@ app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
+# Build and launch the Electron desktop app with the Vite development server.
+[no-cd]
+[unix]
+desktop-debug:
+    cd {{ justfile_directory() }}/codex-rs && PATH="$HOME/.cargo/bin:$PATH" cargo build -p codex-app-server --bin codex-app-server
+    pnpm --dir {{ justfile_directory() }} --filter @codex-game/desktop build:electron
+    if [ ! -f {{ justfile_directory() }}/node_modules/electron/path.txt ]; then pnpm --dir {{ justfile_directory() }} install --filter @codex-game/desktop...; pnpm --dir {{ justfile_directory() }} rebuild electron; fi
+    (pnpm --dir {{ justfile_directory() }} --filter @codex-game/desktop dev -- --strictPort & VITE_PID=$!; trap 'kill "$VITE_PID" 2>/dev/null || true' EXIT INT TERM; sleep 1; kill -0 "$VITE_PID" 2>/dev/null || { wait "$VITE_PID"; exit $?; }; RUST_BACKTRACE=1 ELECTRON_ENABLE_LOGGING=1 VITE_DEV_SERVER_URL=http://localhost:5173 CODEX_GAME_APP_SERVER={{ justfile_directory() }}/codex-rs/target/debug/codex-app-server pnpm --dir {{ justfile_directory() }}/apps/desktop exec electron .)
+
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py

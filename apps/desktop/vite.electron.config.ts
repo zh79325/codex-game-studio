@@ -2,25 +2,33 @@ import { builtinModules } from "node:module";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
-const external = ["electron", ...builtinModules, ...builtinModules.map((name) => `node:${name}`)];
+const external = [
+  "electron",
+  ...builtinModules,
+  ...builtinModules.map((name) => `node:${name}`),
+];
 
-export default defineConfig({
-  build: {
-    emptyOutDir: false,
-    lib: {
-      entry: {
-        "main/index": resolve(__dirname, "src/main/index.ts"),
-        "preload/index": resolve(__dirname, "src/preload/index.ts"),
+export default defineConfig(({ mode }) => {
+  if (mode !== "main" && mode !== "preload") {
+    throw new Error("Electron build mode must be 'main' or 'preload'");
+  }
+
+  return {
+    build: {
+      emptyOutDir: true,
+      lib: {
+        entry: resolve(__dirname, `src/${mode}/index.ts`),
+        formats: ["cjs"],
       },
-      formats: ["cjs"],
-    },
-    outDir: "dist",
-    rollupOptions: {
-      external,
-      output: {
-        entryFileNames: "[name].cjs",
+      outDir: `dist/${mode}`,
+      rollupOptions: {
+        external,
+        output: {
+          entryFileNames: "index.cjs",
+          inlineDynamicImports: true,
+        },
       },
+      target: "node22",
     },
-    target: "node22",
-  },
+  };
 });

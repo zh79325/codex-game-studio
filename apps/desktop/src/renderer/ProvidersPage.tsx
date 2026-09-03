@@ -471,15 +471,6 @@ export default function ProvidersPage() {
           description={(presets.error as Error).message}
         />
       )}
-      {presets.data && (
-        <Alert
-          type="info"
-          showIcon
-          message={`公共套餐：${presets.data.path}`}
-          description={`${presets.data.presets.length} 套预置只包含公开元数据；API Key、启停、绑定、用量和熔断状态不会写入 Git。`}
-        />
-      )}
-
       <Space direction="vertical" size="middle" className="workspace-main">
         {(providers.data ?? []).map((provider) => (
           <Card

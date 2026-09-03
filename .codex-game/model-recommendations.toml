@@ -1,55 +1,407 @@
-schema_version = 1
+schema_version = 2
 
-[[providers]]
-code = "openai"
-name = "OpenAI"
-driver = "openai"
-default_base_url = "https://api.openai.com/v1"
+[[presets]]
+code = "ark-coding"
+vendor = "火山方舟"
+plan = "Coding Plan"
+label = "火山方舟 · Coding Plan"
+base_url = "https://ark.cn-beijing.volces.com"
+driver = "openai_compat"
+auth_style = "bearer"
 
-[[providers.models]]
-model_id = "gpt-5"
-display_name = "GPT-5"
-capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
-recommended = true
+[[presets.models]]
+model_id = "ark-code-latest"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 262144 }
+remark = "在方舟开通管理页切换实际模型，切换后 3-5 分钟生效，支持 Auto 模式。切勿把 base_url 配成 /api/v3，那不消耗套餐额度而是另行计费"
 
-[[providers.models.default_limits]]
+[[presets.models]]
+model_id = "doubao-seed-evolving"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "Coding Plan 套餐内模型，适合 game_designer / spec_writer 长对焦"
+
+[[presets.models]]
+model_id = "doubao-seed-2.1-turbo"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 256000 }
+remark = "速度优先，适合 spec_reviewer / prompt_smith 等单次调用"
+
+[[presets.models]]
+model_id = "doubao-seed-2.0-lite"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 256000 }
+remark = "轻量档，适合会话摘要压缩这类低价值调用"
+
+[[presets.models]]
+model_id = "minimax-m3"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "Coding Plan 套餐内第三方模型"
+
+[[presets.models]]
+model_id = "glm-5.3"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "别名 glm-latest"
+
+[[presets.models]]
+model_id = "glm-5.3-flash"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "Coding Plan 套餐内第三方模型"
+
+[[presets.models]]
+model_id = "deepseek-v4-pro"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "Coding Plan 套餐内第三方模型"
+
+[[presets.models]]
+model_id = "deepseek-v4-flash"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "Coding Plan 套餐内第三方模型"
+
+[[presets.models]]
+model_id = "kimi-k2.7-code"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/api/coding/v3"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 262144 }
+remark = "Coding Plan 套餐内第三方模型"
+
+[[presets]]
+code = "ark-agent"
+vendor = "火山方舟"
+plan = "Agent Plan"
+label = "火山方舟 · Agent Plan"
+base_url = "https://ark.cn-beijing.volces.com"
+driver = "ark_video"
+auth_style = "bearer"
+
+[[presets.models]]
+model_id = "doubao-seedream-5.0-lite"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "ark_image"
+api_path = "/api/plan/v3/images/generations"
 limit_kind = "calls"
-max_value = 0
-period = "day"
-group_name = "default"
+default_period = "day+11H"
+params = {}
+remark = "文生图与单/多图生图同一模型，size 2K/3K/4K，output_format png/jpeg，watermark 可关；参考图数 + 生成数 ≤ 15；1 张成功 = 99 AFP。Agent Plan 专属 key，与 Coding Plan key 不通用"
 
-[[providers]]
-code = "anthropic"
-name = "Anthropic"
-driver = "anthropic"
-default_base_url = "https://api.anthropic.com"
-
-[[providers.models]]
-model_id = "claude-sonnet-4-5"
-display_name = "Claude Sonnet 4.5"
-capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
-recommended = true
-
-[[providers.models.default_limits]]
+[[presets.models]]
+model_id = "doubao-seedance-2.0"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/plan/v3/contents/generations/tasks"
 limit_kind = "calls"
-max_value = 0
-period = "day"
-group_name = "default"
+default_period = "day+11H"
+params = {}
+remark = "异步任务制，轮询 /api/plan/v3/contents/generations/tasks/{id}；480p-4k，4~15 秒，可生成有声视频。video_gen 本期不实现，driver 待补"
 
-[[providers]]
-code = "google"
-name = "Google AI"
-driver = "google"
-default_base_url = "https://generativelanguage.googleapis.com"
-
-[[providers.models]]
-model_id = "gemini-2.5-pro"
-display_name = "Gemini 2.5 Pro"
-capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
-recommended = true
-
-[[providers.models.default_limits]]
+[[presets.models]]
+model_id = "doubao-seedance-2.0-fast"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/plan/v3/contents/generations/tasks"
 limit_kind = "calls"
-max_value = 0
-period = "day"
-group_name = "default"
+default_period = "day+11H"
+params = {}
+remark = "仅 480p/720p，抵扣系数低于 2.0。video_gen 本期不实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-2.0-mini"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/plan/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "最省档，仅 480p/720p。video_gen 本期不实现"
+
+[[presets]]
+code = "ark-payg"
+vendor = "火山方舟"
+plan = "按量付费"
+label = "火山方舟 · 按量付费"
+base_url = "https://ark.cn-beijing.volces.com"
+driver = "ark_video"
+auth_style = "bearer"
+
+[[presets.models]]
+model_id = "doubao-seedream-5.0-pro"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "ark_image"
+api_path = "/api/v3/images/generations"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "一个通用长效 API Key 同时打图片 /api/v3/images/generations 与视频 /api/v3/contents/generations/tasks，与 Coding Plan、Agent Plan 的套餐 key 完全隔离。系列名，确切 model_id 带日期版本后缀，以方舟模型列表为准，也可填 Endpoint ID。size 走档位 1K/1.5K/2K 或精确像素（总像素 [921600, 4624220]，宽高比 [1/16,16]），要档位就在模型 params 配 size_style=tier；参考图最多 10 张；支持 layer_decomposition 图层拆分（底图 + ≤16 图层）、background=transparent、output_format png/jpeg；不支持组图与流式"
+
+[[presets.models]]
+model_id = "doubao-seedream-5.0-lite"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "ark_image"
+api_path = "/api/v3/images/generations"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "size 走档位 2K/3K/4K 或精确像素（总像素 [3686400, 16777216]），最低 2K 起，2048x2048 的缺省边长正好落在区间内；参考图最多 14 张；支持组图（sequential_image_generation=auto，参考图数 + 生成数 ≤ 15）、流式、web_search 工具"
+
+[[presets.models]]
+model_id = "doubao-seedream-4.5"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "ark_image"
+api_path = "/api/v3/images/generations"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "size 走档位 2K/4K 或精确像素（总像素 [3686400, 16777216]）；不支持 output_format，固定 jpeg；支持组图与流式"
+
+[[presets.models]]
+model_id = "doubao-seedream-4.0"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "ark_image"
+api_path = "/api/v3/images/generations"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "size 走档位 1K/2K/4K 或精确像素（总像素 [921600, 16777216]）；支持组图与流式。最省的一档生图，四视图打样可用"
+
+[[presets.models]]
+model_id = "doubao-seedance-2.5"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "异步任务制：POST 拿任务 id，轮询 /api/v3/contents/generations/tasks/{id} 取 video_url，任务只留 7 天。480p/720p/1080p，duration 4~30 秒或 -1 交给模型定，视频编辑与延长只能 ratio=adaptive；全模态参考（图 0-30、视频 0-10、音频 0-10），可出有声视频。开通要求账户余额 > 200 元。计费按秒，本地只能按次记账，额度填按次上限。video_gen 尚未实现，driver 待补"
+
+[[presets.models]]
+model_id = "doubao-seedance-2.0"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "480p~4k，duration 4~15 秒或 -1；全模态参考（图 0-9、视频 0-3、音频 0-3，不可只给音频），可出有声视频。video_gen 尚未实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-2.0-fast"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "仅 480p/720p，单价低于 2.0。video_gen 尚未实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-2.0-mini"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "最省档，仅 480p/720p。video_gen 尚未实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-1.5-pro"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "首帧/首尾帧/文生视频，480p/720p/1080p，duration 4~12 秒或 -1，可出有声视频；支持 draft 样片模式先验镜头再出正片、seed、camera_fixed，service_tier=flex 离线推理半价。video_gen 尚未实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-1.0-pro"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "无声视频，默认 1080p，duration 2~12 秒，或用 frames [29,289] 且满足 25+4n 出小数秒；只支持首帧/首尾帧/文生视频，无全模态参考。video_gen 尚未实现"
+
+[[presets.models]]
+model_id = "doubao-seedance-1.0-pro-fast"
+capabilities = ["video_text_to_video", "video_image_to_video"]
+driver = "ark_video"
+api_path = "/api/v3/contents/generations/tasks"
+limit_kind = "calls"
+default_period = "month"
+params = {}
+remark = "只支持首帧与文生视频，无首尾帧。video_gen 尚未实现"
+
+[[presets]]
+code = "bailian-token"
+vendor = "阿里百炼"
+plan = "Token Plan 个人版"
+label = "阿里百炼 · Token Plan 个人版"
+base_url = "https://token-plan.cn-beijing.maas.aliyuncs.com"
+driver = "dashscope_mm"
+auth_style = "bearer"
+key_prefix = "sk-sp-"
+
+[[presets.models]]
+model_id = "qwen3.8"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/compatible-mode/v1"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "系列名，确切 model_id 以百炼模型列表为准。另有 Anthropic 兼容端点 /apps/anthropic。内置 Harness 工具仅在 Responses API 下触发，Chat Completions 调用不消耗 Harness 额度"
+
+[[presets.models]]
+model_id = "qwen3.7"
+capabilities = ["text_reasoning", "text_structured_output"]
+driver = "openai_compat"
+api_path = "/compatible-mode/v1"
+limit_kind = "tokens"
+default_period = "day+11H"
+params = { context_window = 1000000 }
+remark = "系列名，确切 model_id 以百炼模型列表为准"
+
+[[presets.models]]
+model_id = "qwen-image-2.0"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "dashscope_mm"
+api_path = "/api/v1/services/aigc/multimodal-generation/generation"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "多模态生成专用端点，同步返回，图片 URL 在 output.choices[*].message.content[*].image。不兼容 /compatible-mode/v1，走错端点报 model_not_supported 或 url error"
+
+[[presets.models]]
+model_id = "qwen-image-2.0-pro"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "dashscope_mm"
+api_path = "/api/v1/services/aigc/multimodal-generation/generation"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "质量档，四视图定稿可用"
+
+[[presets.models]]
+model_id = "wan2.7-image"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "dashscope_mm"
+api_path = "/api/v1/services/aigc/multimodal-generation/generation"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "万相系列，多模态生成端点"
+
+[[presets.models]]
+model_id = "wan2.7-image-pro"
+capabilities = ["image_text_to_image", "image_image_to_image"]
+driver = "dashscope_mm"
+api_path = "/api/v1/services/aigc/multimodal-generation/generation"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "万相质量档"
+
+[[presets.models]]
+model_id = "happyhorse-1.1-t2v"
+capabilities = ["video_text_to_video"]
+driver = "dashscope_async"
+api_path = "/api/v1/services/aigc/video-generation/video-synthesis"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "异步，需带 X-DashScope-Async: enable，轮询 /api/v1/tasks/{task_id} 取 video_url。video_gen 本期不实现"
+
+[[presets.models]]
+model_id = "happyhorse-1.1-r2v"
+capabilities = ["video_image_to_video"]
+driver = "dashscope_async"
+api_path = "/api/v1/services/aigc/video-generation/video-synthesis"
+limit_kind = "calls"
+default_period = "day+11H"
+params = {}
+remark = "参考图生视频。video_gen 本期不实现"
+
+[[presets]]
+code = "bailian-payg"
+vendor = "阿里百炼"
+plan = "按量付费"
+label = "阿里百炼 · 按量付费"
+base_url = "https://dashscope.aliyuncs.com"
+driver = "openai_compat"
+auth_style = "bearer"
+key_prefix = "sk-"
+
+[[presets.models]]
+model_id = "qwen-vl-max"
+capabilities = ["vision_analysis"]
+driver = "openai_compat"
+api_path = "/compatible-mode/v1"
+limit_kind = "tokens"
+default_period = "month"
+params = { context_window = 131072 }
+remark = "vision_reviewer 用。Token Plan 与 Coding Plan 文档均未列 vision 模型，四视图逐条校验需另配按量 key，按量 key 与套餐 key 完全隔离、不可混用"
+
+[[presets]]
+code = "meshy"
+vendor = "Meshy"
+plan = "按量 credits"
+label = "Meshy · 按量 credits"
+base_url = "https://api.meshy.ai"
+driver = "meshy"
+auth_style = "bearer"
+
+[[presets.models]]
+model_id = "meshy-5"
+capabilities = ["model3d"]
+driver = "meshy"
+api_path = "/openapi/v1"
+limit_kind = "credits"
+default_period = "total"
+params = {}
+remark = "image-to-3d / rigging / animations / text-to-motion 全链路，按 consumed_credits 计量。阶段三接入"

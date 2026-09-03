@@ -11,6 +11,9 @@ pub enum AiCapability {
     ImageTextToImage,
     ImageImageToImage,
     ImageReferenceConsistency,
+    VideoTextToVideo,
+    VideoImageToVideo,
+    Model3d,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +23,8 @@ pub enum LimitKind {
     InputTokens,
     OutputTokens,
     TotalTokens,
+    Tokens,
+    Credits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,11 +60,19 @@ pub struct AiProvider {
     pub name: String,
     pub base_url: String,
     pub driver: String,
+    #[serde(default = "default_auth_style")]
+    pub auth_style: String,
     pub priority: i64,
     pub enabled: bool,
+    #[serde(default)]
+    pub remark: String,
     pub has_key: bool,
     pub key_mask: Option<String>,
     pub models: Vec<ProviderModel>,
+}
+
+fn default_auth_style() -> String {
+    "bearer".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,15 +125,28 @@ pub struct ModelUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRecommendation {
-    pub provider_code: String,
-    pub provider_name: String,
-    pub driver: String,
-    pub default_base_url: String,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderPresetModel {
     pub model_id: String,
-    pub display_name: String,
     pub capabilities: Vec<AiCapability>,
-    pub recommended: bool,
-    pub default_limits: Vec<LimitPolicy>,
+    pub driver: String,
+    pub api_path: String,
+    pub limit_kind: LimitKind,
+    pub default_period: String,
+    pub params: Value,
+    pub remark: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderPreset {
+    pub code: String,
+    pub vendor: String,
+    pub plan: String,
+    pub label: String,
+    pub base_url: String,
+    pub driver: String,
+    pub auth_style: String,
+    pub key_prefix: Option<String>,
+    pub models: Vec<ProviderPresetModel>,
 }

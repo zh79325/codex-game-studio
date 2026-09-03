@@ -1503,6 +1503,24 @@
       ],
       "type": "object"
     },
+    "GameAiAgentBinding": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
+        },
+        "modelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentCode",
+        "modelIds"
+      ],
+      "type": "object"
+    },
     "GameAiLimit": {
       "properties": {
         "groupName": {
@@ -1592,6 +1610,9 @@
     },
     "GameAiProvider": {
       "properties": {
+        "authStyle": {
+          "type": "string"
+        },
         "baseUrl": {
           "type": "string"
         },
@@ -1625,9 +1646,13 @@
         "priority": {
           "format": "int64",
           "type": "integer"
+        },
+        "remark": {
+          "type": "string"
         }
       },
       "required": [
+        "authStyle",
         "baseUrl",
         "code",
         "driver",
@@ -1635,7 +1660,8 @@
         "hasKey",
         "models",
         "name",
-        "priority"
+        "priority",
+        "remark"
       ],
       "type": "object"
     },

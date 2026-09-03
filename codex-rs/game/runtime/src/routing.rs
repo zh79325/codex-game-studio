@@ -14,6 +14,9 @@ pub enum Capability {
     ImageTextToImage,
     ImageImageToImage,
     ImageReferenceConsistency,
+    VideoTextToVideo,
+    VideoImageToVideo,
+    Model3d,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

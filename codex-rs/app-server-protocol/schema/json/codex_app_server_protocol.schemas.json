@@ -12389,6 +12389,24 @@
         ],
         "type": "object"
       },
+      "GameAiAgentBinding": {
+        "properties": {
+          "agentCode": {
+            "type": "string"
+          },
+          "modelIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agentCode",
+          "modelIds"
+        ],
+        "type": "object"
+      },
       "GameAiBreaker": {
         "properties": {
           "failureCount": {
@@ -12570,6 +12588,9 @@
       },
       "GameAiProvider": {
         "properties": {
+          "authStyle": {
+            "type": "string"
+          },
           "baseUrl": {
             "type": "string"
           },
@@ -12603,9 +12624,13 @@
           "priority": {
             "format": "int64",
             "type": "integer"
+          },
+          "remark": {
+            "type": "string"
           }
         },
         "required": [
+          "authStyle",
           "baseUrl",
           "code",
           "driver",
@@ -12613,7 +12638,8 @@
           "hasKey",
           "models",
           "name",
-          "priority"
+          "priority",
+          "remark"
         ],
         "type": "object"
       },
@@ -12901,55 +12927,6 @@
         ],
         "type": "object"
       },
-      "GameModelRecommendation": {
-        "properties": {
-          "capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "defaultBaseUrl": {
-            "type": "string"
-          },
-          "defaultLimits": {
-            "items": {
-              "$ref": "#/definitions/v2/GameAiLimit"
-            },
-            "type": "array"
-          },
-          "displayName": {
-            "type": "string"
-          },
-          "driver": {
-            "type": "string"
-          },
-          "modelId": {
-            "type": "string"
-          },
-          "providerCode": {
-            "type": "string"
-          },
-          "providerName": {
-            "type": "string"
-          },
-          "recommended": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "capabilities",
-          "defaultBaseUrl",
-          "defaultLimits",
-          "displayName",
-          "driver",
-          "modelId",
-          "providerCode",
-          "providerName",
-          "recommended"
-        ],
-        "type": "object"
-      },
       "GameProject": {
         "properties": {
           "id": {
@@ -12970,6 +12947,96 @@
           "name",
           "root",
           "state"
+        ],
+        "type": "object"
+      },
+      "GameProviderPreset": {
+        "properties": {
+          "authStyle": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "driver": {
+            "type": "string"
+          },
+          "keyPrefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/definitions/v2/GameProviderPresetModel"
+            },
+            "type": "array"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authStyle",
+          "baseUrl",
+          "code",
+          "driver",
+          "label",
+          "models",
+          "plan",
+          "vendor"
+        ],
+        "type": "object"
+      },
+      "GameProviderPresetModel": {
+        "properties": {
+          "apiPath": {
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "defaultPeriod": {
+            "type": "string"
+          },
+          "driver": {
+            "type": "string"
+          },
+          "limitKind": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "paramsJson": {
+            "type": "string"
+          },
+          "remark": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "apiPath",
+          "capabilities",
+          "defaultPeriod",
+          "driver",
+          "limitKind",
+          "modelId",
+          "paramsJson",
+          "remark"
         ],
         "type": "object"
       },

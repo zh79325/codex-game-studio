@@ -730,6 +730,9 @@ fn runtime_capability(capability: AiCapability) -> Capability {
         AiCapability::ImageTextToImage => Capability::ImageTextToImage,
         AiCapability::ImageImageToImage => Capability::ImageImageToImage,
         AiCapability::ImageReferenceConsistency => Capability::ImageReferenceConsistency,
+        AiCapability::VideoTextToVideo => Capability::VideoTextToVideo,
+        AiCapability::VideoImageToVideo => Capability::VideoImageToVideo,
+        AiCapability::Model3d => Capability::Model3d,
     }
 }
 

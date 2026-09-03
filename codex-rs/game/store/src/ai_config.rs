@@ -30,8 +30,10 @@ CREATE TABLE IF NOT EXISTS ai_providers (
     name TEXT NOT NULL,
     base_url TEXT NOT NULL,
     driver TEXT NOT NULL,
+    auth_style TEXT NOT NULL DEFAULT 'bearer',
     priority INTEGER NOT NULL,
-    enabled INTEGER NOT NULL
+    enabled INTEGER NOT NULL,
+    remark TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS ai_models (
     id TEXT PRIMARY KEY,
@@ -88,6 +90,29 @@ pub async fn initialize_ai_config_schema(pool: &SqlitePool) -> Result<(), StoreE
         sqlx::query(statement).execute(pool).await?;
     }
     migrate_legacy_ai_data(pool).await?;
+    migrate_provider_metadata(pool).await?;
+    Ok(())
+}
+
+async fn migrate_provider_metadata(pool: &SqlitePool) -> Result<(), StoreError> {
+    let columns = sqlx::query("PRAGMA table_info(ai_providers)")
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<std::collections::HashSet<_>>();
+    if !columns.contains("auth_style") {
+        sqlx::query(
+            "ALTER TABLE ai_providers ADD COLUMN auth_style TEXT NOT NULL DEFAULT 'bearer'",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !columns.contains("remark") {
+        sqlx::query("ALTER TABLE ai_providers ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -129,7 +154,7 @@ async fn migrate_legacy_ai_data(pool: &SqlitePool) -> Result<(), StoreError> {
 
 pub async fn list_ai_providers(pool: &SqlitePool) -> Result<Vec<AiProvider>, StoreError> {
     let provider_rows = sqlx::query(
-        "SELECT code, name, base_url, driver, priority, enabled FROM ai_providers ORDER BY priority, code",
+        "SELECT code, name, base_url, driver, auth_style, priority, enabled, remark FROM ai_providers ORDER BY priority, code",
     )
     .fetch_all(pool)
     .await?;
@@ -142,8 +167,10 @@ pub async fn list_ai_providers(pool: &SqlitePool) -> Result<Vec<AiProvider>, Sto
             name: row.try_get("name")?,
             base_url: row.try_get("base_url")?,
             driver: row.try_get("driver")?,
+            auth_style: row.try_get("auth_style")?,
             priority: row.try_get("priority")?,
             enabled: row.try_get("enabled")?,
+            remark: row.try_get("remark")?,
             has_key: false,
             key_mask: None,
         });
@@ -328,14 +355,16 @@ pub async fn replace_ai_configuration(
     }
     for provider in providers {
         sqlx::query(
-            "INSERT INTO ai_providers(code, name, base_url, driver, priority, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ai_providers(code, name, base_url, driver, auth_style, priority, enabled, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&provider.code)
         .bind(&provider.name)
         .bind(&provider.base_url)
         .bind(&provider.driver)
+        .bind(&provider.auth_style)
         .bind(provider.priority)
         .bind(provider.enabled)
+        .bind(&provider.remark)
         .execute(&mut *transaction)
         .await?;
         for model in &provider.models {
@@ -385,19 +414,117 @@ pub async fn replace_ai_configuration(
     Ok(())
 }
 
-pub async fn upsert_ai_provider(
+pub async fn create_ai_provider_configuration(
     pool: &SqlitePool,
     provider: &AiProvider,
+    bindings: &HashMap<String, Vec<String>>,
 ) -> Result<(), StoreError> {
+    let mut transaction = pool.begin().await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ai_providers WHERE code = ?)")
+            .bind(&provider.code)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if exists {
+        return Err(StoreError::Conflict(format!(
+            "AI provider {} already exists",
+            provider.code
+        )));
+    }
     sqlx::query(
-        "INSERT INTO ai_providers(code, name, base_url, driver, priority, enabled) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, driver = excluded.driver, priority = excluded.priority, enabled = excluded.enabled",
+        "INSERT INTO ai_providers(code, name, base_url, driver, auth_style, priority, enabled, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&provider.code)
     .bind(&provider.name)
     .bind(&provider.base_url)
     .bind(&provider.driver)
+    .bind(&provider.auth_style)
     .bind(provider.priority)
     .bind(provider.enabled)
+    .bind(&provider.remark)
+    .execute(&mut *transaction)
+    .await?;
+    let mut model_ids = std::collections::HashSet::new();
+    let mut provider_model_ids = std::collections::HashSet::new();
+    for model in &provider.models {
+        if model.provider_code != provider.code
+            || !model_ids.insert(model.id.as_str())
+            || !provider_model_ids.insert(model.model_id.as_str())
+        {
+            return Err(StoreError::InvalidData(format!(
+                "invalid or duplicate model {} for provider {}",
+                model.model_id, provider.code
+            )));
+        }
+        sqlx::query(
+            "INSERT INTO ai_models(id, provider_code, model_id, display_name, capabilities_json, driver, api_path, enabled, sort_no, params_json, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&model.id)
+        .bind(&model.provider_code)
+        .bind(&model.model_id)
+        .bind(&model.display_name)
+        .bind(serde_json::to_string(&model.capabilities)?)
+        .bind(&model.driver)
+        .bind(&model.api_path)
+        .bind(model.enabled)
+        .bind(model.sort_no)
+        .bind(serde_json::to_string(&model.params)?)
+        .bind(&model.remark)
+        .execute(&mut *transaction)
+        .await?;
+        for limit in &model.limits {
+            sqlx::query(
+                "INSERT INTO ai_limits(model_id, limit_kind, max_value, period_expr, group_name) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&model.id)
+            .bind(limit_kind_name(&limit.limit_kind))
+            .bind(limit.max_value as i64)
+            .bind(&limit.period_expr)
+            .bind(&limit.group_name)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    for (agent_code, bound_model_ids) in bindings {
+        let first_sort_no: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sort_no) + 1, 0) FROM ai_agent_bindings WHERE agent_code = ?",
+        )
+        .bind(agent_code)
+        .fetch_one(&mut *transaction)
+        .await?;
+        for (index, model_id) in bound_model_ids.iter().enumerate() {
+            if !model_ids.contains(model_id.as_str()) {
+                return Err(StoreError::NotFound(format!("AI model {model_id}")));
+            }
+            sqlx::query(
+                "INSERT INTO ai_agent_bindings(agent_code, model_id, sort_no) VALUES (?, ?, ?)",
+            )
+            .bind(agent_code)
+            .bind(model_id)
+            .bind(first_sort_no.saturating_add(index as i64))
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn upsert_ai_provider(
+    pool: &SqlitePool,
+    provider: &AiProvider,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO ai_providers(code, name, base_url, driver, auth_style, priority, enabled, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, driver = excluded.driver, auth_style = excluded.auth_style, priority = excluded.priority, enabled = excluded.enabled, remark = excluded.remark",
+    )
+    .bind(&provider.code)
+    .bind(&provider.name)
+    .bind(&provider.base_url)
+    .bind(&provider.driver)
+    .bind(&provider.auth_style)
+    .bind(provider.priority)
+    .bind(provider.enabled)
+    .bind(&provider.remark)
     .execute(pool)
     .await?;
     Ok(())
@@ -743,38 +870,47 @@ async fn grouped_usage_total(
 }
 
 fn period_start(now: i64, period: &str) -> Result<i64, StoreError> {
+    if period == "total" {
+        return Ok(0);
+    }
+    let (period, offset) = if let Some((period, offset)) = period.split_once('+') {
+        (period, parse_period_duration(offset)?)
+    } else {
+        (period, 0)
+    };
     let seconds = match period {
         "second" => 1,
         "minute" => 60,
         "hour" => 60 * 60,
         "day" => 24 * 60 * 60,
         "week" => 7 * 24 * 60 * 60,
+        "month" => 30 * 24 * 60 * 60,
+        _ => parse_period_duration(period)?,
+    };
+    Ok(now - (now - offset).rem_euclid(seconds))
+}
+
+fn parse_period_duration(period: &str) -> Result<i64, StoreError> {
+    let (amount, unit) = period.split_at(period.len().saturating_sub(1));
+    let amount = amount
+        .parse::<i64>()
+        .map_err(|_| StoreError::InvalidData(format!("invalid AI limit period: {period}")))?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        "w" => 7 * 24 * 60 * 60,
         _ => {
-            let (amount, unit) = period.split_at(period.len().saturating_sub(1));
-            let amount = amount.parse::<i64>().map_err(|_| {
-                StoreError::InvalidData(format!("invalid AI limit period: {period}"))
-            })?;
-            let multiplier = match unit {
-                "s" => 1,
-                "m" => 60,
-                "h" => 60 * 60,
-                "d" => 24 * 60 * 60,
-                "w" => 7 * 24 * 60 * 60,
-                _ => {
-                    return Err(StoreError::InvalidData(format!(
-                        "invalid AI limit period: {period}"
-                    )));
-                }
-            };
-            amount
-                .checked_mul(multiplier)
-                .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    StoreError::InvalidData(format!("invalid AI limit period: {period}"))
-                })?
+            return Err(StoreError::InvalidData(format!(
+                "invalid AI limit period: {period}"
+            )));
         }
     };
-    Ok(now - now.rem_euclid(seconds))
+    amount
+        .checked_mul(multiplier)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| StoreError::InvalidData(format!("invalid AI limit period: {period}")))
 }
 
 fn current_timestamp() -> i64 {
@@ -804,6 +940,8 @@ fn limit_kind_name(kind: &LimitKind) -> &'static str {
         LimitKind::InputTokens => "input_tokens",
         LimitKind::OutputTokens => "output_tokens",
         LimitKind::TotalTokens => "total_tokens",
+        LimitKind::Tokens => "tokens",
+        LimitKind::Credits => "credits",
     }
 }
 
@@ -813,6 +951,8 @@ fn parse_limit_kind(value: &str) -> Result<LimitKind, StoreError> {
         "input_tokens" => Ok(LimitKind::InputTokens),
         "output_tokens" => Ok(LimitKind::OutputTokens),
         "total_tokens" => Ok(LimitKind::TotalTokens),
+        "tokens" => Ok(LimitKind::Tokens),
+        "credits" => Ok(LimitKind::Credits),
         other => Err(StoreError::InvalidData(format!(
             "unknown limit kind: {other}"
         ))),
@@ -886,8 +1026,10 @@ mod tests {
             name: code.to_string(),
             base_url: String::new(),
             driver: "openai".to_string(),
+            auth_style: "bearer".to_string(),
             priority: 0,
             enabled: true,
+            remark: String::new(),
             has_key: false,
             key_mask: None,
             models,

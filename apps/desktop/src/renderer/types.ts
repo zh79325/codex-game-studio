@@ -55,8 +55,10 @@ export type AiProvider = {
   name: string;
   baseUrl: string;
   driver: string;
+  authStyle: string;
   priority: number;
   enabled: boolean;
+  remark: string;
   hasKey: boolean;
   keyMask: string | null;
   models: AiModel[];
@@ -101,14 +103,30 @@ export type AiModelUsage = {
   } | null;
 };
 
-export type ModelRecommendation = {
-  providerCode: string;
-  providerName: string;
-  driver: string;
-  defaultBaseUrl: string;
+export type ProviderPresetModel = {
   modelId: string;
-  displayName: string;
   capabilities: string[];
-  recommended: boolean;
-  defaultLimits: AiLimit[];
+  driver: string;
+  apiPath: string;
+  limitKind: string;
+  defaultPeriod: string;
+  paramsJson: string;
+  remark: string;
+};
+
+export type ProviderPreset = {
+  code: string;
+  vendor: string;
+  plan: string;
+  label: string;
+  baseUrl: string;
+  driver: string;
+  authStyle: string;
+  keyPrefix: string | null;
+  models: ProviderPresetModel[];
+};
+
+export type AiAgentBinding = {
+  agentCode: string;
+  modelIds: string[];
 };

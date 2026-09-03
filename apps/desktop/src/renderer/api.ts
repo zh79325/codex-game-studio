@@ -1,11 +1,12 @@
 import type {
   AiAgent,
+  AiAgentBinding,
   AiModel,
   AiModelUsage,
   AiProvider,
   FocusSnapshot,
-  ModelRecommendation,
   Project,
+  ProviderPreset,
 } from "./types";
 import type { GameArtBibleVersion, GameTask } from "../generated/game";
 
@@ -55,13 +56,21 @@ export const workspaceApi = {
 export const aiApi = {
   listProviders: async () =>
     (await rpc<{ providers: AiProvider[] }>("game/aiProvider/list")).providers,
-  writeProvider: async (
-    method: "create" | "update",
+  createProvider: async (
     provider: AiProvider,
-    apiKey?: string,
+    apiKey: string | undefined,
+    agentBindings: AiAgentBinding[],
   ) =>
     (
-      await rpc<{ provider: AiProvider }>(`game/aiProvider/${method}`, {
+      await rpc<{ provider: AiProvider }>("game/aiProvider/create", {
+        provider,
+        apiKey,
+        agentBindings,
+      })
+    ).provider,
+  updateProvider: async (provider: AiProvider, apiKey?: string) =>
+    (
+      await rpc<{ provider: AiProvider }>("game/aiProvider/update", {
         provider,
         apiKey,
       })
@@ -87,9 +96,9 @@ export const aiApi = {
     rpc<{ cleared: number }>("game/aiUsage/reset", { modelId, limitKind }),
   clearBreaker: (modelId: string) =>
     rpc("game/aiBreaker/clear", { modelId }),
-  recommendations: () =>
-    rpc<{ recommendations: ModelRecommendation[]; path: string }>(
-      "game/modelRecommendation/list",
+  listProviderPresets: () =>
+    rpc<{ presets: ProviderPreset[]; path: string }>(
+      "game/providerPreset/list",
     ),
   exportConfig: async () =>
     (await rpc<{ json: string }>("game/aiConfig/export")).json,

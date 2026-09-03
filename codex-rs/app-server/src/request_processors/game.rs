@@ -358,10 +358,10 @@ impl GameRequestProcessor {
 
     pub(crate) async fn ai_provider_create(
         &self,
-        params: GameAiProviderWriteParams,
+        params: GameAiProviderCreateParams,
     ) -> std::result::Result<GameAiProviderCreateResponse, JSONRPCErrorError> {
         self.adapter
-            .ai_provider_write(params)
+            .ai_provider_create(params)
             .await
             .map(|provider| GameAiProviderCreateResponse { provider })
             .map_err(game_error)
@@ -372,7 +372,7 @@ impl GameRequestProcessor {
         params: GameAiProviderWriteParams,
     ) -> std::result::Result<GameAiProviderUpdateResponse, JSONRPCErrorError> {
         self.adapter
-            .ai_provider_write(params)
+            .ai_provider_update(params)
             .await
             .map(|provider| GameAiProviderUpdateResponse { provider })
             .map_err(game_error)
@@ -464,12 +464,12 @@ impl GameRequestProcessor {
             .map_err(game_error)
     }
 
-    pub(crate) fn model_recommendation_list(
+    pub(crate) fn provider_preset_list(
         &self,
-        params: GameModelRecommendationListParams,
-    ) -> std::result::Result<GameModelRecommendationListResponse, JSONRPCErrorError> {
+        params: GameProviderPresetListParams,
+    ) -> std::result::Result<GameProviderPresetListResponse, JSONRPCErrorError> {
         self.adapter
-            .model_recommendation_list(params)
+            .provider_preset_list(params)
             .map_err(game_error)
     }
 

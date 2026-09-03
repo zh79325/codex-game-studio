@@ -192,6 +192,7 @@ export type { FsWatchResponse } from "./FsWatchResponse";
 export type { FsWriteFileParams } from "./FsWriteFileParams";
 export type { FsWriteFileResponse } from "./FsWriteFileResponse";
 export type { GameAiAgent } from "./GameAiAgent";
+export type { GameAiAgentBinding } from "./GameAiAgentBinding";
 export type { GameAiBreaker } from "./GameAiBreaker";
 export type { GameAiLimit } from "./GameAiLimit";
 export type { GameAiModel } from "./GameAiModel";
@@ -208,8 +209,9 @@ export type { GameDesignConfirmationRequiredNotification } from "./GameDesignCon
 export type { GameFocusAction } from "./GameFocusAction";
 export type { GameFocusWorkflow } from "./GameFocusWorkflow";
 export type { GameMessage } from "./GameMessage";
-export type { GameModelRecommendation } from "./GameModelRecommendation";
 export type { GameProject } from "./GameProject";
+export type { GameProviderPreset } from "./GameProviderPreset";
+export type { GameProviderPresetModel } from "./GameProviderPresetModel";
 export type { GameRecoveryStatusNotification } from "./GameRecoveryStatusNotification";
 export type { GameReviewReport } from "./GameReviewReport";
 export type { GameTask } from "./GameTask";

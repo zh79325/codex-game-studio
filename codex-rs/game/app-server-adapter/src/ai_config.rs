@@ -5,9 +5,11 @@ use codex_game_domain::AiCapability;
 use codex_game_domain::AiProvider;
 use codex_game_domain::LimitKind;
 use codex_game_domain::LimitPolicy;
-use codex_game_domain::ModelRecommendation;
 use codex_game_domain::ProviderModel;
+use codex_game_domain::ProviderPreset;
+use codex_game_domain::ProviderPresetModel;
 use codex_game_store::clear_ai_breaker;
+use codex_game_store::create_ai_provider_configuration;
 use codex_game_store::delete_ai_model;
 use codex_game_store::delete_ai_provider;
 use codex_game_store::list_agent_bindings;
@@ -43,39 +45,9 @@ struct ExportedAiConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RecommendationFile {
+struct ProviderPresetFile {
     schema_version: u32,
-    providers: Vec<RecommendationProvider>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecommendationProvider {
-    code: String,
-    name: String,
-    driver: String,
-    default_base_url: String,
-    models: Vec<RecommendationModel>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecommendationModel {
-    model_id: String,
-    display_name: String,
-    capabilities: Vec<AiCapability>,
-    recommended: bool,
-    #[serde(default)]
-    default_limits: Vec<RecommendationLimit>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecommendationLimit {
-    limit_kind: LimitKind,
-    max_value: u64,
-    period: String,
-    group_name: String,
+    presets: Vec<ProviderPreset>,
 }
 
 impl GameAppServerAdapter {
@@ -102,7 +74,30 @@ impl GameAppServerAdapter {
         })
     }
 
-    pub async fn ai_provider_write(
+    pub async fn ai_provider_create(
+        &self,
+        params: GameAiProviderCreateParams,
+    ) -> Result<GameAiProvider, String> {
+        let mut provider = provider_from_dto(params.provider)?;
+        validate_provider(&provider)?;
+        for model in &provider.models {
+            validate_model(model)?;
+        }
+        let bindings = validate_create_bindings(&provider, params.agent_bindings)?;
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        create_ai_provider_configuration(&pool, &provider, &bindings)
+            .await
+            .map_err(|error| error.to_string())?;
+        pool.close().await;
+        let secrets = self.update_provider_secret(&provider.code, params.api_key)?;
+        apply_secret_metadata(&mut provider, &secrets);
+        self.sync_codex_provider_config().await?;
+        Ok(provider_dto(provider))
+    }
+
+    pub async fn ai_provider_update(
         &self,
         params: GameAiProviderWriteParams,
     ) -> Result<GameAiProvider, String> {
@@ -111,23 +106,22 @@ impl GameAppServerAdapter {
         let pool = open_studio_store(&self.studio_storage)
             .await
             .map_err(|error| error.to_string())?;
+        let existing = list_ai_providers(&pool)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|existing| existing.code == provider.code);
+        let Some(existing) = existing else {
+            pool.close().await;
+            return Err(format!("AI provider {} does not exist", provider.code));
+        };
+        provider.models = existing.models;
         upsert_ai_provider(&pool, &provider)
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
-        let mut secrets = self.read_secrets()?;
-        if let Some(api_key) = params.api_key {
-            if api_key.trim().is_empty() {
-                secrets.provider_keys.remove(&provider.code);
-            } else {
-                secrets.provider_keys.insert(provider.code.clone(), api_key);
-            }
-            self.write_secrets(&secrets)?;
-        }
-        if let Some(key) = secrets.provider_keys.get(&provider.code) {
-            provider.has_key = true;
-            provider.key_mask = Some(mask_key(key));
-        }
+        let secrets = self.update_provider_secret(&provider.code, params.api_key)?;
+        apply_secret_metadata(&mut provider, &secrets);
         self.sync_codex_provider_config().await?;
         Ok(provider_dto(provider))
     }
@@ -164,6 +158,7 @@ impl GameAppServerAdapter {
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
+        self.sync_codex_provider_config().await?;
         Ok(model_dto(model))
     }
 
@@ -178,6 +173,7 @@ impl GameAppServerAdapter {
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
+        self.sync_codex_provider_config().await?;
         Ok(GameAiModelDeleteResponse {})
     }
 
@@ -275,52 +271,23 @@ impl GameAppServerAdapter {
         Ok(GameAiBreakerClearResponse {})
     }
 
-    pub fn model_recommendation_list(
+    pub fn provider_preset_list(
         &self,
-        _params: GameModelRecommendationListParams,
-    ) -> Result<GameModelRecommendationListResponse, String> {
+        _params: GameProviderPresetListParams,
+    ) -> Result<GameProviderPresetListResponse, String> {
         let path = self.recommendation_path()?;
         let document = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        let file: RecommendationFile =
+        let file: ProviderPresetFile =
             toml::from_str(&document).map_err(|error| error.to_string())?;
-        if file.schema_version != 1 {
+        if file.schema_version != 2 {
             return Err(format!(
-                "unsupported model recommendation schema: {}",
+                "unsupported provider preset schema: {}",
                 file.schema_version
             ));
         }
-        let recommendations = file
-            .providers
-            .into_iter()
-            .flat_map(|provider| {
-                provider
-                    .models
-                    .into_iter()
-                    .map(move |model| ModelRecommendation {
-                        provider_code: provider.code.clone(),
-                        provider_name: provider.name.clone(),
-                        driver: provider.driver.clone(),
-                        default_base_url: provider.default_base_url.clone(),
-                        model_id: model.model_id,
-                        display_name: model.display_name,
-                        capabilities: model.capabilities,
-                        recommended: model.recommended,
-                        default_limits: model
-                            .default_limits
-                            .into_iter()
-                            .map(|limit| LimitPolicy {
-                                limit_kind: limit.limit_kind,
-                                max_value: limit.max_value,
-                                period_expr: limit.period,
-                                group_name: limit.group_name,
-                            })
-                            .collect(),
-                    })
-            })
-            .map(recommendation_dto)
-            .collect();
-        Ok(GameModelRecommendationListResponse {
-            recommendations,
+        validate_presets(&file.presets)?;
+        Ok(GameProviderPresetListResponse {
+            presets: file.presets.into_iter().map(preset_dto).collect(),
             path: path.to_string_lossy().into_owned(),
         })
     }
@@ -432,19 +399,27 @@ impl GameAppServerAdapter {
         }
         let mut managed = Vec::with_capacity(providers.len());
         for provider in providers {
+            let Some(base_url) = responses_base_url(&provider) else {
+                continue;
+            };
             managed.push(provider.code.clone());
             let mut entry = toml::Table::new();
             entry.insert("name".to_string(), toml::Value::String(provider.name));
-            if !provider.base_url.trim().is_empty() {
-                entry.insert(
-                    "base_url".to_string(),
-                    toml::Value::String(provider.base_url),
-                );
+            if !base_url.is_empty() {
+                entry.insert("base_url".to_string(), toml::Value::String(base_url));
             }
-            entry.insert(
-                "env_key".to_string(),
-                toml::Value::String(provider_key_environment(&provider.code)),
-            );
+            let environment = provider_key_environment(&provider.code);
+            match provider.auth_style.as_str() {
+                "bearer" => {
+                    entry.insert("env_key".to_string(), toml::Value::String(environment));
+                }
+                "x-api-key" => {
+                    let mut headers = toml::Table::new();
+                    headers.insert("x-api-key".to_string(), toml::Value::String(environment));
+                    entry.insert("env_http_headers".to_string(), toml::Value::Table(headers));
+                }
+                _ => continue,
+            }
             entry.insert(
                 "wire_api".to_string(),
                 toml::Value::String("responses".to_string()),
@@ -485,6 +460,25 @@ impl GameAppServerAdapter {
             .ok_or_else(|| "invalid project-local Codex home".to_string())
     }
 
+    fn update_provider_secret(
+        &self,
+        provider_code: &str,
+        api_key: Option<String>,
+    ) -> Result<AiSecrets, String> {
+        let mut secrets = self.read_secrets()?;
+        if let Some(api_key) = api_key {
+            if api_key.trim().is_empty() {
+                secrets.provider_keys.remove(provider_code);
+            } else {
+                secrets
+                    .provider_keys
+                    .insert(provider_code.to_string(), api_key);
+            }
+            self.write_secrets(&secrets)?;
+        }
+        Ok(secrets)
+    }
+
     fn read_secrets(&self) -> Result<AiSecrets, String> {
         let path = self.secret_path()?;
         match fs::read_to_string(path) {
@@ -508,6 +502,120 @@ impl GameAppServerAdapter {
     }
 }
 
+fn apply_secret_metadata(provider: &mut AiProvider, secrets: &AiSecrets) {
+    provider.has_key = false;
+    provider.key_mask = None;
+    if let Some(key) = secrets.provider_keys.get(&provider.code) {
+        provider.has_key = true;
+        provider.key_mask = Some(mask_key(key));
+    }
+}
+
+fn validate_create_bindings(
+    provider: &AiProvider,
+    bindings: Vec<GameAiAgentBinding>,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let known_agents = agent_definitions()
+        .into_iter()
+        .map(|agent| agent.agent_code)
+        .collect::<HashSet<_>>();
+    let model_ids = provider
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut result = HashMap::new();
+    for binding in bindings {
+        if !known_agents.contains(&binding.agent_code) {
+            return Err(format!("unknown agent: {}", binding.agent_code));
+        }
+        if result.contains_key(&binding.agent_code) {
+            return Err(format!("duplicate agent binding: {}", binding.agent_code));
+        }
+        let mut unique_model_ids = HashSet::new();
+        for model_id in &binding.model_ids {
+            if !model_ids.contains(model_id.as_str()) {
+                return Err(format!("unknown AI model in binding: {model_id}"));
+            }
+            if !unique_model_ids.insert(model_id) {
+                return Err(format!(
+                    "duplicate AI model {model_id} in agent binding {}",
+                    binding.agent_code
+                ));
+            }
+        }
+        result.insert(binding.agent_code, binding.model_ids);
+    }
+    Ok(result)
+}
+
+fn validate_presets(presets: &[ProviderPreset]) -> Result<(), String> {
+    let mut preset_codes = HashSet::new();
+    for preset in presets {
+        if preset.code.trim().is_empty()
+            || preset.vendor.trim().is_empty()
+            || preset.plan.trim().is_empty()
+            || preset.label.trim().is_empty()
+            || preset.base_url.trim().is_empty()
+            || preset.driver.trim().is_empty()
+        {
+            return Err("provider preset metadata must not be empty".to_string());
+        }
+        if !preset_codes.insert(preset.code.as_str()) {
+            return Err(format!("duplicate provider preset code: {}", preset.code));
+        }
+        if !matches!(preset.auth_style.as_str(), "bearer" | "x-api-key") {
+            return Err(format!(
+                "unsupported provider preset auth style: {}",
+                preset.auth_style
+            ));
+        }
+        if preset.models.is_empty() {
+            return Err(format!("provider preset {} has no models", preset.code));
+        }
+        let mut model_ids = HashSet::new();
+        for model in &preset.models {
+            if model.model_id.trim().is_empty()
+                || model.driver.trim().is_empty()
+                || model.api_path.trim().is_empty()
+                || model.default_period.trim().is_empty()
+                || model.capabilities.is_empty()
+                || !model.params.is_object()
+            {
+                return Err(format!(
+                    "provider preset {} contains an invalid model",
+                    preset.code
+                ));
+            }
+            if !model_ids.insert(model.model_id.as_str()) {
+                return Err(format!(
+                    "duplicate model {} in provider preset {}",
+                    model.model_id, preset.code
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn responses_base_url(provider: &AiProvider) -> Option<String> {
+    let model = provider.models.iter().find(|model| {
+        model.enabled && matches!(model.driver.as_str(), "openai" | "openai_compat")
+    })?;
+    let base = provider.base_url.trim_end_matches('/');
+    let mut api_path = model.api_path.trim().trim_end_matches('/');
+    if let Some(prefix) = api_path.strip_suffix("/responses") {
+        api_path = prefix;
+    }
+    if api_path.is_empty() {
+        Some(base.to_string())
+    } else if base.is_empty() {
+        Some(api_path.to_string())
+    } else {
+        Some(format!("{base}/{}", api_path.trim_start_matches('/')))
+    }
+}
+
 fn validate_import_bundle(bundle: &ExportedAiConfig) -> Result<(), String> {
     let known_agents = agent_definitions()
         .into_iter()
@@ -520,8 +628,15 @@ fn validate_import_bundle(bundle: &ExportedAiConfig) -> Result<(), String> {
         if !provider_codes.insert(provider.code.as_str()) {
             return Err(format!("duplicate provider code: {}", provider.code));
         }
+        let mut provider_model_ids = HashSet::new();
         for model in &provider.models {
             validate_model(model)?;
+            if !provider_model_ids.insert(model.model_id.as_str()) {
+                return Err(format!(
+                    "duplicate model {} in provider {}",
+                    model.model_id, provider.code
+                ));
+            }
             if model.provider_code != provider.code {
                 return Err(format!(
                     "model {} belongs to provider {}, expected {}",
@@ -564,6 +679,12 @@ fn validate_provider(provider: &AiProvider) -> Result<(), String> {
     if provider.name.trim().is_empty() || provider.driver.trim().is_empty() {
         return Err("provider name and driver must not be empty".to_string());
     }
+    if !matches!(provider.auth_style.as_str(), "bearer" | "x-api-key") {
+        return Err(format!(
+            "unsupported provider auth style: {}",
+            provider.auth_style
+        ));
+    }
     Ok(())
 }
 
@@ -589,8 +710,10 @@ fn provider_from_dto(provider: GameAiProvider) -> Result<AiProvider, String> {
         name: provider.name,
         base_url: provider.base_url,
         driver: provider.driver,
+        auth_style: provider.auth_style,
         priority: provider.priority,
         enabled: provider.enabled,
+        remark: provider.remark,
         has_key: provider.has_key,
         key_mask: provider.key_mask,
         models: provider
@@ -639,8 +762,10 @@ fn provider_dto(provider: AiProvider) -> GameAiProvider {
         name: provider.name,
         base_url: provider.base_url,
         driver: provider.driver,
+        auth_style: provider.auth_style,
         priority: provider.priority,
         enabled: provider.enabled,
+        remark: provider.remark,
         has_key: provider.has_key,
         key_mask: provider.key_mask,
         models: provider.models.into_iter().map(model_dto).collect(),
@@ -709,25 +834,30 @@ fn usage_dto(usage: codex_game_domain::ModelUsage) -> GameAiModelUsage {
     }
 }
 
-fn recommendation_dto(recommendation: ModelRecommendation) -> GameModelRecommendation {
-    GameModelRecommendation {
-        provider_code: recommendation.provider_code,
-        provider_name: recommendation.provider_name,
-        driver: recommendation.driver,
-        default_base_url: recommendation.default_base_url,
-        model_id: recommendation.model_id,
-        display_name: recommendation.display_name,
-        capabilities: recommendation
-            .capabilities
-            .iter()
-            .map(capability_name)
-            .collect(),
-        recommended: recommendation.recommended,
-        default_limits: recommendation
-            .default_limits
-            .into_iter()
-            .map(limit_dto)
-            .collect(),
+fn preset_dto(preset: ProviderPreset) -> GameProviderPreset {
+    GameProviderPreset {
+        code: preset.code,
+        vendor: preset.vendor,
+        plan: preset.plan,
+        label: preset.label,
+        base_url: preset.base_url,
+        driver: preset.driver,
+        auth_style: preset.auth_style,
+        key_prefix: preset.key_prefix,
+        models: preset.models.into_iter().map(preset_model_dto).collect(),
+    }
+}
+
+fn preset_model_dto(model: ProviderPresetModel) -> GameProviderPresetModel {
+    GameProviderPresetModel {
+        model_id: model.model_id,
+        capabilities: model.capabilities.iter().map(capability_name).collect(),
+        driver: model.driver,
+        api_path: model.api_path,
+        limit_kind: limit_kind_name(&model.limit_kind),
+        default_period: model.default_period,
+        params_json: model.params.to_string(),
+        remark: model.remark,
     }
 }
 
@@ -748,6 +878,9 @@ fn parse_capability(value: &str) -> Result<AiCapability, String> {
         "image_text_to_image" => Ok(AiCapability::ImageTextToImage),
         "image_image_to_image" => Ok(AiCapability::ImageImageToImage),
         "image_reference_consistency" => Ok(AiCapability::ImageReferenceConsistency),
+        "video_text_to_video" => Ok(AiCapability::VideoTextToVideo),
+        "video_image_to_video" => Ok(AiCapability::VideoImageToVideo),
+        "model3d" => Ok(AiCapability::Model3d),
         other => Err(format!("unknown AI capability: {other}")),
     }
 }
@@ -760,6 +893,9 @@ fn capability_name(capability: &AiCapability) -> String {
         AiCapability::ImageTextToImage => "image_text_to_image",
         AiCapability::ImageImageToImage => "image_image_to_image",
         AiCapability::ImageReferenceConsistency => "image_reference_consistency",
+        AiCapability::VideoTextToVideo => "video_text_to_video",
+        AiCapability::VideoImageToVideo => "video_image_to_video",
+        AiCapability::Model3d => "model3d",
     }
     .to_string()
 }
@@ -770,6 +906,8 @@ fn parse_limit_kind(value: &str) -> Result<LimitKind, String> {
         "input_tokens" => Ok(LimitKind::InputTokens),
         "output_tokens" => Ok(LimitKind::OutputTokens),
         "total_tokens" => Ok(LimitKind::TotalTokens),
+        "tokens" => Ok(LimitKind::Tokens),
+        "credits" => Ok(LimitKind::Credits),
         other => Err(format!("unknown limit kind: {other}")),
     }
 }
@@ -780,6 +918,8 @@ fn limit_kind_name(kind: &LimitKind) -> String {
         LimitKind::InputTokens => "input_tokens",
         LimitKind::OutputTokens => "output_tokens",
         LimitKind::TotalTokens => "total_tokens",
+        LimitKind::Tokens => "tokens",
+        LimitKind::Credits => "credits",
     }
     .to_string()
 }
@@ -860,8 +1000,10 @@ mod tests {
             name: "Test Provider".to_string(),
             base_url: "https://example.test/v1".to_string(),
             driver: "openai".to_string(),
+            auth_style: "bearer".to_string(),
             priority: 0,
             enabled: true,
+            remark: String::new(),
             has_key: false,
             key_mask: None,
             models: Vec::new(),
@@ -876,9 +1018,10 @@ mod tests {
         let secret = "secret-value-1234";
 
         let created = adapter
-            .ai_provider_write(GameAiProviderWriteParams {
+            .ai_provider_create(GameAiProviderCreateParams {
                 provider: provider_dto_for_test(),
                 api_key: Some(secret.to_string()),
+                agent_bindings: Vec::new(),
             })
             .await
             .expect("create provider");
@@ -950,19 +1093,22 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_schema_rejects_secret_fields() {
+    fn provider_preset_schema_rejects_secret_fields() {
         let document = r#"
-            schema_version = 1
+            schema_version = 2
 
-            [[providers]]
+            [[presets]]
             code = "unsafe"
-            name = "Unsafe"
-            driver = "openai"
-            default_base_url = "https://example.test"
+            vendor = "Unsafe"
+            plan = "Unsafe"
+            label = "Unsafe"
+            base_url = "https://example.test"
+            driver = "openai_compat"
+            auth_style = "bearer"
             api_key = "must-not-be-accepted"
             models = []
         "#;
 
-        assert!(toml::from_str::<RecommendationFile>(document).is_err());
+        assert!(toml::from_str::<ProviderPresetFile>(document).is_err());
     }
 }

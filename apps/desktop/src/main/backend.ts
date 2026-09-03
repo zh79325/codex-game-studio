@@ -207,6 +207,9 @@ const RESTART_AFTER_METHODS = new Set([
   "game/aiProvider/create",
   "game/aiProvider/update",
   "game/aiProvider/delete",
+  "game/aiModel/create",
+  "game/aiModel/update",
+  "game/aiModel/delete",
   "game/aiConfig/import",
 ]);
 
@@ -225,7 +228,7 @@ const READ_ONLY_METHODS = new Set([
   "game/aiProvider/list",
   "game/aiAgent/list",
   "game/aiUsage/read",
-  "game/modelRecommendation/list",
+  "game/providerPreset/list",
   "game/aiConfig/export",
 ]);
 

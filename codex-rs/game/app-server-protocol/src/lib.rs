@@ -256,8 +256,10 @@ game_dto!(GameAiProvider {
     name: String,
     base_url: String,
     driver: String,
+    auth_style: String,
     priority: i64,
     enabled: bool,
+    remark: String,
     has_key: bool,
     key_mask: Option<String>,
     models: Vec<GameAiModel>
@@ -299,16 +301,26 @@ game_dto!(GameAiModelUsage {
     budgets: Vec<GameAiUsageBudget>,
     breaker: Option<GameAiBreaker>
 });
-game_dto!(GameModelRecommendation {
-    provider_code: String,
-    provider_name: String,
-    driver: String,
-    default_base_url: String,
+game_dto!(GameProviderPresetModel {
     model_id: String,
-    display_name: String,
     capabilities: Vec<String>,
-    recommended: bool,
-    default_limits: Vec<GameAiLimit>
+    driver: String,
+    api_path: String,
+    limit_kind: String,
+    default_period: String,
+    params_json: String,
+    remark: String
+});
+game_dto!(GameProviderPreset {
+    code: String,
+    vendor: String,
+    plan: String,
+    label: String,
+    base_url: String,
+    driver: String,
+    auth_style: String,
+    key_prefix: Option<String>,
+    models: Vec<GameProviderPresetModel>
 });
 
 empty_params!(GameAiProviderListParams);
@@ -321,6 +333,19 @@ pub struct GameAiProviderWriteParams {
     pub provider: GameAiProvider,
     #[ts(optional = nullable)]
     pub api_key: Option<String>,
+}
+game_dto!(GameAiAgentBinding {
+    agent_code: String,
+    model_ids: Vec<String>
+});
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct GameAiProviderCreateParams {
+    pub provider: GameAiProvider,
+    #[ts(optional = nullable)]
+    pub api_key: Option<String>,
+    pub agent_bindings: Vec<GameAiAgentBinding>,
 }
 game_dto!(GameAiProviderCreateResponse {
     provider: GameAiProvider
@@ -359,9 +384,9 @@ game_dto!(GameAiUsageResetResponse { cleared: u64 });
 game_dto!(GameAiBreakerClearParams { model_id: String });
 empty_params!(GameAiBreakerClearResponse);
 
-empty_params!(GameModelRecommendationListParams);
-game_dto!(GameModelRecommendationListResponse {
-    recommendations: Vec<GameModelRecommendation>,
+empty_params!(GameProviderPresetListParams);
+game_dto!(GameProviderPresetListResponse {
+    presets: Vec<GameProviderPreset>,
     path: String
 });
 empty_params!(GameAiConfigExportParams);

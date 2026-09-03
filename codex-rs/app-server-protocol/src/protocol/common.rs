@@ -619,7 +619,7 @@ client_request_definitions! {
     },
     #[experimental("game/aiProvider/create")]
     GameAiProviderCreate => "game/aiProvider/create" {
-        params: v2::GameAiProviderWriteParams,
+        params: v2::GameAiProviderCreateParams,
         serialization: global("game-ai"),
         response: v2::GameAiProviderCreateResponse,
     },
@@ -683,11 +683,11 @@ client_request_definitions! {
         serialization: global("game-ai"),
         response: v2::GameAiBreakerClearResponse,
     },
-    #[experimental("game/modelRecommendation/list")]
-    GameModelRecommendationList => "game/modelRecommendation/list" {
-        params: v2::GameModelRecommendationListParams,
+    #[experimental("game/providerPreset/list")]
+    GameProviderPresetList => "game/providerPreset/list" {
+        params: v2::GameProviderPresetListParams,
         serialization: global_shared_read("game-ai"),
-        response: v2::GameModelRecommendationListResponse,
+        response: v2::GameProviderPresetListResponse,
     },
     #[experimental("game/aiConfig/export")]
     GameAiConfigExport => "game/aiConfig/export" {

@@ -1188,9 +1188,9 @@ impl MessageProcessor {
                 .ai_breaker_clear(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameModelRecommendationList { params, .. } => self
+            ClientRequest::GameProviderPresetList { params, .. } => self
                 .game_processor
-                .model_recommendation_list(params)
+                .provider_preset_list(params)
                 .map(|response| Some(response.into())),
             ClientRequest::GameAiConfigExport { params, .. } => self
                 .game_processor

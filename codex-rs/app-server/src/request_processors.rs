@@ -548,6 +548,8 @@ mod feedback_processor;
 mod feedback_thread_index;
 mod fs_processor;
 mod game;
+mod game_speech;
+mod game_speech_protocol;
 mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;

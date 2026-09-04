@@ -130,6 +130,7 @@ textarea {
 }
 
 .workspace-page > .ant-row {
+  height: 0;
   min-height: 0;
   flex: 1;
   overflow: hidden;
@@ -350,6 +351,7 @@ textarea {
 
 .chat-panel > .ant-card-body {
   display: flex;
+  height: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
@@ -362,17 +364,7 @@ textarea {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-}
-
-.message-list-toolbar,
-.thinking-stream-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.message-list-toolbar {
-  justify-content: flex-end;
+  overflow: hidden;
 }
 
 .message-list {
@@ -384,10 +376,6 @@ textarea {
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
-}
-
-.scroll-lock-button.ant-btn {
-  color: #8e999f;
 }
 
 .chat-empty {
@@ -629,6 +617,68 @@ textarea {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.chat-composer-actions {
+  align-self: end;
+}
+
+.speech-input {
+  display: flex;
+  min-height: 86px;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 18px;
+  overflow: hidden;
+  border: 1px solid rgba(100, 181, 246, 0.36);
+  border-radius: 8px;
+  background: rgba(24, 144, 255, 0.08);
+  text-align: center;
+}
+
+.speech-input-recording {
+  border-color: rgba(255, 77, 79, 0.55);
+  background: rgba(255, 77, 79, 0.08);
+}
+
+.speech-wave {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 3px;
+}
+
+.speech-wave span {
+  width: 3px;
+  height: 8px;
+  border-radius: 2px;
+  background: #69b1ff;
+}
+
+.speech-input-recording .speech-wave span {
+  background: #ff7875;
+  animation: speech-wave-pulse 0.8s ease-in-out infinite alternate;
+}
+
+.speech-input-recording .speech-wave span:nth-child(2n) {
+  animation-delay: 0.18s;
+}
+
+.speech-input-recording .speech-wave span:nth-child(3n) {
+  animation-delay: 0.36s;
+}
+
+@keyframes speech-wave-pulse {
+  from {
+    height: 6px;
+    opacity: 0.5;
+  }
+
+  to {
+    height: 28px;
+    opacity: 1;
+  }
+}
+
 @media (max-width: 1199px) {
   .workspace-page {
     height: auto;
@@ -637,6 +687,7 @@ textarea {
   }
 
   .workspace-page > .ant-row {
+    height: auto;
     flex: none;
     overflow: visible;
   }

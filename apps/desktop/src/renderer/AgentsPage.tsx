@@ -40,6 +40,7 @@ const limitKinds = [
   "total_tokens",
   "tokens",
   "credits",
+  "duration_seconds",
 ];
 const limitKindLabels: Record<string, string> = {
   calls: "调用次数",
@@ -49,6 +50,7 @@ const limitKindLabels: Record<string, string> = {
   total_tokens: "总 Token",
   tokens: "Token",
   credits: "Credits",
+  duration_seconds: "语音时长（秒）",
 };
 const periodOptions = [
   "second",

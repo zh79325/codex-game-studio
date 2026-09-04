@@ -194,7 +194,15 @@ export type AiAgent = {
   agentCode: string;
   role: string;
   roleType: "director" | "specialist" | "executor";
-  capability: "text" | "t2i" | "i2i" | "vision" | "model3d" | "t2v" | "i2v";
+  capability:
+    | "text"
+    | "t2i"
+    | "i2i"
+    | "vision"
+    | "model3d"
+    | "t2v"
+    | "i2v"
+    | "speech";
   requiredModelCapability: string;
   focusable: boolean;
   aliases: string[];

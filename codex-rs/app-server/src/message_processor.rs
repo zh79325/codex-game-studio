@@ -1090,6 +1090,26 @@ impl MessageProcessor {
                 .project_finalize(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameSpeechStart { params, .. } => self
+                .game_processor
+                .speech_start(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameSpeechChunk { params, .. } => self
+                .game_processor
+                .speech_chunk(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameSpeechFinish { params, .. } => self
+                .game_processor
+                .speech_finish(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameSpeechCancel { params, .. } => self
+                .game_processor
+                .speech_cancel(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::GameConversationEnsure { params, .. } => self
                 .game_processor
                 .conversation_ensure(params)

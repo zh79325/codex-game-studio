@@ -67,6 +67,26 @@ export const conversationApi = {
     rpc("game/conversation/commitDrafts", { conversationId, draftIds }),
 };
 
+export type SpeechSession = {
+  sessionId: string;
+  sampleRate: number;
+  channels: number;
+  chunkMs: number;
+};
+
+export const speechApi = {
+  start: () => rpc<SpeechSession>("game/speech/start"),
+  sendChunk: (sessionId: string, audioBase64: string) =>
+    rpc<Record<string, never>>("game/speech/chunk", {
+      sessionId,
+      audioBase64,
+    }),
+  finish: (sessionId: string) =>
+    rpc<Record<string, never>>("game/speech/finish", { sessionId }),
+  cancel: (sessionId: string) =>
+    rpc<Record<string, never>>("game/speech/cancel", { sessionId }),
+};
+
 export const workspaceApi = {
   readProject: async (projectId: string) =>
     (await rpc<{ project: Project }>("game/project/read", { projectId }))

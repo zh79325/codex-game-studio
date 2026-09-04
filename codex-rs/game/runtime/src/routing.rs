@@ -17,6 +17,7 @@ pub enum Capability {
     VideoTextToVideo,
     VideoImageToVideo,
     Model3d,
+    SpeechRecognition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

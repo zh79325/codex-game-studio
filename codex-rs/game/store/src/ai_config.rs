@@ -943,6 +943,7 @@ fn limit_kind_name(kind: &LimitKind) -> &'static str {
         LimitKind::TotalTokens => "total_tokens",
         LimitKind::Tokens => "tokens",
         LimitKind::Credits => "credits",
+        LimitKind::DurationSeconds => "duration_seconds",
     }
 }
 
@@ -955,6 +956,7 @@ fn parse_limit_kind(value: &str) -> Result<LimitKind, StoreError> {
         "total_tokens" => Ok(LimitKind::TotalTokens),
         "tokens" => Ok(LimitKind::Tokens),
         "credits" => Ok(LimitKind::Credits),
+        "duration_seconds" => Ok(LimitKind::DurationSeconds),
         other => Err(StoreError::InvalidData(format!(
             "unknown limit kind: {other}"
         ))),

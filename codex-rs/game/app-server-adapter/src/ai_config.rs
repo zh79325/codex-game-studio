@@ -10,6 +10,7 @@ use codex_game_domain::LimitPolicy;
 use codex_game_domain::ProviderModel;
 use codex_game_domain::ProviderPreset;
 use codex_game_domain::ProviderPresetModel;
+use codex_game_runtime::REALTIME_SPEECH_AGENT;
 use codex_game_runtime::bundled_agent_definitions;
 use codex_game_store::clear_ai_breaker;
 use codex_game_store::create_ai_provider_configuration;
@@ -17,9 +18,13 @@ use codex_game_store::delete_ai_model;
 use codex_game_store::delete_ai_provider;
 use codex_game_store::list_agent_bindings;
 use codex_game_store::list_ai_providers;
+use codex_game_store::load_ai_route_models;
 use codex_game_store::open_studio_store;
 use codex_game_store::read_ai_usage;
+use codex_game_store::record_ai_route_failure;
+use codex_game_store::record_ai_route_success;
 use codex_game_store::replace_ai_configuration;
+use codex_game_store::reserve_ai_usage;
 use codex_game_store::reset_ai_usage;
 use codex_game_store::upsert_ai_model;
 use codex_game_store::upsert_ai_provider;
@@ -34,6 +39,19 @@ use std::path::Path;
 use std::path::PathBuf;
 
 const GAME_STREAM_IDLE_TIMEOUT_MS: i64 = 60_000;
+const DEFAULT_ASR_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeSpeechRoute {
+    pub provider_model_id: String,
+    pub model: String,
+    pub websocket_url: String,
+    pub api_key: String,
+    pub resource_id: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub chunk_ms: u32,
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +74,115 @@ struct ProviderPresetFile {
 }
 
 impl GameAppServerAdapter {
+    pub async fn realtime_speech_route(&self) -> Result<RealtimeSpeechRoute, String> {
+        let now = current_timestamp();
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        let routes = load_ai_route_models(&pool, REALTIME_SPEECH_AGENT, now)
+            .await
+            .map_err(|error| error.to_string())?;
+        let providers = list_ai_providers(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        pool.close().await;
+        let route = routes
+            .into_iter()
+            .find(|route| {
+                route.available
+                    && route
+                        .capabilities
+                        .contains(&AiCapability::SpeechRecognition)
+            })
+            .ok_or_else(|| "实时语音 Agent 没有可用的语音识别模型".to_string())?;
+        let provider = providers
+            .into_iter()
+            .find(|provider| provider.code == route.provider)
+            .ok_or_else(|| format!("语音识别 Provider 不存在：{}", route.provider))?;
+        let model = provider
+            .models
+            .into_iter()
+            .find(|model| model.id == route.id)
+            .ok_or_else(|| format!("语音识别模型不存在：{}", route.id))?;
+        if model.driver != "volcengine_asr" {
+            return Err(format!("不支持的语音识别 driver：{}", model.driver));
+        }
+        let secrets = self.read_secrets()?;
+        let api_key = secrets
+            .provider_keys
+            .get(&provider.code)
+            .cloned()
+            .or_else(|| std::env::var(provider_key_environment(&provider.code)).ok())
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| format!("语音识别 Provider {} 未配置 API Key", provider.code))?;
+        Ok(RealtimeSpeechRoute {
+            provider_model_id: model.id,
+            model: route.model,
+            websocket_url: join_endpoint(&provider.base_url, &model.api_path),
+            api_key,
+            resource_id: model
+                .params
+                .get("resource_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(DEFAULT_ASR_RESOURCE_ID)
+                .to_string(),
+            sample_rate: json_u32(&model.params, "sample_rate", 16_000)?,
+            channels: json_u16(&model.params, "channels", 1)?,
+            chunk_ms: json_u32(&model.params, "chunk_ms", 200)?,
+        })
+    }
+
+    pub async fn reserve_realtime_speech_usage(
+        &self,
+        provider_model_id: &str,
+        idempotency_key: &str,
+        duration_seconds: u64,
+    ) -> Result<(), String> {
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        reserve_ai_usage(
+            &pool,
+            provider_model_id,
+            idempotency_key,
+            &[(LimitKind::DurationSeconds, duration_seconds)],
+            current_timestamp(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        pool.close().await;
+        Ok(())
+    }
+
+    pub async fn record_realtime_speech_success(
+        &self,
+        provider_model_id: &str,
+    ) -> Result<(), String> {
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        record_ai_route_success(&pool, provider_model_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        pool.close().await;
+        Ok(())
+    }
+
+    pub async fn record_realtime_speech_failure(
+        &self,
+        provider_model_id: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        record_ai_route_failure(&pool, provider_model_id, reason, current_timestamp())
+            .await
+            .map_err(|error| error.to_string())?;
+        pool.close().await;
+        Ok(())
+    }
+
     pub async fn ai_provider_list(
         &self,
         _params: GameAiProviderListParams,
@@ -904,6 +1031,7 @@ fn parse_capability(value: &str) -> Result<AiCapability, String> {
         "video_text_to_video" => Ok(AiCapability::VideoTextToVideo),
         "video_image_to_video" => Ok(AiCapability::VideoImageToVideo),
         "model3d" => Ok(AiCapability::Model3d),
+        "speech_recognition" => Ok(AiCapability::SpeechRecognition),
         other => Err(format!("unknown AI capability: {other}")),
     }
 }
@@ -917,6 +1045,7 @@ fn agent_capability_name(capability: &AgentCapability) -> &'static str {
         AgentCapability::Model3d => "model3d",
         AgentCapability::T2v => "t2v",
         AgentCapability::I2v => "i2v",
+        AgentCapability::Speech => "speech",
     }
 }
 
@@ -939,6 +1068,7 @@ fn capability_name(capability: &AiCapability) -> String {
         AiCapability::VideoTextToVideo => "video_text_to_video",
         AiCapability::VideoImageToVideo => "video_image_to_video",
         AiCapability::Model3d => "model3d",
+        AiCapability::SpeechRecognition => "speech_recognition",
     }
     .to_string()
 }
@@ -952,6 +1082,7 @@ fn parse_limit_kind(value: &str) -> Result<LimitKind, String> {
         "total_tokens" => Ok(LimitKind::TotalTokens),
         "tokens" => Ok(LimitKind::Tokens),
         "credits" => Ok(LimitKind::Credits),
+        "duration_seconds" => Ok(LimitKind::DurationSeconds),
         other => Err(format!("unknown limit kind: {other}")),
     }
 }
@@ -965,8 +1096,42 @@ fn limit_kind_name(kind: &LimitKind) -> String {
         LimitKind::TotalTokens => "total_tokens",
         LimitKind::Tokens => "tokens",
         LimitKind::Credits => "credits",
+        LimitKind::DurationSeconds => "duration_seconds",
     }
     .to_string()
+}
+
+fn join_endpoint(base_url: &str, api_path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        api_path.trim_start_matches('/')
+    )
+}
+
+fn json_u32(value: &serde_json::Value, key: &str, default: u32) -> Result<u32, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::from(default))
+        .try_into()
+        .map_err(|_| format!("invalid {key} in speech model params"))
+}
+
+fn json_u16(value: &serde_json::Value, key: &str, default: u16) -> Result<u16, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::from(default))
+        .try_into()
+        .map_err(|_| format!("invalid {key} in speech model params"))
+}
+
+fn current_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn provider_key_environment(code: &str) -> String {

@@ -1,8 +1,8 @@
 import {
-  LockOutlined,
+  AudioOutlined,
+  CloseOutlined,
   SendOutlined,
   StopOutlined,
-  UnlockOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -15,14 +15,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AiAgent,
   ArtifactDraft,
@@ -30,6 +23,7 @@ import type {
   ConversationSnapshot,
 } from "../types";
 import InteractionDrawer from "./InteractionDrawer";
+import { useRealtimeSpeech } from "./useRealtimeSpeech";
 
 export type ChatPanelProps = {
   snapshot?: ConversationSnapshot;
@@ -56,6 +50,11 @@ export default function ChatPanel(props: ChatPanelProps) {
   const { message } = App.useApp();
   const [content, setContent] = useState("");
   const [followLatestRequest, setFollowLatestRequest] = useState(0);
+  const speech = useRealtimeSpeech({
+    enabled: props.canWrite && !props.busy && Boolean(props.snapshot),
+    onCompleted: setContent,
+    onError: (error) => message.error(error),
+  });
   const availableAgents = useMemo(
     () => props.agents?.filter((agent) => agent.focusable) ?? [],
     [props.agents],
@@ -124,6 +123,7 @@ export default function ChatPanel(props: ChatPanelProps) {
           thinkingText={props.thinkingText}
           workingAgentCode={props.workingAgentCode}
           starterPrompt={props.starterPrompt}
+          autoFollow={props.busy}
           followLatestRequest={followLatestRequest}
           onStarter={send}
           disabled={!props.canWrite || props.busy || !props.snapshot}
@@ -135,7 +135,13 @@ export default function ChatPanel(props: ChatPanelProps) {
           busy={props.busy}
           interrupting={props.interrupting}
           disabled={!props.canWrite || !props.snapshot}
+          voiceMode={speech.voiceMode}
+          recording={speech.recording}
+          speechWaiting={speech.waiting}
+          speechTranscript={speech.transcript}
           onChange={setContent}
+          onEnterVoice={speech.enterVoiceMode}
+          onLeaveVoice={speech.leaveVoiceMode}
           onSend={() => void send()}
           onInterrupt={() =>
             void props
@@ -156,95 +162,29 @@ export default function ChatPanel(props: ChatPanelProps) {
   );
 }
 
-function useAutoFollowScroll() {
+function useAutoFollowScroll(enabled: boolean) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const animationFrameRef = useRef<number | undefined>(undefined);
-  const programmaticScrollRef = useRef(false);
-  const [locked, setLocked] = useState(false);
+  const wasEnabledRef = useRef(enabled);
 
   const scrollToLatest = useCallback(() => {
     const container = containerRef.current;
-    if (!container) return;
-    if (animationFrameRef.current !== undefined) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-    }
-    programmaticScrollRef.current = true;
-    container.scrollTop = container.scrollHeight;
-    animationFrameRef.current = window.requestAnimationFrame(() => {
-      programmaticScrollRef.current = false;
-      animationFrameRef.current = undefined;
-    });
+    if (container) container.scrollTop = container.scrollHeight;
   }, []);
 
-  const lock = useCallback(() => setLocked(true), []);
-  const unlock = useCallback(() => {
-    setLocked(false);
-    scrollToLatest();
-  }, [scrollToLatest]);
-  const handleScroll = useCallback(() => {
-    if (!programmaticScrollRef.current) lock();
-  }, [lock]);
-
   useLayoutEffect(() => {
-    if (!locked) scrollToLatest();
+    if (enabled || wasEnabledRef.current) scrollToLatest();
+    wasEnabledRef.current = enabled;
   });
-  useEffect(
-    () => () => {
-      if (animationFrameRef.current !== undefined) {
-        window.cancelAnimationFrame(animationFrameRef.current);
-      }
-    },
-    [],
-  );
 
-  return { containerRef, handleScroll, lock, locked, unlock };
-}
-
-function ScrollLockButton({
-  locked,
-  onToggle,
-  target,
-}: {
-  locked: boolean;
-  onToggle: () => void;
-  target: string;
-}) {
-  return (
-    <Button
-      className="scroll-lock-button"
-      type="text"
-      size="small"
-      icon={locked ? <UnlockOutlined /> : <LockOutlined />}
-      aria-pressed={locked}
-      title={
-        locked ? `点击解锁并自动滚动到最新${target}` : `点击锁定${target}滚动`
-      }
-      onClick={onToggle}
-    >
-      {locked ? "解锁" : "锁定"}
-    </Button>
-  );
+  return { containerRef, scrollToLatest };
 }
 
 function ThinkingStream({ text }: { text: string }) {
-  const scroll = useAutoFollowScroll();
+  const scroll = useAutoFollowScroll(true);
   return (
     <div className="thinking-stream">
-      <div className="thinking-stream-header">
-        <Typography.Text type="secondary">Thinking</Typography.Text>
-        <ScrollLockButton
-          locked={scroll.locked}
-          target=" Thinking"
-          onToggle={scroll.locked ? scroll.unlock : scroll.lock}
-        />
-      </div>
-      <div
-        ref={scroll.containerRef}
-        className="thinking-stream-content"
-        onScroll={scroll.handleScroll}
-        onWheel={scroll.lock}
-        onTouchMove={scroll.lock}
-      >
+      <Typography.Text type="secondary">Thinking</Typography.Text>
+      <div ref={scroll.containerRef} className="thinking-stream-content">
         <Typography.Paragraph type="secondary">{text}</Typography.Paragraph>
       </div>
     </div>
@@ -257,6 +197,7 @@ export function MessageList({
   thinkingText,
   workingAgentCode,
   starterPrompt,
+  autoFollow,
   followLatestRequest,
   disabled,
   onStarter,
@@ -266,14 +207,15 @@ export function MessageList({
   thinkingText?: string;
   workingAgentCode?: string;
   starterPrompt?: string;
+  autoFollow: boolean;
   followLatestRequest: number;
   disabled: boolean;
   onStarter: (content: string) => Promise<unknown>;
 }) {
-  const scroll = useAutoFollowScroll();
+  const scroll = useAutoFollowScroll(autoFollow);
   useLayoutEffect(() => {
-    if (followLatestRequest > 0) scroll.unlock();
-  }, [followLatestRequest, scroll.unlock]);
+    if (followLatestRequest > 0) scroll.scrollToLatest();
+  }, [followLatestRequest, scroll.scrollToLatest]);
 
   if (!messages.length) {
     return (
@@ -299,20 +241,7 @@ export function MessageList({
   }
   return (
     <div className="message-list-shell">
-      <div className="message-list-toolbar">
-        <ScrollLockButton
-          locked={scroll.locked}
-          target="对话"
-          onToggle={scroll.locked ? scroll.unlock : scroll.lock}
-        />
-      </div>
-      <div
-        ref={scroll.containerRef}
-        className="message-list"
-        onScroll={scroll.handleScroll}
-        onWheel={scroll.lock}
-        onTouchMove={scroll.lock}
-      >
+      <div ref={scroll.containerRef} className="message-list">
         {messages.map((item) => (
           <article
             className={`chat-message chat-message-${item.role}`}
@@ -353,7 +282,13 @@ export function Composer({
   busy,
   interrupting,
   disabled,
+  voiceMode,
+  recording,
+  speechWaiting,
+  speechTranscript,
   onChange,
+  onEnterVoice,
+  onLeaveVoice,
   onSend,
   onInterrupt,
 }: {
@@ -362,39 +297,82 @@ export function Composer({
   busy: boolean;
   interrupting?: boolean;
   disabled: boolean;
+  voiceMode: boolean;
+  recording: boolean;
+  speechWaiting: boolean;
+  speechTranscript: string;
   onChange: (value: string) => void;
+  onEnterVoice: () => void;
+  onLeaveVoice: () => void;
   onSend: () => void;
   onInterrupt: () => void;
 }) {
   return (
     <div className="chat-composer">
-      <Mentions
-        value={value}
-        autoSize={{ minRows: 3, maxRows: 8 }}
-        disabled={disabled || busy}
-        placeholder="描述素材要求，输入 @ 可指定 Agent"
-        options={agents.map((agent) => ({
-          value: agent.role,
-          label: `${agent.role} · ${agent.agentCode}`,
-        }))}
-        onChange={onChange}
-        onPressEnter={(event) => {
-          if (!event.shiftKey) {
-            event.preventDefault();
-            if (value.trim()) onSend();
+      {voiceMode ? (
+        <div
+          className={`speech-input ${recording ? "speech-input-recording" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="speech-wave" aria-hidden="true">
+            {Array.from({ length: 7 }, (_, index) => (
+              <span key={index} />
+            ))}
+          </div>
+          <Typography.Text>
+            {speechTranscript ||
+              (speechWaiting
+                ? "正在整理识别结果…"
+                : recording
+                  ? "正在识别，松开空格键结束"
+                  : "长按空格键开始进行语音输入")}
+          </Typography.Text>
+        </div>
+      ) : (
+        <Mentions
+          value={value}
+          autoSize={{ minRows: 3, maxRows: 8 }}
+          disabled={disabled || busy}
+          placeholder="描述素材要求，输入 @ 可指定 Agent"
+          options={agents.map((agent) => ({
+            value: agent.role,
+            label: `${agent.role} · ${agent.agentCode}`,
+          }))}
+          onChange={onChange}
+          onPressEnter={(event) => {
+            if (!event.shiftKey) {
+              event.preventDefault();
+              if (value.trim()) onSend();
+            }
+          }}
+        />
+      )}
+      <Space className="chat-composer-actions">
+        <Button
+          aria-label={voiceMode ? "退出语音输入" : "进入语音输入"}
+          type={voiceMode ? "primary" : "default"}
+          danger={recording}
+          icon={voiceMode ? <CloseOutlined /> : <AudioOutlined />}
+          disabled={disabled || busy}
+          onClick={voiceMode ? onLeaveVoice : onEnterVoice}
+        />
+        <Button
+          type={busy ? "default" : "primary"}
+          danger={busy}
+          icon={busy ? <StopOutlined /> : <SendOutlined />}
+          loading={busy && interrupting}
+          disabled={
+            disabled ||
+            interrupting ||
+            voiceMode ||
+            (!busy && !value.trim())
           }
-        }}
-      />
-      <Button
-        type={busy ? "default" : "primary"}
-        danger={busy}
-        icon={busy ? <StopOutlined /> : <SendOutlined />}
-        loading={busy && interrupting}
-        disabled={disabled || interrupting || (!busy && !value.trim())}
-        onClick={busy ? onInterrupt : onSend}
-      >
-        {busy ? "中断会话" : "发送"}
-      </Button>
+          onClick={busy ? onInterrupt : onSend}
+        >
+          {busy ? "中断会话" : "发送"}
+        </Button>
+      </Space>
     </div>
   );
 }

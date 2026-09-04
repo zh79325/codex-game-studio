@@ -25,12 +25,14 @@ use crate::error_code::method_not_found;
 use crate::game_execution_port::AppServerCodexExecutionPort;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::request_processors::game_speech::RealtimeSpeechSessions;
 
 pub(crate) struct GameRequestProcessor {
     adapter: Arc<GameAppServerAdapter>,
     execution: Arc<AppServerCodexExecutionPort>,
     thread_store: Arc<dyn ThreadStore>,
     outgoing: Arc<OutgoingMessageSender>,
+    speech_sessions: RealtimeSpeechSessions,
 }
 
 impl GameRequestProcessor {
@@ -40,13 +42,17 @@ impl GameRequestProcessor {
         thread_store: Arc<dyn ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Self {
+        let speech_sessions =
+            RealtimeSpeechSessions::new(Arc::clone(&adapter), Arc::clone(&outgoing));
         Self {
             adapter,
             execution,
             thread_store,
             outgoing,
+            speech_sessions,
         }
     }
+
     pub(crate) fn ping(&self, _params: GamePingParams) -> GamePingResponse {
         self.adapter.ping()
     }
@@ -197,6 +203,53 @@ impl GameRequestProcessor {
             .project_finalize(params)
             .await
             .map_err(game_error)
+    }
+
+    pub(crate) async fn speech_start(
+        &self,
+        connection_id: ConnectionId,
+        _params: GameSpeechStartParams,
+    ) -> std::result::Result<GameSpeechStartResponse, JSONRPCErrorError> {
+        self.speech_sessions
+            .start(connection_id)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn speech_chunk(
+        &self,
+        connection_id: ConnectionId,
+        params: GameSpeechChunkParams,
+    ) -> std::result::Result<GameSpeechChunkResponse, JSONRPCErrorError> {
+        self.speech_sessions
+            .append_audio(connection_id, &params.session_id, &params.audio_base64)
+            .await
+            .map_err(game_error)?;
+        Ok(GameSpeechChunkResponse::default())
+    }
+
+    pub(crate) async fn speech_finish(
+        &self,
+        connection_id: ConnectionId,
+        params: GameSpeechFinishParams,
+    ) -> std::result::Result<GameSpeechFinishResponse, JSONRPCErrorError> {
+        self.speech_sessions
+            .finish(connection_id, &params.session_id)
+            .await
+            .map_err(game_error)?;
+        Ok(GameSpeechFinishResponse::default())
+    }
+
+    pub(crate) async fn speech_cancel(
+        &self,
+        connection_id: ConnectionId,
+        params: GameSpeechCancelParams,
+    ) -> std::result::Result<GameSpeechCancelResponse, JSONRPCErrorError> {
+        self.speech_sessions
+            .cancel(connection_id, &params.session_id)
+            .await
+            .map_err(game_error)?;
+        Ok(GameSpeechCancelResponse::default())
     }
 
     pub(crate) async fn conversation_ensure(

@@ -58,6 +58,7 @@ const capabilityOptions = [
   "video_text_to_video",
   "video_image_to_video",
   "model3d",
+  "speech_recognition",
 ].map((value) => ({ value, label: value }));
 const limitKinds = [
   "calls",
@@ -67,12 +68,14 @@ const limitKinds = [
   "total_tokens",
   "tokens",
   "credits",
+  "duration_seconds",
 ];
 const limitUnits: Record<string, string> = {
   calls: "次",
   images: "张",
   tokens: "tokens",
   credits: "credits",
+  duration_seconds: "秒",
 };
 const periodOptions = [
   "second",

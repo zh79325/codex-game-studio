@@ -658,6 +658,7 @@ fn runtime_capability(capability: AiCapability) -> Capability {
         AiCapability::VideoTextToVideo => Capability::VideoTextToVideo,
         AiCapability::VideoImageToVideo => Capability::VideoImageToVideo,
         AiCapability::Model3d => Capability::Model3d,
+        AiCapability::SpeechRecognition => Capability::SpeechRecognition,
     }
 }
 

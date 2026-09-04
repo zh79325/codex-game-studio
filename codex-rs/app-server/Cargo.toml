@@ -95,6 +95,7 @@ codex-utils-path-uri = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
+flate2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -111,6 +112,7 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 tokio-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 url = { workspace = true }
@@ -130,7 +132,6 @@ base64 = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
-flate2 = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
 opentelemetry = { workspace = true }
@@ -145,6 +146,5 @@ serial_test = { workspace = true }
 shlex = { workspace = true }
 tar = { workspace = true }
 test-case = "3.3.1"
-tokio-tungstenite = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 wiremock = { workspace = true }

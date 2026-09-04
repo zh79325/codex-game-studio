@@ -13,8 +13,9 @@ pub const IMAGE_I2I_AGENT: &str = "image_i2i";
 pub const VISION_REVIEWER_AGENT: &str = "vision_reviewer";
 pub const MODEL3D_AGENT: &str = "model3d";
 pub const VIDEO_GEN_AGENT: &str = "video_gen";
+pub const REALTIME_SPEECH_AGENT: &str = "realtime_speech";
 
-pub const AGENT_CODES: [&str; 10] = [
+pub const AGENT_CODES: [&str; 11] = [
     STUDIO_DIRECTOR_AGENT,
     GAME_DESIGNER_AGENT,
     SPEC_WRITER_AGENT,
@@ -25,6 +26,7 @@ pub const AGENT_CODES: [&str; 10] = [
     VISION_REVIEWER_AGENT,
     MODEL3D_AGENT,
     VIDEO_GEN_AGENT,
+    REALTIME_SPEECH_AGENT,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +56,7 @@ struct AgentFrontmatter {
     allow_tools: Vec<String>,
 }
 
-pub const BUNDLED_AGENTS: [BundledAgentDefinition; 10] = [
+pub const BUNDLED_AGENTS: [BundledAgentDefinition; 11] = [
     BundledAgentDefinition {
         code: STUDIO_DIRECTOR_AGENT,
         markdown: include_str!("../agents/studio_director.md"),
@@ -94,6 +96,10 @@ pub const BUNDLED_AGENTS: [BundledAgentDefinition; 10] = [
     BundledAgentDefinition {
         code: VIDEO_GEN_AGENT,
         markdown: include_str!("../agents/video_gen.md"),
+    },
+    BundledAgentDefinition {
+        code: REALTIME_SPEECH_AGENT,
+        markdown: include_str!("../agents/realtime_speech.md"),
     },
 ];
 

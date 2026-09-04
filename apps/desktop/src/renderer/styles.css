@@ -337,6 +337,8 @@ textarea {
 
 .chat-panel {
   display: flex;
+  width: 100%;
+  height: 100%;
   min-height: 0;
   flex: 1;
   flex-direction: column;
@@ -390,7 +392,8 @@ textarea {
 
 .chat-empty {
   display: flex;
-  min-height: 260px;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -618,11 +621,33 @@ textarea {
 
 .chat-composer {
   display: grid;
+  flex: none;
   grid-template-columns: 1fr auto;
   align-items: end;
   gap: 10px;
   padding-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 1199px) {
+  .workspace-page {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .workspace-page > .ant-row {
+    flex: none;
+    overflow: visible;
+  }
+
+  .workspace-page > .ant-row > .ant-col:not(.chat-column) {
+    overflow: visible;
+  }
+
+  .chat-column {
+    height: max(480px, calc(100dvh - 104px));
+  }
 }
 
 @media (max-width: 1100px) {

@@ -15,17 +15,6 @@ fn writes_request_and_completion_when_setting_is_missing() {
     let request = start_request("inspect data:image/png;base64,aGVsbG8=");
 
     write_turn_audit_request(&context, &route(), &request).expect("write request");
-    append_turn_audit_response_headers(&context, b"content-type: text/event-stream\r\n")
-        .expect("write response headers");
-    append_turn_audit_stream_response(&context, b"streamed ").expect("write stream response");
-    append_turn_audit_stream_response(&context, b"done").expect("write stream response");
-    append_turn_audit_stream_operation(
-        &context,
-        "sse_parser",
-        "response_item_normalized",
-        "message content missing; defaulted to an empty array",
-    )
-    .expect("write stream operation");
     append_turn_audit_completion(
         &context,
         &TurnAuditCompletion {
@@ -49,19 +38,36 @@ fn writes_request_and_completion_when_setting_is_missing() {
     assert!(contents.contains("Model：model-1"));
     assert!(contents.contains("[data URL omitted: mime=image/png, encoded_chars=8, sha256="));
     assert!(!contents.contains("aGVsbG8="));
-    assert!(contents.contains("### Response Headers"));
-    assert!(contents.contains("content-type: text/event-stream\r\n"));
     assert!(contents.contains("### Response"));
     assert!(contents.contains("done"));
-    assert_eq!(contents.matches("### Stream Response").count(), 2);
-    assert!(contents.contains("streamed \n"));
-    assert!(contents.contains("### Stream Operation"));
-    assert!(contents.contains("- Stage：sse_parser"));
-    assert!(contents.contains("- Operation：response_item_normalized"));
-    assert!(contents.contains("message content missing; defaulted to an empty array"));
+    assert!(!contents.contains("### Stream"));
     assert!(contents.contains("- Total tokens：13"));
     assert!(contents.contains("- Latency：25 ms"));
     assert!(contents.contains("- Time to first token：5 ms"));
+}
+
+#[test]
+fn writes_abnormal_stream_termination() {
+    let temp = TempDir::new().expect("temp dir");
+    fs::write(
+        temp.path().join("project.json"),
+        r#"{"schemaVersion":2,"projectId":"project-1"}"#,
+    )
+    .expect("project config");
+    let context = audit_context(&temp);
+
+    write_turn_audit_request(&context, &route(), &start_request("hello")).expect("write request");
+    append_turn_audit_stream_termination(
+        &context,
+        "sse_parser",
+        "stream closed before response.completed",
+    )
+    .expect("write stream termination");
+
+    let contents = fs::read_to_string(audit_path(&context)).expect("audit contents");
+    assert!(contents.contains("### Stream Terminated"));
+    assert!(contents.contains("- Stage：sse_parser"));
+    assert!(contents.contains("stream closed before response.completed"));
 }
 
 #[test]

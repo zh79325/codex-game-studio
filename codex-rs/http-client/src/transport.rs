@@ -21,33 +21,9 @@ use tracing::info;
 
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
-/// A lifecycle or parsing operation associated with a streaming response.
+/// An abnormal termination associated with a streaming response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamResponseAuditEvent {
-    StreamOpened {
-        status: u16,
-    },
-    ResponseItemNormalized {
-        event_type: &'static str,
-        reason: &'static str,
-        item_type: Option<String>,
-        item_id: Option<String>,
-        role: Option<String>,
-    },
-    ResponseItemRejected {
-        event_type: &'static str,
-        error: String,
-        item_type: Option<String>,
-        item_id: Option<String>,
-        role: Option<String>,
-    },
-    SseEventRejected {
-        error: String,
-        payload_bytes: usize,
-    },
-    ProviderCompleted {
-        response_id: String,
-    },
     StreamTerminated {
         stage: &'static str,
         reason: String,
@@ -62,13 +38,8 @@ pub enum StreamResponseAuditEvent {
     },
 }
 
-/// Receives unparsed streaming HTTP response data and lifecycle events for request-scoped auditing.
-///
-/// Implementations should persist each callback independently and must not alter the response
-/// bytes passed through the transport.
+/// Receives abnormal streaming lifecycle events for request-scoped auditing.
 pub trait StreamResponseAudit: Send + Sync {
-    fn record_response_headers(&self, headers: &[u8]);
-    fn record_response_chunk(&self, chunk: &[u8]);
     fn record_stream_event(&self, event: StreamResponseAuditEvent);
 }
 
@@ -109,17 +80,6 @@ fn stream_response_audit(req: &Request) -> Option<Arc<dyn StreamResponseAudit>> 
         .ok()?
         .get(thread_id)
         .cloned()
-}
-
-fn response_headers_for_audit(headers: &HeaderMap) -> Vec<u8> {
-    let mut output = Vec::new();
-    for (name, value) in headers {
-        output.extend_from_slice(name.as_str().as_bytes());
-        output.extend_from_slice(b": ");
-        output.extend_from_slice(value.as_bytes());
-        output.extend_from_slice(b"\r\n");
-    }
-    output
 }
 
 pub struct StreamResponse {
@@ -281,9 +241,6 @@ impl HttpTransport for ReqwestTransport {
             .inspect_err(|error| self.log_error(&method, &url, error))?;
         let status = resp.status();
         let headers = resp.headers().clone();
-        if let Some(audit) = &stream_audit {
-            audit.record_response_headers(&response_headers_for_audit(&headers));
-        }
         if !status.is_success() {
             let body = resp.text().await.ok();
             let error = TransportError::Http {
@@ -295,34 +252,12 @@ impl HttpTransport for ReqwestTransport {
             self.log_error(&method, &url, &error);
             return Err(error);
         }
-        if self.client.request_logging_enabled() {
-            info!(method = %method, url, %status, response_headers = ?headers, "HTTP stream opened");
-        }
-        if let Some(audit) = &stream_audit {
-            audit.record_stream_event(StreamResponseAuditEvent::StreamOpened {
-                status: status.as_u16(),
-            });
-        }
-        let log_response = self.client.request_logging_enabled() && enabled!(Level::INFO);
+        let log_stream_errors = self.client.request_logging_enabled();
         let stream_method = method.clone();
         let stream_url = url.clone();
         let response_audit = stream_audit.clone();
-        let stream = resp.bytes_stream().map(move |result| match result {
-            Ok(bytes) => {
-                if let Some(audit) = &response_audit {
-                    audit.record_response_chunk(&bytes);
-                }
-                if log_response {
-                    info!(
-                        method = %stream_method,
-                        url = %stream_url,
-                        response = %String::from_utf8_lossy(&bytes),
-                        "HTTP stream response"
-                    );
-                }
-                Ok(bytes)
-            }
-            Err(error) => {
+        let stream = resp.bytes_stream().map(move |result| {
+            result.map_err(|error| {
                 let error = Self::map_error(error);
                 if let Some(audit) = &response_audit {
                     audit.record_stream_event(StreamResponseAuditEvent::StreamTerminated {
@@ -330,7 +265,7 @@ impl HttpTransport for ReqwestTransport {
                         reason: error.to_string(),
                     });
                 }
-                if log_response {
+                if log_stream_errors {
                     error!(
                         method = %stream_method,
                         url = %stream_url,
@@ -338,8 +273,8 @@ impl HttpTransport for ReqwestTransport {
                         "HTTP stream failed"
                     );
                 }
-                Err(error)
-            }
+                error
+            })
         });
         Ok(StreamResponse {
             status,

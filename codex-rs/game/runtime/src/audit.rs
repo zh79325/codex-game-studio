@@ -123,52 +123,24 @@ pub fn append_turn_audit_completion(
     append(&path, &body)
 }
 
-pub fn append_turn_audit_response_headers(
-    context: &TurnAuditContext,
-    headers: &[u8],
-) -> io::Result<()> {
-    append_raw_record(context, b"\n### Response Headers\n\n", headers)
-}
-
-pub fn append_turn_audit_stream_response(
-    context: &TurnAuditContext,
-    response: &[u8],
-) -> io::Result<()> {
-    append_raw_record(context, b"\n### Stream Response\n\n", response)
-}
-
-pub fn append_turn_audit_stream_operation(
+pub fn append_turn_audit_stream_termination(
     context: &TurnAuditContext,
     stage: &str,
-    operation: &str,
-    detail: &str,
+    reason: &str,
 ) -> io::Result<()> {
     let path = audit_path(context);
     if !path.exists() {
         return Ok(());
     }
-    let detail = truncate_chars(&redact_data_urls(detail), 4096);
+    let reason = truncate_chars(&redact_data_urls(reason), 4096);
     append(
         &path,
         &format!(
-            "\n### Stream Operation\n\n- Time：{}\n- Stage：{stage}\n- Operation：{operation}\n\n{}",
+            "\n### Stream Terminated\n\n- Time：{}\n- Stage：{stage}\n\n{}",
             now(),
-            code_block(&detail, "text"),
+            code_block(&reason, "text"),
         ),
     )
-}
-
-fn append_raw_record(context: &TurnAuditContext, heading: &[u8], content: &[u8]) -> io::Result<()> {
-    let path = audit_path(context);
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    file.write_all(heading)?;
-    file.write_all(content)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
-    file.sync_all()
 }
 
 pub fn append_turn_audit_start_error(context: &TurnAuditContext, error: &str) -> io::Result<()> {

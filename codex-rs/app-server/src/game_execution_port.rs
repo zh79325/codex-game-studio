@@ -8,9 +8,7 @@ use codex_game_runtime::StartedThread;
 use codex_game_runtime::StartedTurn;
 use codex_game_runtime::SteerTurnRequest;
 use codex_game_runtime::TurnAuditContext;
-use codex_game_runtime::append_turn_audit_response_headers;
-use codex_game_runtime::append_turn_audit_stream_operation;
-use codex_game_runtime::append_turn_audit_stream_response;
+use codex_game_runtime::append_turn_audit_stream_termination;
 use codex_http_client::StreamResponseAudit;
 use codex_http_client::StreamResponseAuditEvent;
 use codex_http_client::register_stream_response_audit;
@@ -44,94 +42,30 @@ struct GameTurnStreamAudit {
 }
 
 impl StreamResponseAudit for GameTurnStreamAudit {
-    fn record_response_headers(&self, headers: &[u8]) {
-        if let Err(error) = append_turn_audit_response_headers(&self.context, headers) {
-            tracing::warn!(
-                attempt_id = %self.context.attempt_id,
-                "failed to write game turn response headers to audit: {error}"
-            );
-        }
-    }
-
-    fn record_response_chunk(&self, chunk: &[u8]) {
-        if let Err(error) = append_turn_audit_stream_response(&self.context, chunk) {
-            tracing::warn!(
-                attempt_id = %self.context.attempt_id,
-                "failed to write game turn stream response to audit: {error}"
-            );
-        }
-    }
-
     fn record_stream_event(&self, event: StreamResponseAuditEvent) {
-        let (stage, operation, detail) = match event {
-            StreamResponseAuditEvent::StreamOpened { status } => (
-                "http_transport",
-                "stream_opened",
-                format!("HTTP status: {status}"),
-            ),
-            StreamResponseAuditEvent::ResponseItemNormalized {
-                event_type,
-                reason,
-                item_type,
-                item_id,
-                role,
-            } => (
-                "sse_parser",
-                "response_item_normalized",
-                format!(
-                    "event_type={event_type}; reason={reason}; item_type={item_type:?}; item_id={item_id:?}; role={role:?}"
-                ),
-            ),
-            StreamResponseAuditEvent::ResponseItemRejected {
-                event_type,
-                error,
-                item_type,
-                item_id,
-                role,
-            } => (
-                "sse_parser",
-                "response_item_rejected",
-                format!(
-                    "event_type={event_type}; error={error}; item_type={item_type:?}; item_id={item_id:?}; role={role:?}"
-                ),
-            ),
-            StreamResponseAuditEvent::SseEventRejected {
-                error,
-                payload_bytes,
-            } => (
-                "sse_parser",
-                "sse_event_rejected",
-                format!("error={error}; payload_bytes={payload_bytes}"),
-            ),
-            StreamResponseAuditEvent::ProviderCompleted { response_id } => (
-                "sse_parser",
-                "provider_completed",
-                format!("response_id={response_id}"),
-            ),
-            StreamResponseAuditEvent::StreamTerminated { stage, reason } => {
-                (stage, "stream_terminated", reason)
-            }
-            StreamResponseAuditEvent::EventConsumerDropped { stage } => (
+        let termination = match event {
+            StreamResponseAuditEvent::StreamTerminated { stage, reason } => Some((stage, reason)),
+            StreamResponseAuditEvent::EventConsumerDropped { stage } => Some((
                 stage,
-                "event_consumer_dropped",
                 "downstream event consumer closed; provider stream reading stopped".to_string(),
-            ),
+            )),
             StreamResponseAuditEvent::DeltaWithoutActiveItem {
                 event_type,
                 delta_bytes,
-                action,
-            } => (
+                action: "panic",
+            } => Some((
                 "turn_state_machine",
-                "delta_without_active_item",
-                format!("event_type={event_type}; delta_bytes={delta_bytes}; action={action}"),
-            ),
+                format!("event_type={event_type}; delta_bytes={delta_bytes}; action=panic"),
+            )),
+            StreamResponseAuditEvent::DeltaWithoutActiveItem { .. } => None,
         };
-        if let Err(error) =
-            append_turn_audit_stream_operation(&self.context, stage, operation, &detail)
-        {
+        let Some((stage, reason)) = termination else {
+            return;
+        };
+        if let Err(error) = append_turn_audit_stream_termination(&self.context, stage, &reason) {
             tracing::warn!(
                 attempt_id = %self.context.attempt_id,
-                "failed to write game turn stream operation to audit: {error}"
+                "failed to write game turn stream termination to audit: {error}"
             );
         }
     }

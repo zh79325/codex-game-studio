@@ -27,7 +27,6 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::timeout;
 use tracing::debug;
-use tracing::trace;
 
 const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
@@ -357,18 +356,10 @@ impl ResponsesEventError {
 pub fn process_responses_event(
     event: ResponsesStreamEvent,
 ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
-    process_responses_event_with_audit(event, /*audit*/ None)
-}
-
-fn process_responses_event_with_audit(
-    event: ResponsesStreamEvent,
-    audit: Option<&dyn StreamResponseAudit>,
-) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
     match event.kind.as_str() {
         "response.output_item.done" => {
             if let Some(item_val) = event.item
-                && let Some(item) =
-                    parse_response_item(item_val, "response.output_item.done", audit)
+                && let Some(item) = parse_response_item(item_val, "response.output_item.done")
             {
                 return Ok(Some(ResponseEvent::OutputItemDone(item)));
             }
@@ -515,8 +506,7 @@ fn process_responses_event_with_audit(
         }
         "response.output_item.added" => {
             if let Some(item_val) = event.item
-                && let Some(item) =
-                    parse_response_item(item_val, "response.output_item.added", audit)
+                && let Some(item) = parse_response_item(item_val, "response.output_item.added")
             {
                 return Ok(Some(ResponseEvent::OutputItemAdded(item)));
             }
@@ -528,67 +518,17 @@ fn process_responses_event_with_audit(
                 }));
             }
         }
-        "codex.response.metadata"
-        | "response.content_part.added"
-        | "response.content_part.done"
-        | "response.custom_tool_call_input.done"
-        | "response.function_call_arguments.delta"
-        | "response.function_call_arguments.done"
-        | "response.in_progress"
-        | "response.metadata"
-        | "response.output_text.done"
-        | "response.reasoning_summary_part.done"
-        | "responsesapi.websocket_timing" => {
-            trace!("unhandled responses event: {}", event.kind);
-        }
-        kind if kind.ends_with(".delta") => {
-            trace!("unhandled responses event: {kind}");
-        }
-        _ => {
-            debug!(
-                "unhandled responses event: {:?}",
-                event.kind.chars().take(128).collect::<String>()
-            );
-        }
+        _ => {}
     }
 
     Ok(None)
 }
 
-fn parse_response_item(
-    item: Value,
-    event_type: &'static str,
-    audit: Option<&dyn StreamResponseAudit>,
-) -> Option<ResponseItem> {
-    let item_type = item.get("type").and_then(Value::as_str).map(str::to_string);
-    let item_id = item.get("id").and_then(Value::as_str).map(str::to_string);
-    let role = item.get("role").and_then(Value::as_str).map(str::to_string);
-    if event_type == "response.output_item.added"
-        && item_type.as_deref() == Some("message")
-        && item.get("content").is_none()
-        && let Some(audit) = audit
-    {
-        audit.record_stream_event(StreamResponseAuditEvent::ResponseItemNormalized {
-            event_type,
-            reason: "message content missing; defaulted to an empty array",
-            item_type: item_type.clone(),
-            item_id: item_id.clone(),
-            role: role.clone(),
-        });
-    }
+fn parse_response_item(item: Value, event_type: &'static str) -> Option<ResponseItem> {
     match serde_json::from_value(item) {
         Ok(item) => Some(item),
         Err(error) => {
             debug!("failed to parse ResponseItem from {event_type}: {error}");
-            if let Some(audit) = audit {
-                audit.record_stream_event(StreamResponseAuditEvent::ResponseItemRejected {
-                    event_type,
-                    error: error.to_string(),
-                    item_type,
-                    item_id,
-                    role,
-                });
-            }
             None
         }
     }
@@ -669,8 +609,6 @@ async fn process_sse_with_treatment(
             }
         };
 
-        trace!("SSE event: {}", &sse.data);
-
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
             Err(e) => {
@@ -681,12 +619,6 @@ async fn process_sse_with_treatment(
                     payload_bytes = sse.data.len(),
                     "Failed to parse SSE event"
                 );
-                if let Some(audit) = &audit {
-                    audit.record_stream_event(StreamResponseAuditEvent::SseEventRejected {
-                        error: e.to_string(),
-                        payload_bytes: sse.data.len(),
-                    });
-                }
                 continue;
             }
         };
@@ -735,24 +667,14 @@ async fn process_sse_with_treatment(
             return;
         }
 
-        match process_responses_event_with_audit(event, audit.as_deref()) {
+        match process_responses_event(event) {
             Ok(Some(event)) => {
-                let completed_response_id = match &event {
-                    ResponseEvent::Completed { response_id, .. } => Some(response_id.clone()),
-                    _ => None,
-                };
-                if let Some(response_id) = completed_response_id.as_ref()
-                    && let Some(audit) = &audit
-                {
-                    audit.record_stream_event(StreamResponseAuditEvent::ProviderCompleted {
-                        response_id: response_id.clone(),
-                    });
-                }
+                let completed = matches!(&event, ResponseEvent::Completed { .. });
                 if tx_event.send(Ok(event)).await.is_err() {
                     record_event_consumer_dropped(audit.as_deref());
                     return;
                 }
-                if completed_response_id.is_some() {
+                if completed {
                     return;
                 }
             }
@@ -853,25 +775,9 @@ mod tests {
     use http::StatusCode;
     use pretty_assertions::assert_eq;
     use serde_json::json;
-    use std::sync::Mutex;
     use tokio::sync::mpsc;
     use tokio_test::io::Builder as IoBuilder;
     use tokio_util::io::ReaderStream;
-
-    #[derive(Default)]
-    struct RecordingStreamAudit {
-        events: Mutex<Vec<StreamResponseAuditEvent>>,
-    }
-
-    impl StreamResponseAudit for RecordingStreamAudit {
-        fn record_response_headers(&self, _headers: &[u8]) {}
-
-        fn record_response_chunk(&self, _chunk: &[u8]) {}
-
-        fn record_stream_event(&self, event: StreamResponseAuditEvent) {
-            self.events.lock().expect("audit events mutex").push(event);
-        }
-    }
 
     async fn collect_events(chunks: &[&[u8]]) -> Vec<Result<ResponseEvent, ApiError>> {
         let mut builder = IoBuilder::new();
@@ -944,9 +850,7 @@ mod tests {
             }
         }))
         .expect("valid stream event");
-        let audit = RecordingStreamAudit::default();
-
-        let parsed = process_responses_event_with_audit(event, Some(&audit))
+        let parsed = process_responses_event(event)
             .expect("event processing should succeed")
             .expect("output item should be emitted");
 
@@ -958,16 +862,6 @@ mod tests {
                 content,
                 ..
             }) if id.as_str() == "msg-1" && role == "assistant" && content.is_empty()
-        );
-        assert_eq!(
-            *audit.events.lock().expect("audit events mutex"),
-            vec![StreamResponseAuditEvent::ResponseItemNormalized {
-                event_type: "response.output_item.added",
-                reason: "message content missing; defaulted to an empty array",
-                item_type: Some("message".to_string()),
-                item_id: Some("msg-1".to_string()),
-                role: Some("assistant".to_string()),
-            }]
         );
     }
 

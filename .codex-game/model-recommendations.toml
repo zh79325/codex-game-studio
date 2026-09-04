@@ -31,7 +31,7 @@ remark = "Coding Plan 套餐内模型，适合 game_designer / spec_writer 长�
 
 [[presets.models]]
 model_id = "doubao-seed-2.1-turbo"
-capabilities = ["text_reasoning", "text_structured_output"]
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
 driver = "openai_compat"
 api_path = "/api/coding/v3"
 limit_kind = "tokens"

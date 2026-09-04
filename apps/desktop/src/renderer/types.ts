@@ -6,17 +6,19 @@ export type Project = {
   state: "drafting" | "styleSettled" | "ready";
 };
 
+export type ChoiceGroup = {
+  item: string;
+  options: string[];
+  recommended: string[];
+  multiple: boolean;
+};
+
 export type AgentAction = {
   action: "ask_user" | "handoff" | "done" | "blocked";
   target_agent: string | null;
   reason: string;
   payload: {
-    choices?: Array<{
-      item: string;
-      options: string[];
-      recommended: string[];
-      multiple: boolean;
-    }>;
+    choices?: ChoiceGroup[];
     progress?: {
       decisions: string[];
       open_questions: string[];

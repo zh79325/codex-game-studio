@@ -701,7 +701,11 @@ export default function ProvidersPage() {
       </Space>
 
       <Modal
-        width={providerEditing ? 560 : 1080}
+        width={
+          providerEditing
+            ? "clamp(560px, 42vw, 720px)"
+            : "clamp(1080px, 72vw, 1440px)"
+        }
         title={providerEditing ? "编辑 Provider" : "从套餐新建 Provider"}
         open={providerOpen}
         confirmLoading={saveProvider.isPending}
@@ -902,7 +906,7 @@ export default function ProvidersPage() {
       </Modal>
 
       <Modal
-        width={720}
+        width="clamp(720px, 55vw, 960px)"
         title={modelEditing ? "编辑模型" : "添加模型"}
         open={modelOpen}
         confirmLoading={saveModel.isPending}
@@ -988,7 +992,7 @@ export default function ProvidersPage() {
       </Modal>
 
       <Modal
-        width={720}
+        width="clamp(720px, 55vw, 960px)"
         title={
           limitEditing ? `${limitEditing.displayName} · 模型限流` : "模型限流"
         }
@@ -1008,7 +1012,7 @@ export default function ProvidersPage() {
       </Modal>
 
       <Modal
-        width={720}
+        width="clamp(720px, 55vw, 960px)"
         title={transferMode === "export" ? "导出无密钥配置" : "导入无密钥配置"}
         open={Boolean(transferMode)}
         onCancel={() => {

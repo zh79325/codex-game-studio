@@ -341,7 +341,7 @@ function AgentBindingModal({
         onOk={() => save.mutate()}
         okText="保存"
         okButtonProps={{ disabled: !canWrite, loading: save.isPending }}
-        width={720}
+        width="clamp(720px, 55vw, 960px)"
         destroyOnHidden
       >
         <Space direction="vertical" className="workspace-main" size="middle">
@@ -484,7 +484,7 @@ function AgentBindingModal({
       </Modal>
 
       <Modal
-        width={760}
+        width="clamp(760px, 56vw, 980px)"
         title={
           limitTarget
             ? `${limitTarget.provider.name} · ${limitTarget.model.displayName} · 模型限流`

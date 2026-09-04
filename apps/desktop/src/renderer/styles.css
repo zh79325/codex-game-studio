@@ -253,6 +253,23 @@ textarea {
   max-width: 180px;
 }
 
+.ant-modal-root .ant-modal {
+  top: clamp(24px, 6vh, 80px);
+  max-width: calc(100vw - 48px);
+  padding-bottom: 0;
+}
+
+.ant-modal-root .ant-modal-content {
+  display: flex;
+  max-height: calc(100dvh - clamp(48px, 12vh, 160px));
+  flex-direction: column;
+}
+
+.ant-modal-root .ant-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .modal-alert {
   margin: 12px 0;
 }

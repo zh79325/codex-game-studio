@@ -10,6 +10,7 @@ use codex_app_server_protocol::GameSpeechTranscriptNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_game_app_server_adapter::RealtimeSpeechRoute;
+use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use futures::SinkExt;
 use futures::StreamExt;
 use tokio::net::TcpStream;
@@ -355,6 +356,7 @@ async fn connect(route: &RealtimeSpeechRoute, request_id: &str) -> Result<Speech
     if !headers.contains_key(HOST) {
         return Err("语音识别地址缺少 Host".to_string());
     }
+    ensure_rustls_crypto_provider();
     let (mut socket, response) = connect_async(request)
         .await
         .map_err(|error| format!("连接语音识别服务失败：{error}"))?;

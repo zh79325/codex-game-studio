@@ -3,6 +3,11 @@ import { speechApi } from "../api";
 
 const PCM_BYTES_PER_SAMPLE = 2;
 const TARGET_SAMPLE_RATE = 16_000;
+const CAPTURE_FLUSH_TIMEOUT_MS = 1_000;
+
+type RecorderMessage =
+  | { type: "samples"; samples: Float32Array }
+  | { type: "flushed" };
 
 type SpeechNotification = {
   method: string;
@@ -28,7 +33,8 @@ export function useRealtimeSpeech({
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const contextRef = useRef<AudioContext | undefined>(undefined);
   const sourceRef = useRef<MediaStreamAudioSourceNode | undefined>(undefined);
-  const processorRef = useRef<ScriptProcessorNode | undefined>(undefined);
+  const processorRef = useRef<AudioWorkletNode | undefined>(undefined);
+  const flushResolverRef = useRef<(() => void) | undefined>(undefined);
   const recordedSamplesRef = useRef<number[]>([]);
   const captureSampleRateRef = useRef(TARGET_SAMPLE_RATE);
   const recordingRef = useRef(false);
@@ -48,7 +54,13 @@ export function useRealtimeSpeech({
 
   const stopCapture = useCallback(() => {
     recordingRef.current = false;
-    processorRef.current?.disconnect();
+    flushResolverRef.current?.();
+    flushResolverRef.current = undefined;
+    if (processorRef.current) {
+      processorRef.current.port.onmessage = null;
+      processorRef.current.port.close();
+      processorRef.current.disconnect();
+    }
     sourceRef.current?.disconnect();
     for (const track of streamRef.current?.getTracks() ?? []) track.stop();
     void contextRef.current?.close();
@@ -57,6 +69,24 @@ export function useRealtimeSpeech({
     streamRef.current = undefined;
     contextRef.current = undefined;
     setRecording(false);
+  }, []);
+
+  const flushCapture = useCallback(async () => {
+    const processor = processorRef.current;
+    if (!processor) return;
+    await new Promise<void>((resolve) => {
+      let timeout: number | undefined;
+      const finish = () => {
+        if (timeout !== undefined) window.clearTimeout(timeout);
+        if (flushResolverRef.current === finish) {
+          flushResolverRef.current = undefined;
+        }
+        resolve();
+      };
+      flushResolverRef.current = finish;
+      timeout = window.setTimeout(finish, CAPTURE_FLUSH_TIMEOUT_MS);
+      processor.port.postMessage({ type: "flush" });
+    });
   }, []);
 
   const fail = useCallback(
@@ -79,12 +109,20 @@ export function useRealtimeSpeech({
 
   const finishRecording = useCallback(async () => {
     if (!recordingRef.current) return;
+    recordingRef.current = false;
+    waitingRef.current = true;
+    setRecording(false);
+    setWaiting(true);
+    await flushCapture();
     const samples = recordedSamplesRef.current;
     recordedSamplesRef.current = [];
     stopCapture();
-    if (samples.length === 0) return;
-    waitingRef.current = true;
-    setWaiting(true);
+    if (!voiceModeRef.current) return;
+    if (samples.length === 0) {
+      waitingRef.current = false;
+      setWaiting(false);
+      return;
+    }
     try {
       const session = await speechApi.start();
       sessionIdRef.current = session.sessionId;
@@ -129,7 +167,7 @@ export function useRealtimeSpeech({
     } catch (error) {
       fail(error);
     }
-  }, [fail, stopCapture]);
+  }, [fail, flushCapture, stopCapture]);
 
   const beginRecording = useCallback(async () => {
     if (
@@ -165,18 +203,31 @@ export function useRealtimeSpeech({
         stopCapture();
         return;
       }
+      await context.audioWorklet.addModule(
+        new URL("./speechRecorderWorklet.js", import.meta.url),
+      );
+      if (!mountedRef.current || !voiceModeRef.current) {
+        stopCapture();
+        return;
+      }
       const source = context.createMediaStreamSource(stream);
-      const processor = context.createScriptProcessor(4_096, 1, 1);
+      const processor = new AudioWorkletNode(context, "speech-recorder", {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+      });
       captureSampleRateRef.current = context.sampleRate;
       sourceRef.current = source;
       processorRef.current = processor;
-      processor.onaudioprocess = (event) => {
-        if (!recordingRef.current) return;
-        const samples = event.inputBuffer.getChannelData(0);
-        for (const sample of samples) recordedSamplesRef.current.push(sample);
+      processor.port.onmessage = (event: MessageEvent<RecorderMessage>) => {
+        if (event.data.type === "samples") {
+          for (const sample of event.data.samples) {
+            recordedSamplesRef.current.push(sample);
+          }
+          return;
+        }
+        flushResolverRef.current?.();
       };
       source.connect(processor);
-      processor.connect(context.destination);
       recordingRef.current = true;
       setRecording(true);
       setTranscript("");

@@ -15,6 +15,10 @@ fn writes_request_and_completion_when_setting_is_missing() {
     let request = start_request("inspect data:image/png;base64,aGVsbG8=");
 
     write_turn_audit_request(&context, &route(), &request).expect("write request");
+    append_turn_audit_response_headers(&context, b"content-type: text/event-stream\r\n")
+        .expect("write response headers");
+    append_turn_audit_stream_response(&context, b"streamed ").expect("write stream response");
+    append_turn_audit_stream_response(&context, b"done").expect("write stream response");
     append_turn_audit_completion(
         &context,
         &TurnAuditCompletion {
@@ -38,8 +42,12 @@ fn writes_request_and_completion_when_setting_is_missing() {
     assert!(contents.contains("Model：model-1"));
     assert!(contents.contains("[data URL omitted: mime=image/png, encoded_chars=8, sha256="));
     assert!(!contents.contains("aGVsbG8="));
+    assert!(contents.contains("### Response Headers"));
+    assert!(contents.contains("content-type: text/event-stream\r\n"));
     assert!(contents.contains("### Response"));
     assert!(contents.contains("done"));
+    assert_eq!(contents.matches("### Stream Response").count(), 2);
+    assert!(contents.contains("streamed \n"));
     assert!(contents.contains("- Total tokens：13"));
     assert!(contents.contains("- Latency：25 ms"));
     assert!(contents.contains("- Time to first token：5 ms"));
@@ -101,5 +109,6 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             allowed_handoffs: Vec::new(),
             action_protocol: "json".to_string(),
         },
+        audit_context: None,
     }
 }

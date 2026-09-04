@@ -13,6 +13,7 @@ use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_game_runtime::TurnAuditCompletion;
 use codex_game_runtime::TurnAuditUsage;
 use codex_game_runtime::append_turn_audit_completion;
+use codex_http_client::unregister_stream_response_audit;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -47,7 +48,6 @@ pub(crate) fn spawn_game_event_observer(
     tokio::spawn(async move {
         let mut active_game_turns = HashMap::<ThreadId, String>::new();
         let mut usage_by_thread = HashMap::<ThreadId, TurnAuditUsage>::new();
-        let mut partial_response_by_turn = HashMap::<String, String>::new();
         while let Some(observed) = receiver.recv().await {
             if let EventMsg::TurnStarted(started) = &observed.event.msg {
                 if matches!(
@@ -80,10 +80,6 @@ pub(crate) fn spawn_game_event_observer(
                 match adapter.turn_event_context(&delta.turn_id).await {
                     Ok(Some(context)) => {
                         active_game_turns.insert(observed.thread_id, delta.turn_id.clone());
-                        partial_response_by_turn
-                            .entry(delta.turn_id.clone())
-                            .or_default()
-                            .push_str(&delta.delta);
                         outgoing
                             .send_server_notification(ServerNotification::GameConversationDelta(
                                 GameConversationDeltaNotification {
@@ -118,19 +114,18 @@ pub(crate) fn spawn_game_event_observer(
                 _ => continue,
             };
             active_game_turns.remove(&observed.thread_id);
+            unregister_stream_response_audit(&observed.thread_id.to_string());
             match adapter.turn_audit_context(turn_id).await {
                 Ok(Some(context)) => {
                     let completion = match &observed.event.msg {
                         EventMsg::TurnComplete(completed) => TurnAuditCompletion {
                             response: completed.last_agent_message.clone(),
-                            partial_response: partial_response_by_turn.remove(turn_id),
                             error: terminal_error.clone(),
                             usage: usage_by_thread.remove(&observed.thread_id),
                             duration_ms: completed.duration_ms,
                             time_to_first_token_ms: completed.time_to_first_token_ms,
                         },
                         EventMsg::TurnAborted(aborted) => TurnAuditCompletion {
-                            partial_response: partial_response_by_turn.remove(turn_id),
                             error: Some(format!("运行已中断：{:?}", aborted.reason)),
                             usage: usage_by_thread.remove(&observed.thread_id),
                             duration_ms: aborted.duration_ms,

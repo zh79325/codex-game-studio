@@ -57,3 +57,6 @@ pub use crate::transport::ByteStream;
 pub use crate::transport::HttpTransport;
 pub use crate::transport::ReqwestTransport;
 pub use crate::transport::StreamResponse;
+pub use crate::transport::StreamResponseAudit;
+pub use crate::transport::register_stream_response_audit;
+pub use crate::transport::unregister_stream_response_audit;

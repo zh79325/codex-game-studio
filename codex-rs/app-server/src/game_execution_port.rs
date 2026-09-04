@@ -7,6 +7,12 @@ use codex_game_runtime::StartTurnRequest;
 use codex_game_runtime::StartedThread;
 use codex_game_runtime::StartedTurn;
 use codex_game_runtime::SteerTurnRequest;
+use codex_game_runtime::TurnAuditContext;
+use codex_game_runtime::append_turn_audit_response_headers;
+use codex_game_runtime::append_turn_audit_stream_response;
+use codex_http_client::StreamResponseAudit;
+use codex_http_client::register_stream_response_audit;
+use codex_http_client::unregister_stream_response_audit;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
 use codex_protocol::turn_input::StartIfIdleSubmission;
@@ -29,6 +35,30 @@ pub(crate) struct AppServerCodexExecutionPort {
 pub(crate) struct ConnectionCodexExecutionPort<'a> {
     execution: &'a AppServerCodexExecutionPort,
     connection_id: ConnectionId,
+}
+
+struct GameTurnStreamAudit {
+    context: TurnAuditContext,
+}
+
+impl StreamResponseAudit for GameTurnStreamAudit {
+    fn record_response_headers(&self, headers: &[u8]) {
+        if let Err(error) = append_turn_audit_response_headers(&self.context, headers) {
+            tracing::warn!(
+                attempt_id = %self.context.attempt_id,
+                "failed to write game turn response headers to audit: {error}"
+            );
+        }
+    }
+
+    fn record_response_chunk(&self, chunk: &[u8]) {
+        if let Err(error) = append_turn_audit_stream_response(&self.context, chunk) {
+            tracing::warn!(
+                attempt_id = %self.context.attempt_id,
+                "failed to write game turn stream response to audit: {error}"
+            );
+        }
+    }
 }
 
 impl AppServerCodexExecutionPort {
@@ -162,13 +192,30 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             })?;
             turn.start.final_output_json_schema = Some(schema);
         }
-        match thread
-            .start_turn_if_idle(turn)
-            .await
-            .map_err(|error| ExecutionError::Retryable(error.to_string()))?
-        {
+        let audit_registered = if let Some(context) = request.audit_context {
+            register_stream_response_audit(
+                request.thread_id.clone(),
+                Arc::new(GameTurnStreamAudit { context }),
+            );
+            true
+        } else {
+            false
+        };
+        let submission = match thread.start_turn_if_idle(turn).await {
+            Ok(submission) => submission,
+            Err(error) => {
+                if audit_registered {
+                    unregister_stream_response_audit(&request.thread_id);
+                }
+                return Err(ExecutionError::Retryable(error.to_string()));
+            }
+        };
+        match submission {
             StartIfIdleSubmission::Started { turn_id } => Ok(StartedTurn { turn_id }),
             StartIfIdleSubmission::NotSubmitted { reason } => {
+                if audit_registered {
+                    unregister_stream_response_audit(&request.thread_id);
+                }
                 Err(ExecutionError::Retryable(format!("{reason:?}")))
             }
         }

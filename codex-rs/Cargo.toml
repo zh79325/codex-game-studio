@@ -582,6 +582,11 @@ ignored = [
 # across local dev builds.
 debug = "limited"
 
+# Dependency debug symbols consume substantial disk space and are rarely useful
+# when debugging Codex itself.
+[profile.dev.package."*"]
+debug = "none"
+
 [profile.dev-small]
 inherits = "dev"
 opt-level = 0

@@ -35,7 +35,6 @@ pub struct TurnAuditUsage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnAuditCompletion {
     pub response: Option<String>,
-    pub partial_response: Option<String>,
     pub error: Option<String>,
     pub usage: Option<TurnAuditUsage>,
     pub duration_ms: Option<i64>,
@@ -99,12 +98,6 @@ pub fn append_turn_audit_completion(
     if let Some(error) = completion.error.as_deref() {
         body.push_str("\n### Error\n\n");
         body.push_str(&code_block(error, "text"));
-        if let Some(partial) = completion.partial_response.as_deref()
-            && !partial.is_empty()
-        {
-            body.push_str("\n### Partial Response\n\n");
-            body.push_str(&code_block(&redact_data_urls(partial), "markdown"));
-        }
     } else if let Some(response) = completion.response.as_deref() {
         body.push_str("\n### Response\n\n");
         body.push_str(&code_block(&redact_data_urls(response), "markdown"));
@@ -128,6 +121,33 @@ pub fn append_turn_audit_completion(
         ));
     }
     append(&path, &body)
+}
+
+pub fn append_turn_audit_response_headers(
+    context: &TurnAuditContext,
+    headers: &[u8],
+) -> io::Result<()> {
+    append_raw_record(context, b"\n### Response Headers\n\n", headers)
+}
+
+pub fn append_turn_audit_stream_response(
+    context: &TurnAuditContext,
+    response: &[u8],
+) -> io::Result<()> {
+    append_raw_record(context, b"\n### Stream Response\n\n", response)
+}
+
+fn append_raw_record(context: &TurnAuditContext, heading: &[u8], content: &[u8]) -> io::Result<()> {
+    let path = audit_path(context);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(heading)?;
+    file.write_all(content)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()
 }
 
 pub fn append_turn_audit_start_error(context: &TurnAuditContext, error: &str) -> io::Result<()> {

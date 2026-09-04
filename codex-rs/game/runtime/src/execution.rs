@@ -1,4 +1,5 @@
 use crate::RouteDecision;
+use crate::TurnAuditContext;
 use codex_game_domain::ContextPackage;
 use std::future::Future;
 use thiserror::Error;
@@ -23,6 +24,7 @@ pub struct StartTurnRequest {
     pub agent_definition: String,
     pub prompt: String,
     pub context: ContextPackage,
+    pub audit_context: Option<TurnAuditContext>,
 }
 
 impl StartTurnRequest {

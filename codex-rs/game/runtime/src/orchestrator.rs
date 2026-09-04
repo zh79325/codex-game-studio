@@ -232,6 +232,7 @@ impl TaskOrchestrator {
                 .to_string(),
             prompt: request.prompt,
             context: request.context,
+            audit_context: Some(audit_context.clone()),
         };
         if let Err(error) = write_turn_audit_request(&audit_context, &route, &start_request) {
             tracing::warn!(

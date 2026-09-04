@@ -41,6 +41,15 @@ const limitKinds = [
   "tokens",
   "credits",
 ];
+const limitKindLabels: Record<string, string> = {
+  calls: "调用次数",
+  images: "图片张数",
+  input_tokens: "输入 Token",
+  output_tokens: "输出 Token",
+  total_tokens: "总 Token",
+  tokens: "Token",
+  credits: "Credits",
+};
 const periodOptions = [
   "second",
   "minute",
@@ -380,9 +389,36 @@ function AgentBindingModal({
                       </Space>
                     }
                     description={
-                      entry
-                        ? `${entry.provider.name} · ${entry.model.modelId}`
-                        : "模型已不存在，请移除后保存"
+                      entry ? (
+                        <Space direction="vertical" size={4}>
+                          <Typography.Text type="secondary">
+                            {entry.provider.name} · {entry.model.modelId}
+                          </Typography.Text>
+                          <Space wrap size={[4, 4]}>
+                            {entry.model.limits.length ? (
+                              entry.model.limits.map((limit) => (
+                                <Tag
+                                  key={`${limit.limitKind}:${limit.groupName}`}
+                                >
+                                  {limitKindLabels[limit.limitKind] ??
+                                    limit.limitKind}
+                                  ：
+                                  {limit.maxValue > 0
+                                    ? `${limit.maxValue} / ${limit.periodExpr}`
+                                    : "不限"}
+                                  {limit.groupName !== "default"
+                                    ? ` · ${limit.groupName}`
+                                    : ""}
+                                </Tag>
+                              ))
+                            ) : (
+                              <Tag>未设置限流</Tag>
+                            )}
+                          </Space>
+                        </Space>
+                      ) : (
+                        "模型已不存在，请移除后保存"
+                      )
                     }
                   />
                 </List.Item>
@@ -485,7 +521,10 @@ function AgentLimitFields() {
               >
                 <Select
                   placeholder="限流口径"
-                  options={limitKinds.map((value) => ({ value, label: value }))}
+                  options={limitKinds.map((value) => ({
+                    value,
+                    label: limitKindLabels[value] ?? value,
+                  }))}
                   style={{ width: 160 }}
                 />
               </Form.Item>

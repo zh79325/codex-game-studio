@@ -29,6 +29,7 @@ use codex_game_store::list_registered_projects;
 use codex_game_store::open_studio_store;
 use codex_game_store::register_project as register_studio_project;
 use codex_game_store::unregister_project;
+use codex_game_store::unregister_project_by_root;
 use codex_game_store::update_project_json;
 use codex_game_store::write_art_bible;
 use serde::Deserialize;
@@ -161,6 +162,11 @@ impl GameService {
     ) -> Result<Project, GameServiceError> {
         let root_path = absolute_root(&root)?;
         fs::create_dir_all(&root_path)?;
+        if root_path.join("project.json").exists() {
+            return Err(GameServiceError::InvalidProjectPath(
+                "目录已存在 project.json，请直接打开该项目".to_string(),
+            ));
+        }
         let project = Project {
             id: ProjectId::new(project_id),
             name,
@@ -176,14 +182,21 @@ impl GameService {
         )?;
         fs::create_dir_all(root_path.join(".codex-game"))?;
         let store = Arc::new(ProjectStore::open(&root_path).await?);
+        if let Some(studio_storage) = &self.studio_storage {
+            let studio = open_studio_store(studio_storage).await?;
+            unregister_project_by_root(&studio, &project.root).await?;
+            studio.close().await;
+        }
         self.register_project(&project, store.access()).await?;
-        self.projects
+        let mut projects = self
+            .projects
             .lock()
-            .map_err(|_| GameServiceError::StateUnavailable)?
-            .insert(
-                project.id.as_str().to_string(),
-                ProjectSession::new(project.clone(), false, store),
-            );
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        projects.retain(|_, session| session.project.root != project.root);
+        projects.insert(
+            project.id.as_str().to_string(),
+            ProjectSession::new(project.clone(), false, store),
+        );
         Ok(project)
     }
 
@@ -1380,8 +1393,8 @@ impl GameService {
     pub fn inspect_project_dir(&self, root: &str) -> Result<ProjectDirState, GameServiceError> {
         let root = absolute_root(root)?;
         let project_json = root.join("project.json");
-        let occupied = project_json.exists() || root.join(".codex-game/local/project.db").exists();
-        if !project_json.exists() {
+        let occupied = project_json.exists();
+        if !occupied {
             return Ok(ProjectDirState {
                 root: root.to_string_lossy().into_owned(),
                 occupied,

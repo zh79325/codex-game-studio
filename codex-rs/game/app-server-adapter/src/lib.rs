@@ -205,14 +205,12 @@ impl GameAppServerAdapter {
         params: GameProjectCreateParams,
     ) -> Result<GameProjectCreateResponse, GameServiceError> {
         let state = self.runtime.service().inspect_project_dir(&params.root)?;
-        if state.occupied && !params.overwrite.unwrap_or(false) {
+        if state.occupied {
             return Err(GameServiceError::InvalidProjectPath(
-                "目录已包含项目数据，请明确选择覆盖".to_string(),
+                "目录已存在 project.json，请直接打开该项目".to_string(),
             ));
         }
-        if state.occupied {
-            clear_managed_project_state(Path::new(&state.root))?;
-        }
+        clear_stale_project_state(Path::new(&state.root))?;
         self.runtime
             .create_project(
                 project_id,
@@ -802,11 +800,10 @@ fn capability_for_agent(agent_code: &str) -> Result<Capability, String> {
     })
 }
 
-fn clear_managed_project_state(root: &Path) -> Result<(), GameServiceError> {
-    for path in [root.join("project.json"), root.join("art-bible.md")] {
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
+fn clear_stale_project_state(root: &Path) -> Result<(), GameServiceError> {
+    let art_bible = root.join("art-bible.md");
+    if art_bible.exists() {
+        fs::remove_file(art_bible)?;
     }
     let local = root.join(".codex-game/local");
     if local.exists() {

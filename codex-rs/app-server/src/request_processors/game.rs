@@ -17,6 +17,7 @@ use codex_thread_store::ThreadStore;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
@@ -68,15 +69,19 @@ impl GameRequestProcessor {
         .to_string_lossy()
         .into_owned();
         params.root = root.clone();
+        let state = self
+            .adapter
+            .project_inspect(GameProjectInspectParams { root: root.clone() })
+            .map_err(game_error)?;
+        if state.occupied {
+            return Err(invalid_params("目录已存在 project.json，请直接打开该项目"));
+        }
         let display_name = params
             .name
             .clone()
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "未命名素材项目".to_string());
-        let idempotency_key = format!("game-project:create:{root}");
-        if idempotency_key.len() > 512 {
-            return Err(invalid_params("project root is too long"));
-        }
+        let idempotency_key = format!("game-project:create:{}", Uuid::now_v7());
         let mut metadata = BTreeMap::new();
         metadata.insert("codex.game.kind".to_string(), "asset".to_string());
         let created = self

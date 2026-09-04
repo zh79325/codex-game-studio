@@ -1907,6 +1907,17 @@ pub async fn unregister_project(studio: &SqlitePool, project_id: &str) -> Result
     Ok(())
 }
 
+pub async fn unregister_project_by_root(
+    studio: &SqlitePool,
+    project_root: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("DELETE FROM projects WHERE root = ?")
+        .bind(project_root)
+        .execute(studio)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_registered_projects(
     studio: &SqlitePool,
 ) -> Result<Vec<(Project, ProjectAccess)>, StoreError> {

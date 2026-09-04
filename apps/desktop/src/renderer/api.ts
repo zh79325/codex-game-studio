@@ -26,13 +26,8 @@ export const projectsApi = {
       projectId: string | null;
       supported: boolean;
     }>("game/project/inspect", { root }),
-  create: async (root: string, overwrite = false) =>
-    (
-      await rpc<{ project: Project }>("game/project/create", {
-        root,
-        overwrite,
-      })
-    ).project,
+  create: async (root: string) =>
+    (await rpc<{ project: Project }>("game/project/create", { root })).project,
   open: async (root: string) =>
     (await rpc<{ project: Project }>("game/project/open", { root })).project,
   remove: (projectId: string) =>

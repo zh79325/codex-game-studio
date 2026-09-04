@@ -25,6 +25,14 @@ pub fn update_project_json(
     let object = document
         .as_object_mut()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "project.json must be an object"))?;
+    if let Some(existing_id) = object.get("projectId").or_else(|| object.get("id"))
+        && existing_id.as_str() != Some(project_id)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "project.json projectId cannot be changed",
+        ));
+    }
     object.insert(
         "projectId".to_string(),
         Value::String(project_id.to_string()),

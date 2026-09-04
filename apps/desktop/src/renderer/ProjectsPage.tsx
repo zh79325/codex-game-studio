@@ -53,13 +53,7 @@ export default function ProjectsPage() {
     enter(await projectsApi.open(project.root));
 
   const createProject = useMutation({
-    mutationFn: async ({
-      path,
-      overwrite,
-    }: {
-      path: string;
-      overwrite: boolean;
-    }) => projectsApi.create(path, overwrite),
+    mutationFn: projectsApi.create,
     onSuccess: async (project) => {
       message.success("素材项目已初始化，请先确认美术基调");
       setBootstrapOpen(false);
@@ -80,22 +74,11 @@ export default function ProjectsPage() {
     if (!root) return;
     try {
       const inspected = await projectsApi.inspect(root);
-      if (!inspected.supported && inspected.occupied) {
-        message.error("该目录包含不受支持的旧项目，请选择新目录或明确覆盖。");
-      }
       if (inspected.occupied) {
-        modal.confirm({
-          title: "覆盖本应用项目数据？",
-          content:
-            "只会清理 project.json、art-bible.md 和本地运行库，不会删除用户素材。",
-          okText: "安全覆盖",
-          okButtonProps: { danger: true },
-          onOk: () =>
-            createProject.mutateAsync({ path: root, overwrite: true }),
-        });
+        message.error("目录已存在 project.json，请使用“打开项目”。");
         return;
       }
-      createProject.mutate({ path: root, overwrite: false });
+      createProject.mutate(root);
     } catch (error) {
       message.error(error instanceof Error ? error.message : String(error));
     }

@@ -16,6 +16,7 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::responses::mount_function_call_agent_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::tempdir_in_core;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::turn_permission_fields;
@@ -155,7 +156,7 @@ async fn shell_zsh_fork_skill_scripts_ignore_declared_permissions() -> Result<()
         mcp_elicitations: true,
     });
     let workspace_write_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let allowed_dir = outside_dir.path().join("allowed-output");
     fs::create_dir_all(&allowed_dir)?;
     let allowed_path = allowed_dir.join("allowed.txt");

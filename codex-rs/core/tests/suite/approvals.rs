@@ -47,6 +47,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::tempdir_in_core;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
@@ -2891,7 +2892,7 @@ async fn env_zsh_script_spawned_by_python_can_request_escalation_under_zsh_fork(
 
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir.path().join("zsh-fork-env-zsh-escalated.txt");
     let outside_path_arg = shlex::try_join([outside_path.to_string_lossy().as_ref()])?;
     let rules = r#"prefix_rule(pattern=["touch"], decision="prompt")"#.to_string();
@@ -3047,7 +3048,7 @@ async fn matched_prefix_rule_runs_unsandboxed_under_zsh_fork() -> Result<()> {
 
     let approval_policy = AskForApproval::Never;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir
         .path()
         .join("zsh-fork-prefix-rule-unsandboxed.txt");
@@ -3157,7 +3158,7 @@ async fn allowed_escalated_exec_command_inherits_active_permission_profile() -> 
         WORKSPACE_PERMISSION_PROFILE_CONFIG,
     )?;
 
-    let script_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let script_dir = tempdir_in_core()?;
     let script_path = script_dir.path().join("print-permission-profile.sh");
     let outside_path = script_dir.path().join("unsandboxed-marker");
     fs::write(
@@ -3256,7 +3257,7 @@ async fn zsh_fork_inner_allowed_script_inherits_active_permission_profile() -> R
 
     const HOST: &str = "builder.example.com";
     let approval_policy = AskForApproval::OnRequest;
-    let script_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let script_dir = tempdir_in_core()?;
     let wrapper_path = script_dir.path().join("remote-bash");
     let remote_bash_path = script_dir.path().join("remote_bash.py");
     let outside_path = script_dir.path().join("remote-bash-unsandboxed-marker");

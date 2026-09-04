@@ -147,6 +147,14 @@ impl TempDirExt for TempDir {
     }
 }
 
+pub fn tempdir_in_core() -> anyhow::Result<TempDir> {
+    let temp_root = std::env::current_dir()?.join(".tmp");
+    std::fs::create_dir_all(&temp_root)
+        .with_context(|| format!("create core test temp root {}", temp_root.display()))?;
+    tempfile::tempdir_in(&temp_root)
+        .with_context(|| format!("create temp directory in {}", temp_root.display()))
+}
+
 pub fn test_tmp_path() -> AbsolutePathBuf {
     test_absolute_path_with_windows("/tmp", Some(r"C:\Users\codex\AppData\Local\Temp"))
 }

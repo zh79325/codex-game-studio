@@ -36,6 +36,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::tempdir_in_core;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::turn_permission_fields;
@@ -58,7 +59,7 @@ use wiremock::MockServer;
 async fn unified_exec_zsh_fork_parent_approval_preserves_denied_reads() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let denied_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let denied_dir = tempdir_in_core()?;
     let denied_path = denied_dir.path().join("secret.env");
     let secret = "unified-exec-zsh-fork-denied-read-secret";
     fs::write(&denied_path, format!("{secret}\n"))?;
@@ -123,7 +124,7 @@ async fn unified_exec_zsh_fork_parent_approval_escalates_intercepted_exec() -> R
 
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-parent-approval.txt");
@@ -185,7 +186,7 @@ async fn unified_exec_zsh_fork_parent_approval_keeps_explicit_prompt_rule() -> R
 
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-explicit-prompt-rule.txt");
@@ -304,7 +305,7 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
 
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-guardian-execve.txt");
@@ -453,7 +454,7 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
 
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempdir_in_core()?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-current-turn.txt");

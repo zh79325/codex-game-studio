@@ -70,6 +70,7 @@ use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
+use core_test_support::tempdir_in_core;
 use core_test_support::test_target_os;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
@@ -947,7 +948,7 @@ async fn escalated_patch_rejects_symlink_swapped_after_approval_request() -> Res
         Ok(()),
         "approval-time symlink swap uses the local filesystem"
     );
-    let temp = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let temp = tempdir_in_core()?;
     let root = temp.path().canonicalize()?;
     let work = root.join("work");
     let outside = root.join("victim.txt");
@@ -1033,7 +1034,7 @@ async fn apply_patch_cli_does_not_write_through_symlink_escape_outside_workspace
         "link escape setup needs local filesystem link creation"
     );
 
-    let test_root = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let test_root = tempdir_in_core()?;
     let test_root_path = dunce::canonicalize(test_root.path())?;
     let work_dir = AbsolutePathBuf::try_from(test_root_path.join("work"))?;
     let outside_dir = AbsolutePathBuf::try_from(test_root_path.join("outside"))?;
@@ -1104,7 +1105,7 @@ async fn apply_patch_cli_does_not_widen_permissions_for_workspace_directory_targ
         "link escape setup needs local filesystem link creation"
     );
 
-    let test_root = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let test_root = tempdir_in_core()?;
     let work_dir = AbsolutePathBuf::try_from(test_root.path().join("work"))?;
     std::fs::create_dir_all(work_dir.as_path())?;
     let outside_file = test_root.path().join("victim.txt");
@@ -1168,7 +1169,7 @@ async fn apply_patch_cli_preserves_existing_hard_link_outside_workspace() -> Res
         "link setup needs local filesystem hard link creation"
     );
 
-    let test_root = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let test_root = tempdir_in_core()?;
     let test_root_path = dunce::canonicalize(test_root.path())?;
     let work_dir = AbsolutePathBuf::try_from(test_root_path.join("work"))?;
     let outside_dir = AbsolutePathBuf::try_from(test_root_path.join("outside"))?;

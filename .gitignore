@@ -96,6 +96,7 @@ __pycache__/
 *.pyc
 
 # Codex Game Studio workspace-local runtime data
+/codex-rs/core/.tmp/
 /.codex-game/local/
 /.codex-game/*.db
 /.codex-game/*.db-*

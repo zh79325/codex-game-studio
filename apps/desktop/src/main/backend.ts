@@ -94,15 +94,20 @@ export class BackendSupervisor extends EventEmitter {
   private spawnBackend(): void {
     this.emitState({ type: "starting" });
     this.initialized = false;
-    const child = spawn(this.executable, ["--listen", "stdio://"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: this.workspaceRoot,
-      env: {
-        ...process.env,
-        ...this.providerEnvironment(),
-        CODEX_HOME: this.codexHome,
+    const child = spawn(
+      this.executable,
+      ["--listen", "stdio://", "--disable-plugin-startup-tasks"],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        cwd: this.workspaceRoot,
+        env: {
+          ...process.env,
+          ...this.providerEnvironment(),
+          CODEX_HOME: this.codexHome,
+          CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
+        },
       },
-    });
+    );
     this.child = child;
     createInterface({ input: child.stdout }).on("line", (line) =>
       this.handleLine(line),

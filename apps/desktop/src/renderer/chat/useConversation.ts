@@ -124,6 +124,7 @@ export function useConversation(target: ConversationTarget, enabled = true) {
     isBusy:
       snapshot.data?.conversation.status === "running" ||
       sendMutation.isPending,
+    isInterrupting: interruptMutation.isPending,
     streamingText,
     workingAgentCode,
     lastError,

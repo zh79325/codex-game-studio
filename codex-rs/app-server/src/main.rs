@@ -51,11 +51,13 @@ struct AppServerArgs {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
-    /// Hidden debug-only test hook used by integration tests that spawn the
-    /// production app-server binary.
-    #[cfg(debug_assertions)]
-    #[arg(long = "disable-plugin-startup-tasks-for-tests", hide = true)]
-    disable_plugin_startup_tasks_for_tests: bool,
+    /// Disable remote plugin discovery and startup warmups.
+    #[arg(
+        long = "disable-plugin-startup-tasks",
+        alias = "disable-plugin-startup-tasks-for-tests",
+        hide = true
+    )]
+    disable_plugin_startup_tasks: bool,
 
     /// Enable remote control for this app-server process without changing persistence.
     #[arg(long = "remote-control", hide = true)]
@@ -72,8 +74,7 @@ fn main() -> anyhow::Result<()> {
             session_source,
             auth,
             strict_config,
-            #[cfg(debug_assertions)]
-            disable_plugin_startup_tasks_for_tests,
+            disable_plugin_startup_tasks,
             remote_control,
         } = AppServerArgs::parse();
         let loader_overrides = if disable_managed_config_from_debug_env() {
@@ -89,8 +90,7 @@ fn main() -> anyhow::Result<()> {
             code_mode_host_transport: code_mode_host.into(),
             ..Default::default()
         };
-        #[cfg(debug_assertions)]
-        if disable_plugin_startup_tasks_for_tests {
+        if disable_plugin_startup_tasks {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
         }
         runtime_options.remote_control_startup_mode =

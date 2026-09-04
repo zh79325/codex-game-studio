@@ -1,4 +1,4 @@
-import { PauseOutlined, SendOutlined } from "@ant-design/icons";
+import { SendOutlined, StopOutlined } from "@ant-design/icons";
 import {
   Alert,
   App,
@@ -24,6 +24,8 @@ export type ChatPanelProps = {
   agents?: AiAgent[];
   loading?: boolean;
   canWrite: boolean;
+  busy: boolean;
+  interrupting?: boolean;
   streamingText?: string;
   workingAgentCode?: string;
   lastError?: string;
@@ -38,7 +40,6 @@ export default function ChatPanel(props: ChatPanelProps) {
   const { message } = App.useApp();
   const [content, setContent] = useState("");
   const [selectedDrafts, setSelectedDrafts] = useState<string[]>([]);
-  const busy = props.snapshot?.conversation.status === "running";
   const availableAgents = useMemo(
     () => props.agents?.filter((agent) => agent.focusable) ?? [],
     [props.agents],
@@ -69,8 +70,8 @@ export default function ChatPanel(props: ChatPanelProps) {
       title={
         <Space wrap>
           <span>Action 会话</span>
-          <Tag color={busy ? "processing" : "default"}>
-            {busy ? "运行中" : "待命"}
+          <Tag color={props.busy ? "processing" : "default"}>
+            {props.busy ? "运行中" : "待命"}
           </Tag>
           <Tag color="geekblue">
             对焦{" "}
@@ -94,7 +95,7 @@ export default function ChatPanel(props: ChatPanelProps) {
         workingAgentCode={props.workingAgentCode}
         starterPrompt={props.starterPrompt}
         onChoice={send}
-        disabled={!props.canWrite || busy || !props.snapshot}
+        disabled={!props.canWrite || props.busy || !props.snapshot}
       />
 
       {pendingDrafts.length > 0 && (
@@ -121,14 +122,15 @@ export default function ChatPanel(props: ChatPanelProps) {
                 }
               : undefined
           }
-          disabled={!props.canWrite || busy}
+          disabled={!props.canWrite || props.busy}
         />
       )}
 
       <Composer
         value={content}
         agents={availableAgents}
-        busy={busy}
+        busy={props.busy}
+        interrupting={props.interrupting}
         disabled={!props.canWrite || !props.snapshot}
         onChange={setContent}
         onSend={() => void send()}
@@ -251,6 +253,7 @@ export function Composer({
   value,
   agents,
   busy,
+  interrupting,
   disabled,
   onChange,
   onSend,
@@ -259,6 +262,7 @@ export function Composer({
   value: string;
   agents: AiAgent[];
   busy: boolean;
+  interrupting?: boolean;
   disabled: boolean;
   onChange: (value: string) => void;
   onSend: () => void;
@@ -286,11 +290,12 @@ export function Composer({
       <Button
         type={busy ? "default" : "primary"}
         danger={busy}
-        icon={busy ? <PauseOutlined /> : <SendOutlined />}
-        disabled={disabled || (!busy && !value.trim())}
+        icon={busy ? <StopOutlined /> : <SendOutlined />}
+        loading={busy && interrupting}
+        disabled={disabled || interrupting || (!busy && !value.trim())}
         onClick={busy ? onInterrupt : onSend}
       >
-        {busy ? "中断" : "发送"}
+        {busy ? "中断会话" : "发送"}
       </Button>
     </div>
   );

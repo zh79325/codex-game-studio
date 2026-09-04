@@ -297,19 +297,14 @@ impl TaskOrchestrator {
     pub async fn interrupt<E: CodexExecutionPort>(
         &self,
         execution: &E,
-        store: &ProjectStore,
         conversation_id: &str,
         agent_code: &str,
-        attempt_id: &str,
         thread_id: String,
         turn_id: String,
     ) -> Result<(), OrchestrationError> {
         let lock = self.binding_lock(conversation_id, agent_code).await;
         let _guard = lock.lock().await;
         execution.interrupt_turn(thread_id, turn_id).await?;
-        store
-            .mark_attempt_status(attempt_id, TaskAttemptStatus::Cancelled)
-            .await?;
         Ok(())
     }
 

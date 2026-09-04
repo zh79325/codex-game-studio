@@ -259,6 +259,8 @@ export default function ProjectWorkspacePage() {
             agents={agents.data}
             loading={conversation.isLoading}
             canWrite={canWrite}
+            busy={conversation.isBusy}
+            interrupting={conversation.isInterrupting}
             streamingText={conversation.streamingText}
             workingAgentCode={conversation.workingAgentCode}
             lastError={conversation.lastError}

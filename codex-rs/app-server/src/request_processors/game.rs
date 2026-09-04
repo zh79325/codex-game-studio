@@ -252,27 +252,11 @@ impl GameRequestProcessor {
         connection_id: ConnectionId,
         params: GameConversationInterruptParams,
     ) -> std::result::Result<GameConversationInterruptResponse, JSONRPCErrorError> {
-        let conversation_id = params.conversation_id.clone();
         let execution = self.execution.scoped(connection_id);
-        let (response, cancelled) = self
-            .adapter
+        self.adapter
             .conversation_interrupt(&execution, params)
             .await
-            .map_err(game_error)?;
-        for attempt in cancelled {
-            self.outgoing
-                .send_server_notification(ServerNotification::GameAttemptUpdated(
-                    GameAttemptUpdatedNotification {
-                        conversation_id: conversation_id.clone(),
-                        task_id: attempt.task_id,
-                        attempt_id: attempt.attempt_id,
-                        turn_id: Some(attempt.turn_id),
-                        status: "cancelled".to_string(),
-                    },
-                ))
-                .await;
-        }
-        Ok(response)
+            .map_err(game_error)
     }
 
     pub(crate) async fn conversation_commit_drafts(

@@ -53,13 +53,6 @@ pub struct GameTurnEventContext {
     pub agent_code: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CancelledTaskAttempt {
-    pub task_id: String,
-    pub attempt_id: String,
-    pub turn_id: String,
-}
-
 /// Adapts game runtime operations to app-server protocol responses.
 #[derive(Debug, Default)]
 pub struct GameAppServerAdapter {
@@ -500,7 +493,7 @@ impl GameAppServerAdapter {
         &self,
         execution: &E,
         params: GameConversationInterruptParams,
-    ) -> Result<(GameConversationInterruptResponse, Vec<CancelledTaskAttempt>), String> {
+    ) -> Result<GameConversationInterruptResponse, String> {
         let (_, store) = self
             .runtime
             .service()
@@ -510,28 +503,20 @@ impl GameAppServerAdapter {
             .running_attempts(&params.conversation_id)
             .await
             .map_err(|error| error.to_string())?;
-        let mut cancelled = Vec::with_capacity(running.len());
         for attempt in running {
             self.runtime
                 .orchestrator()
                 .interrupt(
                     execution,
-                    store.as_ref(),
                     &params.conversation_id,
                     &attempt.agent_code,
-                    &attempt.attempt_id,
                     attempt.thread_id,
-                    attempt.turn_id.clone(),
+                    attempt.turn_id,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            cancelled.push(CancelledTaskAttempt {
-                task_id: attempt.task_id,
-                attempt_id: attempt.attempt_id,
-                turn_id: attempt.turn_id,
-            });
         }
-        Ok((GameConversationInterruptResponse {}, cancelled))
+        Ok(GameConversationInterruptResponse {})
     }
 
     pub async fn conversation_commit_drafts(

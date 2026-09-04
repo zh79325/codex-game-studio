@@ -232,20 +232,27 @@ async fn interrupt_cancels_the_current_attempt_and_task() {
         .await
         .expect("task");
 
+    let turn_id = started.attempt.codex_turn_id.clone().expect("running turn");
     orchestrator
         .interrupt(
             &execution,
-            &store,
             "conversation-1",
             "game_designer",
-            started.attempt.id.as_str(),
             started.binding.codex_thread_id,
-            started.attempt.codex_turn_id.clone().expect("running turn"),
+            turn_id.clone(),
         )
         .await
         .expect("interrupt");
 
     assert_eq!(execution.interrupts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.list_tasks("conversation-1").await.expect("tasks")[0].status,
+        TaskStatus::Running
+    );
+    store
+        .complete_turn(&turn_id, TaskAttemptStatus::Cancelled)
+        .await
+        .expect("complete aborted turn");
     assert_eq!(
         store.list_tasks("conversation-1").await.expect("tasks")[0].status,
         TaskStatus::Cancelled

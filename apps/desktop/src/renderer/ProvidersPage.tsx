@@ -1,10 +1,12 @@
 import {
   ApiOutlined,
   DeleteOutlined,
+  DownOutlined,
   EditOutlined,
   ExportOutlined,
   ImportOutlined,
   PlusOutlined,
+  RightOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -108,6 +110,38 @@ type ModelValues = Omit<AiModel, "id" | "providerCode" | "limits"> & {
   limits?: AiLimit[];
 };
 
+function modelFromPreset(
+  providerCode: string,
+  model: ProviderPresetModel,
+  sortNo: number,
+  values?: PresetModelValues,
+): AiModel {
+  return {
+    id: values?.id ?? crypto.randomUUID(),
+    providerCode,
+    modelId: model.modelId,
+    displayName: model.modelId,
+    capabilities: model.capabilities,
+    driver: model.driver,
+    apiPath: model.apiPath,
+    enabled: true,
+    sortNo,
+    paramsJson: model.paramsJson,
+    remark: model.remark,
+    limits:
+      values?.maxValue && values.maxValue > 0
+        ? [
+            {
+              limitKind: model.limitKind,
+              maxValue: values.maxValue,
+              periodExpr: values.periodExpr || model.defaultPeriod,
+              groupName: "default",
+            },
+          ]
+        : [],
+  };
+}
+
 export default function ProvidersPage() {
   const { message } = App.useApp();
   const { canWrite } = useStudio();
@@ -121,6 +155,9 @@ export default function ProvidersPage() {
   const [modelProvider, setModelProvider] = useState<AiProvider>();
   const [modelOpen, setModelOpen] = useState(false);
   const [limitEditing, setLimitEditing] = useState<AiModel>();
+  const [expandedProviderCodes, setExpandedProviderCodes] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [transferMode, setTransferMode] = useState<"export" | "import">();
   const [transferText, setTransferText] = useState("");
   const [importPreview, setImportPreview] = useState<{
@@ -144,36 +181,40 @@ export default function ProvidersPage() {
   );
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["ai-providers"] });
+  const toggleProviderModels = (providerCode: string) => {
+    setExpandedProviderCodes((current) => {
+      const next = new Set(current);
+      if (next.has(providerCode)) {
+        next.delete(providerCode);
+      } else {
+        next.add(providerCode);
+      }
+      return next;
+    });
+  };
 
   const saveProvider = useMutation({
     mutationFn: async (values: ProviderValues) => {
       const code = values.code.trim();
+      const preset = presets.data?.presets.find(
+        (item) => item.code === values.presetCode,
+      );
+      if (!providerEditing && values.presetCode !== CUSTOM_PRESET && !preset) {
+        throw new Error("套餐数据未加载，请重新选择套餐");
+      }
+      const configuredModels = new Map(
+        (values.presetModels ?? []).map((model) => [model.modelId, model]),
+      );
       const models: AiModel[] = providerEditing
         ? providerEditing.models
-        : (values.presetModels ?? []).map((model, sortNo) => ({
-            id: model.id,
-            providerCode: code,
-            modelId: model.modelId,
-            displayName: model.modelId,
-            capabilities: model.capabilities,
-            driver: model.driver,
-            apiPath: model.apiPath,
-            enabled: true,
-            sortNo,
-            paramsJson: model.paramsJson,
-            remark: model.remark,
-            limits:
-              model.maxValue && model.maxValue > 0
-                ? [
-                    {
-                      limitKind: model.limitKind,
-                      maxValue: model.maxValue,
-                      periodExpr: model.periodExpr,
-                      groupName: "default",
-                    },
-                  ]
-                : [],
-          }));
+        : (preset?.models ?? []).map((model, sortNo) =>
+            modelFromPreset(
+              code,
+              model,
+              sortNo,
+              configuredModels.get(model.modelId),
+            ),
+          );
       const provider: AiProvider = {
         code,
         name: values.name.trim(),
@@ -224,6 +265,35 @@ export default function ProvidersPage() {
     onSuccess: async () => {
       message.success("模型已保存");
       setModelOpen(false);
+      await refresh();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const syncPresetModels = useMutation({
+    mutationFn: async ({
+      provider,
+      preset,
+    }: {
+      provider: AiProvider;
+      preset: ProviderPreset;
+    }) => {
+      const existingModelIds = new Set(
+        provider.models.map((model) => model.modelId),
+      );
+      const missingModels = preset.models.filter(
+        (model) => !existingModelIds.has(model.modelId),
+      );
+      for (const [index, model] of missingModels.entries()) {
+        await aiApi.writeModel(
+          "create",
+          modelFromPreset(provider.code, model, provider.models.length + index),
+        );
+      }
+      return missingModels.length;
+    },
+    onSuccess: async (count) => {
+      message.success(`已补全 ${count} 个套餐模型`);
       await refresh();
     },
     onError: (error: Error) => message.error(error.message),
@@ -505,64 +575,120 @@ export default function ProvidersPage() {
         />
       )}
       <Space direction="vertical" size="middle" className="workspace-main">
-        {(providers.data ?? []).map((provider) => (
-          <Card
-            key={provider.code}
-            className="content-card"
-            title={
-              <Space>
-                <ApiOutlined />
-                <span>{provider.name}</span>
-                <Tag>{provider.code}</Tag>
-                {provider.hasKey ? (
-                  <Tag color="success">Key {provider.keyMask}</Tag>
-                ) : (
-                  <Tag color="warning">未配置 Key</Tag>
-                )}
-              </Space>
-            }
-            extra={
-              <Space>
-                <Switch
-                  checked={provider.enabled}
-                  disabled={!canWrite}
-                  onChange={() => toggleProvider.mutate(provider)}
-                />
-                <Button
-                  icon={<EditOutlined />}
-                  disabled={!canWrite}
-                  onClick={() => openProvider(provider)}
-                >
-                  编辑
-                </Button>
-                <Popconfirm
-                  title="删除 Provider 及其模型？"
-                  onConfirm={() => removeProvider.mutate(provider.code)}
-                >
-                  <Button danger icon={<DeleteOutlined />} disabled={!canWrite}>
-                    删除
+        {(providers.data ?? []).map((provider) => {
+          const preset = presets.data?.presets.find(
+            (item) =>
+              item.label === provider.name &&
+              item.baseUrl === provider.baseUrl &&
+              item.driver === provider.driver &&
+              item.authStyle === provider.authStyle,
+          );
+          const existingModelIds = new Set(
+            provider.models.map((model) => model.modelId),
+          );
+          const missingModelCount =
+            preset?.models.filter(
+              (model) => !existingModelIds.has(model.modelId),
+            ).length ?? 0;
+          const modelsExpanded = expandedProviderCodes.has(provider.code);
+          return (
+            <Card
+              key={provider.code}
+              className="content-card"
+              styles={{ body: { display: modelsExpanded ? undefined : "none" } }}
+              title={
+                <Space>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={
+                      modelsExpanded ? <DownOutlined /> : <RightOutlined />
+                    }
+                    aria-label={modelsExpanded ? "收起模型" : "展开模型"}
+                    aria-expanded={modelsExpanded}
+                    onClick={() => toggleProviderModels(provider.code)}
+                  />
+                  <ApiOutlined />
+                  <span>{provider.name}</span>
+                  <Tag>{provider.code}</Tag>
+                  <Tag>{provider.models.length} 个模型</Tag>
+                  {provider.hasKey ? (
+                    <Tag color="success">Key {provider.keyMask}</Tag>
+                  ) : (
+                    <Tag color="warning">未配置 Key</Tag>
+                  )}
+                </Space>
+              }
+              extra={
+                <Space>
+                  <Switch
+                    checked={provider.enabled}
+                    disabled={!canWrite}
+                    onChange={() => toggleProvider.mutate(provider)}
+                  />
+                  {preset && missingModelCount > 0 && (
+                    <Button
+                      icon={<PlusOutlined />}
+                      disabled={!canWrite}
+                      loading={
+                        syncPresetModels.isPending &&
+                        syncPresetModels.variables?.provider.code ===
+                          provider.code
+                      }
+                      onClick={() =>
+                        syncPresetModels.mutate({ provider, preset })
+                      }
+                    >
+                      补全套餐模型（{missingModelCount}）
+                    </Button>
+                  )}
+                  <Button
+                    icon={<PlusOutlined />}
+                    disabled={!canWrite}
+                    onClick={() => openModel(provider)}
+                  >
+                    添加模型
                   </Button>
-                </Popconfirm>
-              </Space>
-            }
-          >
-            <Typography.Paragraph type="secondary">
-              {provider.driver} · {provider.authStyle} · 优先级{" "}
-              {provider.priority} · {provider.baseUrl || "默认 Base URL"}
-            </Typography.Paragraph>
-            {provider.remark && (
-              <Typography.Paragraph>{provider.remark}</Typography.Paragraph>
-            )}
-            <Table
-              rowKey="id"
-              size="small"
-              pagination={false}
-              dataSource={provider.models}
-              columns={modelColumns}
-              locale={{ emptyText: "尚未配置模型" }}
-            />
-          </Card>
-        ))}
+                  <Button
+                    icon={<EditOutlined />}
+                    disabled={!canWrite}
+                    onClick={() => openProvider(provider)}
+                  >
+                    编辑
+                  </Button>
+                  <Popconfirm
+                    title="删除 Provider 及其模型？"
+                    onConfirm={() => removeProvider.mutate(provider.code)}
+                  >
+                    <Button
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={!canWrite}
+                    >
+                      删除
+                    </Button>
+                  </Popconfirm>
+                </Space>
+              }
+            >
+              <Typography.Paragraph type="secondary">
+                {provider.driver} · {provider.authStyle} · 优先级{" "}
+                {provider.priority} · {provider.baseUrl || "默认 Base URL"}
+              </Typography.Paragraph>
+              {provider.remark && (
+                <Typography.Paragraph>{provider.remark}</Typography.Paragraph>
+              )}
+              <Table
+                rowKey="id"
+                size="small"
+                pagination={false}
+                dataSource={provider.models}
+                columns={modelColumns}
+                locale={{ emptyText: "尚未配置模型" }}
+              />
+            </Card>
+          );
+        })}
         {!providers.isLoading && !providers.data?.length && (
           <Card>
             <Typography.Text type="secondary">
@@ -619,17 +745,32 @@ export default function ProvidersPage() {
             <Form.Item
               name="code"
               label="Code"
+              style={{ flex: "2 1 360px", minWidth: 320 }}
               rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]+$/ }]}
             >
               <Input disabled={Boolean(providerEditing)} />
             </Form.Item>
-            <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+            <Form.Item
+              name="name"
+              label="名称"
+              style={{ flex: "2 1 360px", minWidth: 320 }}
+              rules={[{ required: true }]}
+            >
               <Input />
             </Form.Item>
-            <Form.Item name="priority" label="优先级">
+            <Form.Item
+              name="priority"
+              label="优先级"
+              style={{ flex: "0 1 160px" }}
+            >
               <InputNumber min={0} />
             </Form.Item>
-            <Form.Item name="enabled" label="启用" valuePropName="checked">
+            <Form.Item
+              name="enabled"
+              label="启用"
+              valuePropName="checked"
+              style={{ flex: "0 0 80px" }}
+            >
               <Switch />
             </Form.Item>
           </Space>

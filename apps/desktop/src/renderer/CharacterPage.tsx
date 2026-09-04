@@ -274,6 +274,7 @@ export default function CharacterPage() {
             streamingText={conversation.streamingText}
             workingAgentCode={conversation.workingAgentCode}
             lastError={conversation.lastError}
+            starterPrompt={`帮我设计一个符合当前项目要求的角色，名字叫${character?.name ?? ""}`}
             onSend={conversation.send}
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}

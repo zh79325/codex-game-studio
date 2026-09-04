@@ -12,7 +12,6 @@ import {
   App,
   Button,
   Card,
-  Checkbox,
   Collapse,
   Form,
   Input,
@@ -32,7 +31,6 @@ import { useMemo, useState } from "react";
 import { aiApi } from "./api";
 import { useStudio } from "./AppShell";
 import type {
-  AiAgentBinding,
   AiLimit,
   AiModel,
   AiProvider,
@@ -72,13 +70,21 @@ const limitUnits: Record<string, string> = {
   tokens: "tokens",
   credits: "credits",
 };
+const periodOptions = [
+  "second",
+  "minute",
+  "hour",
+  "day",
+  "week",
+  "month",
+  "total",
+  "day+11H",
+].map((value) => ({ value, label: value }));
 
 type PresetModelValues = ProviderPresetModel & {
   id: string;
-  selected: boolean;
   maxValue?: number | null;
   periodExpr: string;
-  agentCodes: string[];
 };
 
 type ProviderValues = Pick<
@@ -108,11 +114,13 @@ export default function ProvidersPage() {
   const queryClient = useQueryClient();
   const [providerForm] = Form.useForm<ProviderValues>();
   const [modelForm] = Form.useForm<ModelValues>();
+  const [limitForm] = Form.useForm<{ limits: AiLimit[] }>();
   const [providerEditing, setProviderEditing] = useState<AiProvider>();
   const [providerOpen, setProviderOpen] = useState(false);
   const [modelEditing, setModelEditing] = useState<AiModel>();
   const [modelProvider, setModelProvider] = useState<AiProvider>();
   const [modelOpen, setModelOpen] = useState(false);
+  const [limitEditing, setLimitEditing] = useState<AiModel>();
   const [transferMode, setTransferMode] = useState<"export" | "import">();
   const [transferText, setTransferText] = useState("");
   const [importPreview, setImportPreview] = useState<{
@@ -129,11 +137,6 @@ export default function ProvidersPage() {
     queryFn: aiApi.listProviderPresets,
     staleTime: Infinity,
   });
-  const agents = useQuery({
-    queryKey: ["ai-agents"],
-    queryFn: aiApi.listAgents,
-    staleTime: Infinity,
-  });
   const selectedPresetCode = Form.useWatch("presetCode", providerForm);
   const presetModels = Form.useWatch("presetModels", providerForm) ?? [];
   const selectedPreset = presets.data?.presets.find(
@@ -147,32 +150,30 @@ export default function ProvidersPage() {
       const code = values.code.trim();
       const models: AiModel[] = providerEditing
         ? providerEditing.models
-        : (values.presetModels ?? [])
-            .filter((model) => model.selected)
-            .map((model, sortNo) => ({
-              id: model.id,
-              providerCode: code,
-              modelId: model.modelId,
-              displayName: model.modelId,
-              capabilities: model.capabilities,
-              driver: model.driver,
-              apiPath: model.apiPath,
-              enabled: true,
-              sortNo,
-              paramsJson: model.paramsJson,
-              remark: model.remark,
-              limits:
-                model.maxValue && model.maxValue > 0
-                  ? [
-                      {
-                        limitKind: model.limitKind,
-                        maxValue: model.maxValue,
-                        periodExpr: model.periodExpr,
-                        groupName: "default",
-                      },
-                    ]
-                  : [],
-            }));
+        : (values.presetModels ?? []).map((model, sortNo) => ({
+            id: model.id,
+            providerCode: code,
+            modelId: model.modelId,
+            displayName: model.modelId,
+            capabilities: model.capabilities,
+            driver: model.driver,
+            apiPath: model.apiPath,
+            enabled: true,
+            sortNo,
+            paramsJson: model.paramsJson,
+            remark: model.remark,
+            limits:
+              model.maxValue && model.maxValue > 0
+                ? [
+                    {
+                      limitKind: model.limitKind,
+                      maxValue: model.maxValue,
+                      periodExpr: model.periodExpr,
+                      groupName: "default",
+                    },
+                  ]
+                : [],
+          }));
       const provider: AiProvider = {
         code,
         name: values.name.trim(),
@@ -189,25 +190,7 @@ export default function ProvidersPage() {
       if (providerEditing) {
         return aiApi.updateProvider(provider, values.apiKey || undefined);
       }
-      const selectedIds = new Set(models.map((model) => model.id));
-      const bindingMap = new Map<string, string[]>();
-      for (const model of values.presetModels ?? []) {
-        if (!selectedIds.has(model.id)) continue;
-        for (const agentCode of model.agentCodes) {
-          bindingMap.set(agentCode, [
-            ...(bindingMap.get(agentCode) ?? []),
-            model.id,
-          ]);
-        }
-      }
-      const agentBindings: AiAgentBinding[] = [...bindingMap].map(
-        ([agentCode, modelIds]) => ({ agentCode, modelIds }),
-      );
-      return aiApi.createProvider(
-        provider,
-        values.apiKey || undefined,
-        agentBindings,
-      );
+      return aiApi.createProvider(provider, values.apiKey || undefined, []);
     },
     onSuccess: async () => {
       message.success(
@@ -241,6 +224,22 @@ export default function ProvidersPage() {
     onSuccess: async () => {
       message.success("模型已保存");
       setModelOpen(false);
+      await refresh();
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const saveLimits = useMutation({
+    mutationFn: async (values: { limits: AiLimit[] }) => {
+      if (!limitEditing) throw new Error("未选择模型");
+      return aiApi.writeModel("update", {
+        ...limitEditing,
+        limits: values.limits ?? [],
+      });
+    },
+    onSuccess: async () => {
+      message.success("模型限流已保存");
+      setLimitEditing(undefined);
       await refresh();
     },
     onError: (error: Error) => message.error(error.message),
@@ -330,14 +329,8 @@ export default function ProvidersPage() {
       presetModels: preset.models.map((model) => ({
         ...model,
         id: crypto.randomUUID(),
-        selected: true,
         maxValue: null,
         periodExpr: model.defaultPeriod,
-        agentCodes: (agents.data ?? [])
-          .filter((agent) =>
-            model.capabilities.includes(agent.requiredModelCapability),
-          )
-          .map((agent) => agent.agentCode),
       })),
     });
   };
@@ -360,6 +353,11 @@ export default function ProvidersPage() {
       },
     );
     setModelOpen(true);
+  };
+
+  const openLimits = (model: AiModel) => {
+    setLimitEditing(model);
+    limitForm.setFieldsValue({ limits: model.limits });
   };
 
   const exportConfig = async () => {
@@ -421,9 +419,17 @@ export default function ProvidersPage() {
       },
       {
         title: "操作",
-        width: 120,
+        width: 170,
         render: (_, model) => (
           <Space>
+            <Button
+              type="link"
+              size="small"
+              disabled={!canWrite}
+              onClick={() => openLimits(model)}
+            >
+              限流
+            </Button>
             <Button
               type="text"
               icon={<EditOutlined />}
@@ -523,13 +529,6 @@ export default function ProvidersPage() {
                   onChange={() => toggleProvider.mutate(provider)}
                 />
                 <Button
-                  icon={<PlusOutlined />}
-                  disabled={!canWrite}
-                  onClick={() => openModel(provider)}
-                >
-                  添加模型
-                </Button>
-                <Button
                   icon={<EditOutlined />}
                   disabled={!canWrite}
                   onClick={() => openProvider(provider)}
@@ -595,7 +594,7 @@ export default function ProvidersPage() {
               extra="套餐会自动填入端点、Driver、鉴权方式与全部模型；同套餐多账号可修改 Code。"
             >
               <Select
-                loading={presets.isLoading || agents.isLoading}
+                loading={presets.isLoading}
                 onChange={applyPreset}
                 options={[
                   ...(presets.data?.presets ?? []).map((preset) => ({
@@ -679,10 +678,9 @@ export default function ProvidersPage() {
 
           {!providerEditing && selectedPreset && (
             <>
-              <Typography.Title level={5}>模型与额度</Typography.Title>
+              <Typography.Title level={5}>模型与限流</Typography.Title>
               <Typography.Paragraph type="secondary">
-                模型默认全选；额度留空表示不创建限制记录。能力匹配的 Agent
-                会自动绑定。
+                套餐内全部模型会自动创建并可供 Agent 选择；限流留空表示不限制。
               </Typography.Paragraph>
               <Form.List name="presetModels">
                 {(fields) => (
@@ -693,13 +691,6 @@ export default function ProvidersPage() {
                       return (
                         <Card key={field.key} size="small">
                           <Space align="start" wrap>
-                            <Form.Item
-                              name={[field.name, "selected"]}
-                              valuePropName="checked"
-                              style={{ marginBottom: 0 }}
-                            >
-                              <Checkbox />
-                            </Form.Item>
                             <Space
                               direction="vertical"
                               size={2}
@@ -731,11 +722,6 @@ export default function ProvidersPage() {
                                   </Tag>
                                 )}
                               </Space>
-                              {row.agentCodes.length > 0 && (
-                                <Typography.Text type="secondary">
-                                  自动绑定：{row.agentCodes.join("、")}
-                                </Typography.Text>
-                              )}
                             </Space>
                             <Form.Item
                               name={[field.name, "maxValue"]}
@@ -754,7 +740,11 @@ export default function ProvidersPage() {
                               style={{ marginBottom: 0 }}
                               rules={[{ required: true }]}
                             >
-                              <Input style={{ width: 130 }} />
+                              <Select
+                                showSearch
+                                options={periodOptions}
+                                style={{ width: 130 }}
+                              />
                             </Form.Item>
                           </Space>
                         </Card>
@@ -848,9 +838,29 @@ export default function ProvidersPage() {
           </Form.Item>
           <Collapse
             items={[
-              { key: "limits", label: "模型限额", children: <LimitFields /> },
+              { key: "limits", label: "模型限流", children: <LimitFields /> },
             ]}
           />
+        </Form>
+      </Modal>
+
+      <Modal
+        width={720}
+        title={
+          limitEditing ? `${limitEditing.displayName} · 模型限流` : "模型限流"
+        }
+        open={Boolean(limitEditing)}
+        confirmLoading={saveLimits.isPending}
+        onCancel={() => setLimitEditing(undefined)}
+        onOk={() => limitForm.submit()}
+        destroyOnHidden
+      >
+        <Form
+          form={limitForm}
+          layout="vertical"
+          onFinish={(values) => saveLimits.mutate(values)}
+        >
+          <LimitFields />
         </Form>
       </Modal>
 
@@ -954,7 +964,12 @@ function LimitFields() {
                 name={[field.name, "periodExpr"]}
                 rules={[{ required: true }]}
               >
-                <Input placeholder="例如 day+11H" />
+                <Select
+                  showSearch
+                  placeholder="限流周期"
+                  options={periodOptions}
+                  style={{ width: 150 }}
+                />
               </Form.Item>
               <Form.Item
                 name={[field.name, "groupName"]}
@@ -982,7 +997,7 @@ function LimitFields() {
               })
             }
           >
-            增加限额
+            增加限流
           </Button>
         </Space>
       )}

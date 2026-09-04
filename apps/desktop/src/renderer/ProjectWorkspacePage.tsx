@@ -149,37 +149,6 @@ export default function ProjectWorkspacePage() {
 
   return (
     <div className="page-stack workspace-page">
-      <section className="page-heading">
-        <div>
-          <Space align="center" wrap>
-            <Typography.Title level={2}>
-              {project.data?.name ?? "素材项目立项"}
-            </Typography.Title>
-            {project.data?.state && (
-              <Tag
-                color={
-                  project.data.state === "ready" ? "success" : "processing"
-                }
-              >
-                {project.data.state}
-              </Tag>
-            )}
-          </Space>
-          <Typography.Text type="secondary" className="path-text">
-            {project.data?.root}
-          </Typography.Text>
-        </div>
-        {project.data?.state === "styleSettled" && (
-          <Button
-            type="primary"
-            disabled={!canWrite}
-            onClick={() => setFinalizeOpen(true)}
-          >
-            确认立项
-          </Button>
-        )}
-      </section>
-
       {!canWrite && (
         <Alert
           type="warning"
@@ -190,12 +159,50 @@ export default function ProjectWorkspacePage() {
       <Row gutter={[16, 16]} align="stretch">
         <Col xs={24} xl={7}>
           <Space direction="vertical" className="workspace-main">
-            <Card title="立项门禁" className="content-card">
-              <Steps
-                direction="vertical"
-                current={currentStep}
-                items={projectSteps}
-              />
+            <Card
+              title="立项流程"
+              className="content-card"
+              extra={
+                project.data?.state === "styleSettled" ? (
+                  <Button
+                    type="primary"
+                    size="small"
+                    disabled={!canWrite}
+                    onClick={() => setFinalizeOpen(true)}
+                  >
+                    确认立项
+                  </Button>
+                ) : null
+              }
+            >
+              <Space direction="vertical" className="workspace-main">
+                <div>
+                  <Space align="center" wrap>
+                    <Typography.Text strong>
+                      {project.data?.name ?? "素材项目立项"}
+                    </Typography.Text>
+                    {project.data?.state && (
+                      <Tag
+                        color={
+                          project.data.state === "ready"
+                            ? "success"
+                            : "processing"
+                        }
+                      >
+                        {project.data.state}
+                      </Tag>
+                    )}
+                  </Space>
+                  <Typography.Text type="secondary" className="path-text">
+                    {project.data?.root}
+                  </Typography.Text>
+                </div>
+                <Steps
+                  direction="vertical"
+                  current={currentStep}
+                  items={projectSteps}
+                />
+              </Space>
             </Card>
             <Card
               title="角色"
@@ -255,6 +262,7 @@ export default function ProjectWorkspacePage() {
             streamingText={conversation.streamingText}
             workingAgentCode={conversation.workingAgentCode}
             lastError={conversation.lastError}
+            starterPrompt="我要开发一款类似我的世界地下城的刷怪RPG，玩家扮演的角色是西游记中的人物例如孙悟空，猪八戒，二郎神等，怪物是类似奥特曼电视剧中的怪兽，场景是在现代各个城市的地标建筑附近。"
             onSend={conversation.send}
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}

@@ -1,6 +1,4 @@
 import {
-  ArrowDownOutlined,
-  ArrowUpOutlined,
   DeleteOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -12,6 +10,9 @@ import {
   Button,
   Descriptions,
   Empty,
+  Form,
+  Input,
+  InputNumber,
   List,
   Modal,
   Select,
@@ -24,13 +25,31 @@ import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useState } from "react";
 import { aiApi } from "./api";
 import { useStudio } from "./AppShell";
-import type { AiAgent, AiModel, AiProvider } from "./types";
+import type { AiAgent, AiLimit, AiModel, AiProvider } from "./types";
 
 const roleTypeLabels: Record<AiAgent["roleType"], string> = {
   director: "总管",
   specialist: "专家",
   executor: "执行器",
 };
+const limitKinds = [
+  "calls",
+  "input_tokens",
+  "output_tokens",
+  "total_tokens",
+  "tokens",
+  "credits",
+];
+const periodOptions = [
+  "second",
+  "minute",
+  "hour",
+  "day",
+  "week",
+  "month",
+  "total",
+  "day+11H",
+].map((value) => ({ value, label: value }));
 
 export default function AgentsPage() {
   const { canWrite } = useStudio();
@@ -211,12 +230,21 @@ function AgentBindingModal({
   onSaved,
 }: AgentBindingModalProps) {
   const { message } = App.useApp();
+  const queryClient = useQueryClient();
+  const [limitForm] = Form.useForm<{ limits: AiLimit[] }>();
   const [modelIds, setModelIds] = useState<string[]>([]);
+  const [providerCode, setProviderCode] = useState<string>();
   const [candidateId, setCandidateId] = useState<string>();
+  const [limitTarget, setLimitTarget] = useState<{
+    provider: AiProvider;
+    model: AiModel;
+  }>();
 
   useEffect(() => {
     setModelIds(agent?.modelIds ?? []);
+    setProviderCode(undefined);
     setCandidateId(undefined);
+    setLimitTarget(undefined);
   }, [agent]);
 
   const modelMap = useMemo(
@@ -231,30 +259,27 @@ function AgentBindingModal({
     [providers],
   );
   const candidates = useMemo(() => {
-    if (!agent) return [];
-    return providers
-      .filter((provider) => provider.enabled)
-      .flatMap((provider) =>
-        provider.models.map((model) => ({ provider, model })),
-      )
+    if (!agent || !providerCode) return [];
+    const provider = providers.find((item) => item.code === providerCode);
+    if (!provider) return [];
+    return provider.models
       .filter(
-        ({ model }) =>
+        (model) =>
           model.enabled &&
           !modelIds.includes(model.id) &&
           model.capabilities.includes(agent.requiredModelCapability),
       )
       .sort((left, right) => {
-        if (agent.capability !== "i2i")
-          return left.model.sortNo - right.model.sortNo;
+        if (agent.capability !== "i2i") return left.sortNo - right.sortNo;
         const leftScore = Number(
-          left.model.capabilities.includes("image_reference_consistency"),
+          left.capabilities.includes("image_reference_consistency"),
         );
         const rightScore = Number(
-          right.model.capabilities.includes("image_reference_consistency"),
+          right.capabilities.includes("image_reference_consistency"),
         );
-        return rightScore - leftScore || left.model.sortNo - right.model.sortNo;
+        return rightScore - leftScore || left.sortNo - right.sortNo;
       });
-  }, [agent, modelIds, providers]);
+  }, [agent, modelIds, providerCode, providers]);
 
   const save = useMutation({
     mutationFn: () => aiApi.writeAgentBinding(agent!.agentCode, modelIds),
@@ -265,108 +290,252 @@ function AgentBindingModal({
     onError: (error: Error) => message.error(error.message),
   });
 
-  const move = (index: number, offset: number) => {
-    const target = index + offset;
-    if (target < 0 || target >= modelIds.length) return;
-    const next = [...modelIds];
-    [next[index], next[target]] = [next[target], next[index]];
-    setModelIds(next);
+  const saveLimits = useMutation({
+    mutationFn: async (values: { limits: AiLimit[] }) => {
+      if (!limitTarget) throw new Error("未选择模型");
+      return aiApi.writeModel("update", {
+        ...limitTarget.model,
+        limits: values.limits ?? [],
+      });
+    },
+    onSuccess: async () => {
+      message.success("模型限流已保存");
+      setLimitTarget(undefined);
+      await queryClient.invalidateQueries({ queryKey: ["ai-providers"] });
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const openLimits = (provider: AiProvider, model: AiModel) => {
+    setLimitTarget({ provider, model });
+    limitForm.setFieldsValue({ limits: model.limits });
   };
 
+  const sortedModelIds = (ids: string[]) =>
+    [...ids].sort((leftId, rightId) => {
+      const left = modelMap.get(leftId);
+      const right = modelMap.get(rightId);
+      if (!left || !right) return 0;
+      return (
+        left.provider.priority - right.provider.priority ||
+        left.model.sortNo - right.model.sortNo
+      );
+    });
+
   return (
-    <Modal
-      title={agent ? `指定模型 · ${agent.role}` : "指定模型"}
-      open={Boolean(agent)}
-      onCancel={onClose}
-      onOk={() => save.mutate()}
-      okText="保存"
-      okButtonProps={{ disabled: !canWrite, loading: save.isPending }}
-      width={720}
-      destroyOnHidden
-    >
-      <Space direction="vertical" className="workspace-main" size="middle">
-        <Typography.Text type="secondary">
-          仅显示已启用且支持 {agent?.requiredModelCapability ?? "所需能力"}{" "}
-          的模型。顺序越靠前优先级越高。
-        </Typography.Text>
-        <List
-          bordered
-          locale={{ emptyText: "未绑定模型，执行时将返回 blocked" }}
-          dataSource={modelIds}
-          renderItem={(id, index) => {
-            const entry = modelMap.get(id);
-            return (
-              <List.Item
-                actions={[
-                  <Button
-                    key="up"
-                    type="text"
-                    icon={<ArrowUpOutlined />}
-                    disabled={index === 0}
-                    onClick={() => move(index, -1)}
-                  />,
-                  <Button
-                    key="down"
-                    type="text"
-                    icon={<ArrowDownOutlined />}
-                    disabled={index === modelIds.length - 1}
-                    onClick={() => move(index, 1)}
-                  />,
-                  <Button
-                    key="remove"
-                    type="text"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={() =>
-                      setModelIds((current) =>
-                        current.filter((item) => item !== id),
-                      )
+    <>
+      <Modal
+        title={agent ? `指定模型 · ${agent.role}` : "指定模型"}
+        open={Boolean(agent)}
+        onCancel={onClose}
+        onOk={() => save.mutate()}
+        okText="保存"
+        okButtonProps={{ disabled: !canWrite, loading: save.isPending }}
+        width={720}
+        destroyOnHidden
+      >
+        <Space direction="vertical" className="workspace-main" size="middle">
+          <Typography.Text type="secondary">
+            仅显示已启用且支持 {agent?.requiredModelCapability ?? "所需能力"}{" "}
+            的模型；调用顺序按 Provider 优先级和模型排序确定。
+          </Typography.Text>
+          <List
+            bordered
+            locale={{ emptyText: "未绑定模型，执行时将返回 blocked" }}
+            dataSource={modelIds}
+            renderItem={(id, index) => {
+              const entry = modelMap.get(id);
+              return (
+                <List.Item
+                  actions={[
+                    entry && (
+                      <Button
+                        key="limit"
+                        type="link"
+                        size="small"
+                        onClick={() => openLimits(entry.provider, entry.model)}
+                      >
+                        限流
+                      </Button>
+                    ),
+                    <Button
+                      key="remove"
+                      type="text"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() =>
+                        setModelIds((current) =>
+                          current.filter((item) => item !== id),
+                        )
+                      }
+                    />,
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={
+                      <Space>
+                        <Tag color="geekblue">#{index + 1}</Tag>
+                        {entry?.model.displayName ?? id}
+                      </Space>
                     }
-                  />,
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <Space>
-                      <Tag color="geekblue">#{index + 1}</Tag>
-                      {entry?.model.displayName ?? id}
-                    </Space>
-                  }
-                  description={
-                    entry
-                      ? `${entry.provider.name} · ${entry.model.modelId}`
-                      : "模型已不存在，请移除后保存"
-                  }
-                />
-              </List.Item>
-            );
-          }}
-        />
-        <Space.Compact block>
-          <Select
-            value={candidateId}
-            placeholder="选择兼容模型"
-            style={{ width: "100%" }}
-            options={candidates.map(({ provider, model }) => ({
-              value: model.id,
-              label: `${provider.name} · ${model.displayName} (${model.modelId})`,
-            }))}
-            onChange={setCandidateId}
-          />
-          <Button
-            icon={<PlusOutlined />}
-            disabled={!candidateId}
-            onClick={() => {
-              if (!candidateId) return;
-              setModelIds((current) => [...current, candidateId]);
-              setCandidateId(undefined);
+                    description={
+                      entry
+                        ? `${entry.provider.name} · ${entry.model.modelId}`
+                        : "模型已不存在，请移除后保存"
+                    }
+                  />
+                </List.Item>
+              );
             }}
+          />
+          <Space direction="vertical" size={4} className="workspace-main">
+            <Typography.Text type="secondary">
+              第一步：选择 Provider
+            </Typography.Text>
+            <Select
+              value={providerCode}
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择 Provider"
+              style={{ width: "100%" }}
+              options={providers.map((provider) => ({
+                value: provider.code,
+                label: provider.enabled
+                  ? provider.name
+                  : `${provider.name}（已停用）`,
+                disabled: !provider.enabled,
+              }))}
+              onChange={(value) => {
+                setProviderCode(value);
+                setCandidateId(undefined);
+              }}
+            />
+            <Typography.Text type="secondary">第二步：选择模型</Typography.Text>
+            <Space.Compact block>
+              <Select
+                value={candidateId}
+                showSearch
+                optionFilterProp="label"
+                placeholder={
+                  providerCode ? "选择兼容模型" : "请先选择 Provider"
+                }
+                disabled={!providerCode}
+                style={{ width: "100%" }}
+                options={candidates.map((model) => ({
+                  value: model.id,
+                  label: `${model.displayName} (${model.modelId})`,
+                }))}
+                onChange={setCandidateId}
+              />
+              <Button
+                icon={<PlusOutlined />}
+                disabled={!candidateId}
+                onClick={() => {
+                  if (!candidateId) return;
+                  setModelIds((current) =>
+                    sortedModelIds([...current, candidateId]),
+                  );
+                  setCandidateId(undefined);
+                }}
+              >
+                添加
+              </Button>
+            </Space.Compact>
+          </Space>
+        </Space>
+      </Modal>
+
+      <Modal
+        width={760}
+        title={
+          limitTarget
+            ? `${limitTarget.provider.name} · ${limitTarget.model.displayName} · 模型限流`
+            : "模型限流"
+        }
+        open={Boolean(limitTarget)}
+        confirmLoading={saveLimits.isPending}
+        onCancel={() => setLimitTarget(undefined)}
+        onOk={() => limitForm.submit()}
+        destroyOnHidden
+      >
+        <Form
+          form={limitForm}
+          layout="vertical"
+          onFinish={(values) => saveLimits.mutate(values)}
+        >
+          <AgentLimitFields />
+        </Form>
+      </Modal>
+    </>
+  );
+}
+
+function AgentLimitFields() {
+  return (
+    <Form.List name="limits">
+      {(fields, { add, remove }) => (
+        <Space direction="vertical" className="workspace-main">
+          {fields.map((field) => (
+            <Space key={field.key} align="start" wrap>
+              <Form.Item
+                name={[field.name, "limitKind"]}
+                rules={[{ required: true }]}
+              >
+                <Select
+                  placeholder="限流口径"
+                  options={limitKinds.map((value) => ({ value, label: value }))}
+                  style={{ width: 160 }}
+                />
+              </Form.Item>
+              <Form.Item
+                name={[field.name, "maxValue"]}
+                rules={[{ required: true }]}
+              >
+                <InputNumber min={0} placeholder="0 为不限" />
+              </Form.Item>
+              <Form.Item
+                name={[field.name, "periodExpr"]}
+                rules={[{ required: true }]}
+              >
+                <Select
+                  showSearch
+                  placeholder="限流周期"
+                  options={periodOptions}
+                  style={{ width: 150 }}
+                />
+              </Form.Item>
+              <Form.Item
+                name={[field.name, "groupName"]}
+                rules={[{ required: true }]}
+              >
+                <Input placeholder="共享组" />
+              </Form.Item>
+              <Button
+                danger
+                type="text"
+                icon={<DeleteOutlined />}
+                onClick={() => remove(field.name)}
+              />
+            </Space>
+          ))}
+          <Button
+            type="dashed"
+            icon={<PlusOutlined />}
+            onClick={() =>
+              add({
+                limitKind: "calls",
+                maxValue: 0,
+                periodExpr: "day",
+                groupName: "default",
+              })
+            }
           >
-            添加
+            增加限流
           </Button>
-        </Space.Compact>
-      </Space>
-    </Modal>
+        </Space>
+      )}
+    </Form.List>
   );
 }
 

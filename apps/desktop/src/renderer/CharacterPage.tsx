@@ -18,7 +18,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
@@ -54,6 +54,7 @@ export default function CharacterPage() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [requestingRedraw, setRequestingRedraw] = useState(false);
+  const draftDrawerCloseRef = useRef<(() => void) | null>(null);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -174,7 +175,7 @@ export default function CharacterPage() {
         hasApprovedVerdict("VIEW-CHECK", item.createdAt),
     );
 
-  const renderDraftAction = (draft: ArtifactDraft) =>
+  const renderDraftAction = (draft: ArtifactDraft, closeDrawer: () => void) =>
     character?.state === "S0_spec_drafting" &&
     draft.targetPath === "docs/角色定稿.md" ? (
       <Space size="small">
@@ -186,7 +187,12 @@ export default function CharacterPage() {
             !canWrite || !hasApprovedVerdict("SPEC-CHECK", draft.createdAt)
           }
           loading={action.isPending}
-          onClick={() => action.mutate({ type: "spec", draftId: draft.id })}
+          onClick={() =>
+            action.mutate(
+              { type: "spec", draftId: draft.id },
+              { onSuccess: closeDrawer },
+            )
+          }
         >
           保存并确认设定
         </Button>
@@ -194,7 +200,10 @@ export default function CharacterPage() {
           size="small"
           icon={<ReloadOutlined />}
           disabled={!canWrite || conversation.isBusy}
-          onClick={() => setRejectOpen(true)}
+          onClick={() => {
+            draftDrawerCloseRef.current = closeDrawer;
+            setRejectOpen(true);
+          }}
         >
           要求修改
         </Button>
@@ -225,6 +234,8 @@ export default function CharacterPage() {
         `用户已通过人工门禁拒绝当前 ${stage} 候选。必须按以下原因修订或重画：${reason}`,
         stage === "spec" ? "spec_writer" : "prompt_smith",
       );
+      draftDrawerCloseRef.current?.();
+      draftDrawerCloseRef.current = null;
       setRejectOpen(false);
       setRejectReason("");
       await refresh();
@@ -265,7 +276,7 @@ export default function CharacterPage() {
         />
       </Card>
       <Row gutter={[16, 16]} align="stretch">
-        <Col xs={24} xl={15}>
+        <Col className="chat-column" xs={24} xl={15}>
           <ChatPanel
             snapshot={conversation.snapshot}
             agents={agents.data}
@@ -370,7 +381,10 @@ export default function CharacterPage() {
           disabled: !rejectReason.trim() || conversation.isBusy,
         }}
         onOk={() => void requestRedraw()}
-        onCancel={() => setRejectOpen(false)}
+        onCancel={() => {
+          draftDrawerCloseRef.current = null;
+          setRejectOpen(false);
+        }}
       >
         <Input.TextArea
           value={rejectReason}

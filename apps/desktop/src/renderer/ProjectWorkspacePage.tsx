@@ -132,7 +132,7 @@ export default function ProjectWorkspacePage() {
       : project.data?.state === "styleSettled"
         ? 1
         : 0;
-  const renderDraftAction = (draft: ArtifactDraft) =>
+  const renderDraftAction = (draft: ArtifactDraft, closeDrawer: () => void) =>
     draft.targetPath === "art-bible.md" &&
     project.data?.state === "drafting" ? (
       <Button
@@ -141,7 +141,9 @@ export default function ProjectWorkspacePage() {
         icon={<CheckCircleOutlined />}
         disabled={!canWrite}
         loading={commitArtBible.isPending}
-        onClick={() => commitArtBible.mutate(draft.id)}
+        onClick={() =>
+          commitArtBible.mutate(draft.id, { onSuccess: closeDrawer })
+        }
       >
         确认游戏风格
       </Button>
@@ -253,7 +255,7 @@ export default function ProjectWorkspacePage() {
             </Card>
           </Space>
         </Col>
-        <Col xs={24} xl={17}>
+        <Col className="chat-column" xs={24} xl={17}>
           <ChatPanel
             snapshot={conversation.snapshot}
             agents={agents.data}

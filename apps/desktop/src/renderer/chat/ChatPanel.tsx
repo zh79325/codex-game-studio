@@ -1,24 +1,35 @@
-import { SendOutlined, StopOutlined } from "@ant-design/icons";
+import {
+  LockOutlined,
+  SendOutlined,
+  StopOutlined,
+  UnlockOutlined,
+} from "@ant-design/icons";
 import {
   Alert,
   App,
   Button,
   Card,
-  Checkbox,
   Mentions,
   Space,
   Spin,
   Tag,
   Typography,
 } from "antd";
-import { useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   AiAgent,
   ArtifactDraft,
   ConversationMessage,
   ConversationSnapshot,
 } from "../types";
-import ChoiceQuestions from "./ChoiceQuestions";
+import InteractionDrawer from "./InteractionDrawer";
 
 export type ChatPanelProps = {
   snapshot?: ConversationSnapshot;
@@ -35,115 +46,208 @@ export type ChatPanelProps = {
   onSend: (content: string, recipientAgentCode?: string) => Promise<unknown>;
   onInterrupt: () => Promise<unknown>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
-  renderDraftAction?: (draft: ArtifactDraft) => React.ReactNode;
+  renderDraftAction?: (
+    draft: ArtifactDraft,
+    closeDrawer: () => void,
+  ) => React.ReactNode;
 };
 
 export default function ChatPanel(props: ChatPanelProps) {
   const { message } = App.useApp();
   const [content, setContent] = useState("");
-  const [selectedDrafts, setSelectedDrafts] = useState<string[]>([]);
+  const [followLatestRequest, setFollowLatestRequest] = useState(0);
   const availableAgents = useMemo(
     () => props.agents?.filter((agent) => agent.focusable) ?? [],
     [props.agents],
   );
   const pendingDrafts =
     props.snapshot?.drafts.filter((draft) => draft.status === "pending") ?? [];
-  const committableDraftIds = pendingDrafts
-    .filter((draft) => !isDedicatedGateDraft(draft))
-    .map((draft) => draft.id);
+  const pendingChoice = useMemo(() => {
+    const messages = props.snapshot?.messages ?? [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const choices = messages[index].action?.payload.choices;
+      if (!choices?.length) continue;
+      const answered = messages
+        .slice(index + 1)
+        .some((message) => message.role === "user");
+      return answered ? undefined : { id: messages[index].id, groups: choices };
+    }
+    return undefined;
+  }, [props.snapshot?.messages]);
 
   const send = async (value = content) => {
     const normalized = value.trim();
-    if (!normalized) return;
+    if (!normalized) return false;
+    setFollowLatestRequest((current) => current + 1);
     try {
       await props.onSend(
         normalized,
         findMentionedAgent(normalized, availableAgents),
       );
       setContent("");
+      return true;
     } catch (error) {
       message.error(error instanceof Error ? error.message : String(error));
+      return false;
     }
   };
 
   return (
-    <Card
-      className="content-card chat-panel"
-      title={
-        <Space wrap>
-          <span>Action 会话</span>
-          <Tag color={props.busy ? "processing" : "default"}>
-            {props.busy ? "运行中" : "待命"}
-          </Tag>
-          <Tag color="geekblue">
-            对焦{" "}
-            {props.snapshot?.conversation.focusAgentCode ??
-              props.snapshot?.conversation.directorAgentCode ??
-              "studio_director"}
-          </Tag>
-          {props.workingAgentCode && (
-            <Tag color="processing">工作中 {props.workingAgentCode}</Tag>
-          )}
-        </Space>
-      }
-      loading={props.loading}
-    >
-      {props.lastError && (
-        <Alert type="error" showIcon message={props.lastError} />
-      )}
-      <MessageList
-        messages={props.snapshot?.messages ?? []}
-        streamingText={props.streamingText}
-        thinkingText={props.thinkingText}
-        workingAgentCode={props.workingAgentCode}
-        starterPrompt={props.starterPrompt}
-        onChoice={send}
-        disabled={!props.canWrite || props.busy || !props.snapshot}
-      />
-
-      {pendingDrafts.length > 0 && (
-        <DraftDiffPanel
-          drafts={pendingDrafts}
-          selected={selectedDrafts}
-          onSelected={setSelectedDrafts}
-          renderAction={props.renderDraftAction}
-          onCommit={
-            props.onCommitDrafts && committableDraftIds.length
-              ? async () => {
-                  try {
-                    await props.onCommitDrafts!(
-                      selectedDrafts.filter((id) =>
-                        committableDraftIds.includes(id),
-                      ),
-                    );
-                    setSelectedDrafts([]);
-                  } catch (error) {
-                    message.error(
-                      error instanceof Error ? error.message : String(error),
-                    );
-                  }
-                }
-              : undefined
-          }
-          disabled={!props.canWrite || props.busy}
-        />
-      )}
-
-      <Composer
-        value={content}
-        agents={availableAgents}
-        busy={props.busy}
-        interrupting={props.interrupting}
-        disabled={!props.canWrite || !props.snapshot}
-        onChange={setContent}
-        onSend={() => void send()}
-        onInterrupt={() =>
-          void props
-            .onInterrupt()
-            .catch((error) => message.error(String(error)))
+    <>
+      <Card
+        className="content-card chat-panel"
+        title={
+          <Space wrap>
+            <span>Action 会话</span>
+            <Tag color={props.busy ? "processing" : "default"}>
+              {props.busy ? "运行中" : "待命"}
+            </Tag>
+            <Tag color="geekblue">
+              对焦{" "}
+              {props.snapshot?.conversation.focusAgentCode ??
+                props.snapshot?.conversation.directorAgentCode ??
+                "studio_director"}
+            </Tag>
+            {props.workingAgentCode && (
+              <Tag color="processing">工作中 {props.workingAgentCode}</Tag>
+            )}
+          </Space>
         }
+        loading={props.loading}
+      >
+        {props.lastError && (
+          <Alert type="error" showIcon message={props.lastError} />
+        )}
+        <MessageList
+          messages={props.snapshot?.messages ?? []}
+          streamingText={props.streamingText}
+          thinkingText={props.thinkingText}
+          workingAgentCode={props.workingAgentCode}
+          starterPrompt={props.starterPrompt}
+          followLatestRequest={followLatestRequest}
+          onStarter={send}
+          disabled={!props.canWrite || props.busy || !props.snapshot}
+        />
+
+        <Composer
+          value={content}
+          agents={availableAgents}
+          busy={props.busy}
+          interrupting={props.interrupting}
+          disabled={!props.canWrite || !props.snapshot}
+          onChange={setContent}
+          onSend={() => void send()}
+          onInterrupt={() =>
+            void props
+              .onInterrupt()
+              .catch((error) => message.error(String(error)))
+          }
+        />
+      </Card>
+      <InteractionDrawer
+        choice={pendingChoice}
+        drafts={pendingDrafts}
+        disabled={!props.canWrite || props.busy}
+        onSubmitChoice={send}
+        onCommitDrafts={props.onCommitDrafts}
+        renderDraftAction={props.renderDraftAction}
       />
-    </Card>
+    </>
+  );
+}
+
+function useAutoFollowScroll() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const animationFrameRef = useRef<number | undefined>(undefined);
+  const programmaticScrollRef = useRef(false);
+  const [locked, setLocked] = useState(false);
+
+  const scrollToLatest = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    if (animationFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+    }
+    programmaticScrollRef.current = true;
+    container.scrollTop = container.scrollHeight;
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+      animationFrameRef.current = undefined;
+    });
+  }, []);
+
+  const lock = useCallback(() => setLocked(true), []);
+  const unlock = useCallback(() => {
+    setLocked(false);
+    scrollToLatest();
+  }, [scrollToLatest]);
+  const handleScroll = useCallback(() => {
+    if (!programmaticScrollRef.current) lock();
+  }, [lock]);
+
+  useLayoutEffect(() => {
+    if (!locked) scrollToLatest();
+  });
+  useEffect(
+    () => () => {
+      if (animationFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  return { containerRef, handleScroll, lock, locked, unlock };
+}
+
+function ScrollLockButton({
+  locked,
+  onToggle,
+  target,
+}: {
+  locked: boolean;
+  onToggle: () => void;
+  target: string;
+}) {
+  return (
+    <Button
+      className="scroll-lock-button"
+      type="text"
+      size="small"
+      icon={locked ? <UnlockOutlined /> : <LockOutlined />}
+      aria-pressed={locked}
+      title={
+        locked ? `点击解锁并自动滚动到最新${target}` : `点击锁定${target}滚动`
+      }
+      onClick={onToggle}
+    >
+      {locked ? "解锁" : "锁定"}
+    </Button>
+  );
+}
+
+function ThinkingStream({ text }: { text: string }) {
+  const scroll = useAutoFollowScroll();
+  return (
+    <div className="thinking-stream">
+      <div className="thinking-stream-header">
+        <Typography.Text type="secondary">Thinking</Typography.Text>
+        <ScrollLockButton
+          locked={scroll.locked}
+          target=" Thinking"
+          onToggle={scroll.locked ? scroll.unlock : scroll.lock}
+        />
+      </div>
+      <div
+        ref={scroll.containerRef}
+        className="thinking-stream-content"
+        onScroll={scroll.handleScroll}
+        onWheel={scroll.lock}
+        onTouchMove={scroll.lock}
+      >
+        <Typography.Paragraph type="secondary">{text}</Typography.Paragraph>
+      </div>
+    </div>
   );
 }
 
@@ -153,17 +257,24 @@ export function MessageList({
   thinkingText,
   workingAgentCode,
   starterPrompt,
+  followLatestRequest,
   disabled,
-  onChoice,
+  onStarter,
 }: {
   messages: ConversationMessage[];
   streamingText?: string;
   thinkingText?: string;
   workingAgentCode?: string;
   starterPrompt?: string;
+  followLatestRequest: number;
   disabled: boolean;
-  onChoice: (content: string) => Promise<void>;
+  onStarter: (content: string) => Promise<unknown>;
 }) {
+  const scroll = useAutoFollowScroll();
+  useLayoutEffect(() => {
+    if (followLatestRequest > 0) scroll.unlock();
+  }, [followLatestRequest, scroll.unlock]);
+
   if (!messages.length) {
     return (
       <div className="chat-empty">
@@ -173,7 +284,7 @@ export function MessageList({
             <Button
               className="starter-prompt"
               disabled={disabled}
-              onClick={() => void onChoice(starterPrompt)}
+              onClick={() => void onStarter(starterPrompt)}
             >
               {starterPrompt}
             </Button>
@@ -187,66 +298,51 @@ export function MessageList({
     );
   }
   return (
-    <div className="message-list">
-      {messages.map((item) => (
-        <article
-          className={`chat-message chat-message-${item.role}`}
-          key={item.id}
-        >
-          <Space className="message-meta" wrap>
-            <Typography.Text strong>
-              {item.role === "user" ? "你" : item.agentCode}
-            </Typography.Text>
-            <Tag>{item.status}</Tag>
-          </Space>
-          {item.status === "thinking" &&
-            thinkingText &&
-            item.agentCode === workingAgentCode && (
-              <div className="thinking-stream">
-                <Typography.Text type="secondary">Thinking</Typography.Text>
-                <Typography.Paragraph type="secondary">
-                  {thinkingText}
-                </Typography.Paragraph>
-              </div>
-            )}
-          {item.status === "thinking" && !item.content ? (
-            streamingText && item.agentCode === workingAgentCode ? (
-              <Typography.Paragraph>
-                {stripActionBlock(streamingText)}
-              </Typography.Paragraph>
-            ) : thinkingText && item.agentCode === workingAgentCode ? null : (
-              <Spin size="small" />
-            )
-          ) : (
-            <Typography.Paragraph>{item.content}</Typography.Paragraph>
-          )}
-          {item.action && (
-            <div className="action-summary">
-              <Tag
-                color={
-                  item.action.action === "blocked"
-                    ? "error"
-                    : item.action.action === "handoff"
-                      ? "purple"
-                      : "success"
-                }
-              >
-                {item.action.action}
-              </Tag>
-              <Typography.Text type="secondary">
-                {item.action.reason}
+    <div className="message-list-shell">
+      <div className="message-list-toolbar">
+        <ScrollLockButton
+          locked={scroll.locked}
+          target="对话"
+          onToggle={scroll.locked ? scroll.unlock : scroll.lock}
+        />
+      </div>
+      <div
+        ref={scroll.containerRef}
+        className="message-list"
+        onScroll={scroll.handleScroll}
+        onWheel={scroll.lock}
+        onTouchMove={scroll.lock}
+      >
+        {messages.map((item) => (
+          <article
+            className={`chat-message chat-message-${item.role}`}
+            key={item.id}
+          >
+            <Space className="message-meta" wrap>
+              <Typography.Text strong>
+                {item.role === "user" ? "你" : item.agentCode}
               </Typography.Text>
-              {item.action.payload.choices && (
-                <ChoiceQuestions
-                  groups={item.action.payload.choices}
-                  disabled={disabled}
-                  onSubmit={onChoice}
-                />
+              <Tag>{item.status}</Tag>
+            </Space>
+            {item.status === "thinking" &&
+              thinkingText &&
+              item.agentCode === workingAgentCode && (
+                <ThinkingStream text={thinkingText} />
               )}
-            </div>
-          )}
-        </article>
-      ))}
+            {item.status === "thinking" && !item.content ? (
+              streamingText && item.agentCode === workingAgentCode ? (
+                <Typography.Paragraph>
+                  {stripActionBlock(streamingText)}
+                </Typography.Paragraph>
+              ) : thinkingText && item.agentCode === workingAgentCode ? null : (
+                <Spin size="small" />
+              )
+            ) : (
+              <Typography.Paragraph>{item.content}</Typography.Paragraph>
+            )}
+          </article>
+        ))}
+      </div>
     </div>
   );
 }
@@ -303,61 +399,6 @@ export function Composer({
   );
 }
 
-export function DraftDiffPanel({
-  drafts,
-  selected,
-  onSelected,
-  onCommit,
-  renderAction,
-  disabled,
-}: {
-  drafts: ArtifactDraft[];
-  selected: string[];
-  onSelected: (ids: string[]) => void;
-  onCommit?: () => Promise<void>;
-  renderAction?: (draft: ArtifactDraft) => React.ReactNode;
-  disabled: boolean;
-}) {
-  return (
-    <section className="draft-panel">
-      <Typography.Title level={5}>待确认草稿</Typography.Title>
-      {drafts.map((draft) => (
-        <Card
-          size="small"
-          key={draft.id}
-          title={draft.targetPath}
-          extra={renderAction?.(draft)}
-        >
-          {!isDedicatedGateDraft(draft) && (
-            <Checkbox
-              checked={selected.includes(draft.id)}
-              disabled={disabled || !onCommit}
-              onChange={(event) =>
-                onSelected(
-                  event.target.checked
-                    ? [...selected, draft.id]
-                    : selected.filter((id) => id !== draft.id),
-                )
-              }
-            >
-              选择提交
-            </Checkbox>
-          )}
-          <pre className="document draft-document">{draft.content}</pre>
-        </Card>
-      ))}
-      {onCommit && (
-        <Button
-          disabled={disabled || !selected.length}
-          onClick={() => void onCommit()}
-        >
-          提交所选草稿
-        </Button>
-      )}
-    </section>
-  );
-}
-
 function findMentionedAgent(value: string, agents: AiAgent[]) {
   const agentByMention = new Map<string, string>();
   for (const agent of agents) {
@@ -376,11 +417,4 @@ function findMentionedAgent(value: string, agents: AiAgent[]) {
 
 function stripActionBlock(value: string) {
   return value.split("<-------- ACTION-START------->", 1)[0].trimEnd();
-}
-
-function isDedicatedGateDraft(draft: ArtifactDraft) {
-  return (
-    draft.targetPath === "art-bible.md" ||
-    draft.targetPath === "docs/角色定稿.md"
-  );
 }

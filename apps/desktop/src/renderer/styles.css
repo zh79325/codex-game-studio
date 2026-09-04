@@ -41,7 +41,9 @@ textarea {
 }
 
 .app-shell {
+  height: 100dvh;
   min-height: 100vh;
+  overflow: hidden;
   background: transparent;
 }
 
@@ -106,9 +108,11 @@ textarea {
 
 .app-content {
   width: 100%;
+  min-height: 0;
   max-width: 1680px;
   margin: 0 auto;
   padding: 28px;
+  overflow-y: auto;
 }
 
 .page-stack,
@@ -117,6 +121,31 @@ textarea {
   flex-direction: column;
   width: 100%;
   gap: 16px;
+}
+
+.workspace-page {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-page > .ant-row {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.workspace-page > .ant-row > .ant-col {
+  min-height: 0;
+}
+
+.workspace-page > .ant-row > .ant-col:not(.chat-column) {
+  overflow-y: auto;
+}
+
+.chat-column {
+  display: flex;
+  overflow: hidden;
 }
 
 .page-heading {
@@ -306,20 +335,57 @@ textarea {
   margin: 18px 0 6px;
 }
 
-.chat-panel .ant-card-body {
+.chat-panel {
   display: flex;
-  min-height: 640px;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.chat-panel > .ant-card-head {
+  flex: none;
+}
+
+.chat-panel > .ant-card-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
   gap: 16px;
+  overflow: hidden;
+}
+
+.message-list-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.message-list-toolbar,
+.thinking-stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.message-list-toolbar {
+  justify-content: flex-end;
 }
 
 .message-list {
   display: flex;
-  max-height: 58vh;
+  min-height: 0;
   flex: 1;
   flex-direction: column;
   gap: 12px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+
+.scroll-lock-button.ant-btn {
+  color: #8e999f;
 }
 
 .chat-empty {
@@ -360,29 +426,33 @@ textarea {
 
 .thinking-stream {
   margin: 10px 0;
-  padding: 10px 12px;
+  padding: 8px 10px 10px 12px;
   border-left: 2px solid rgba(112, 214, 164, 0.45);
   background: rgba(112, 214, 164, 0.06);
 }
 
+.thinking-stream-content {
+  max-height: 160px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+}
+
 .message-meta,
-.action-summary,
 .choice-group,
-.draft-panel {
+.draft-panel,
+.interaction-drawer-content,
+.interaction-section {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: 12px;
 }
 
 .message-meta {
   flex-direction: row;
-}
-
-.action-summary {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 8px;
 }
 
 .choice-questions,
@@ -439,18 +509,111 @@ textarea {
   align-self: flex-end;
 }
 
-.draft-panel {
-  padding-top: 12px;
+.interaction-drawer .ant-drawer-content {
+  border-radius: 16px 16px 0 0;
+}
+
+.interaction-drawer .ant-drawer-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.interaction-drawer-content {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+}
+
+.interaction-section {
+  width: 100%;
+}
+
+.interaction-section + .interaction-section {
+  padding-top: 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.interaction-section > h4.ant-typography {
+  margin: 0;
 }
 
 .draft-panel > .ant-card {
   width: 100%;
 }
 
-.draft-document {
-  max-height: 260px;
-  margin-top: 10px;
+.draft-document,
+.markdown-document {
+  max-height: 420px;
+  margin-top: 12px;
+  overflow: auto;
+}
+
+.markdown-document {
+  width: 100%;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #dce3e0;
+  background: #101417;
+  line-height: 1.7;
+}
+
+.markdown-document > :first-child {
+  margin-top: 0;
+}
+
+.markdown-document > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-document h1,
+.markdown-document h2,
+.markdown-document h3,
+.markdown-document h4,
+.markdown-document h5,
+.markdown-document h6 {
+  color: #f0f5f2;
+}
+
+.markdown-document blockquote {
+  margin: 12px 0;
+  padding: 4px 14px;
+  border-left: 3px solid rgba(112, 214, 164, 0.55);
+  color: #aeb8bf;
+}
+
+.markdown-document code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.markdown-code {
+  padding: 14px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #090c0e;
+  white-space: pre-wrap;
+}
+
+.markdown-code code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.markdown-document table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown-document th,
+.markdown-document td {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
 }
 
 .chat-composer {

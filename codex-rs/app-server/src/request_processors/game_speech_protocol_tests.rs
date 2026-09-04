@@ -57,6 +57,31 @@ fn decodes_final_transcript_response() {
 }
 
 #[test]
+fn decodes_nostream_wrapped_final_response() {
+    let payload = serde_json::to_vec(&json!({
+        "code": 0,
+        "is_last_package": true,
+        "payload_msg": {
+            "result": [
+                { "text": "语音", "utterances": [{ "definite": true }] },
+                { "text": "输入" }
+            ]
+        }
+    }))
+    .expect("json payload");
+    let frame = encode_request([0x11, 0x90, 0x11, 0x00], &payload).expect("response frame");
+
+    assert_eq!(
+        decode_server_frame(&frame).expect("nostream response"),
+        ServerFrame::Transcript {
+            text: "语音输入".to_string(),
+            definite: true,
+            is_final: true,
+        }
+    );
+}
+
+#[test]
 fn decodes_server_error() {
     let payload = br#"{"message":"invalid audio"}"#;
     let mut frame = vec![0x11, 0xf0, 0x10, 0x00];

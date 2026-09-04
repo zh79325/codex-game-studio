@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { speechApi } from "../api";
 
 const PCM_BYTES_PER_SAMPLE = 2;
+const TARGET_SAMPLE_RATE = 16_000;
 
 type SpeechNotification = {
   method: string;
@@ -28,11 +29,10 @@ export function useRealtimeSpeech({
   const contextRef = useRef<AudioContext | undefined>(undefined);
   const sourceRef = useRef<MediaStreamAudioSourceNode | undefined>(undefined);
   const processorRef = useRef<ScriptProcessorNode | undefined>(undefined);
-  const pendingSamplesRef = useRef<number[]>([]);
-  const targetSampleRateRef = useRef(16_000);
-  const chunkSamplesRef = useRef(3_200);
-  const uploadChainRef = useRef<Promise<void>>(Promise.resolve());
+  const recordedSamplesRef = useRef<number[]>([]);
+  const captureSampleRateRef = useRef(TARGET_SAMPLE_RATE);
   const recordingRef = useRef(false);
+  const waitingRef = useRef(false);
   const startingRef = useRef(false);
   const spaceDownRef = useRef(false);
   const failedRef = useRef(false);
@@ -66,8 +66,9 @@ export function useRealtimeSpeech({
       const sessionId = sessionIdRef.current;
       sessionIdRef.current = undefined;
       stopCapture();
-      pendingSamplesRef.current = [];
+      recordedSamplesRef.current = [];
       voiceModeRef.current = false;
+      waitingRef.current = false;
       setWaiting(false);
       setVoiceMode(false);
       onErrorRef.current(error instanceof Error ? error.message : String(error));
@@ -76,47 +77,66 @@ export function useRealtimeSpeech({
     [stopCapture],
   );
 
-  const enqueuePcm = useCallback(
-    (samples: number[]) => {
-      const sessionId = sessionIdRef.current;
-      if (!sessionId || samples.length === 0 || failedRef.current) return;
-      const audioBase64 = pcm16Base64(samples);
-      const upload = uploadChainRef.current.then(() =>
-        speechApi.sendChunk(sessionId, audioBase64),
-      );
-      uploadChainRef.current = upload.then(
-        () => undefined,
-        (error) => fail(error),
-      );
-    },
-    [fail],
-  );
-
   const finishRecording = useCallback(async () => {
     if (!recordingRef.current) return;
-    const sessionId = sessionIdRef.current;
-    if (!sessionId) return;
-    const remaining = pendingSamplesRef.current;
-    pendingSamplesRef.current = [];
-    if (remaining.length > 0) enqueuePcm(remaining);
+    const samples = recordedSamplesRef.current;
+    recordedSamplesRef.current = [];
     stopCapture();
+    if (samples.length === 0) return;
+    waitingRef.current = true;
     setWaiting(true);
-    await uploadChainRef.current;
-    if (!failedRef.current && sessionIdRef.current === sessionId) {
-      try {
-        await speechApi.finish(sessionId);
-      } catch (error) {
-        fail(error);
+    try {
+      const session = await speechApi.start();
+      sessionIdRef.current = session.sessionId;
+      if (!mountedRef.current || !voiceModeRef.current) {
+        sessionIdRef.current = undefined;
+        await speechApi.cancel(session.sessionId).catch(() => undefined);
+        return;
       }
+      if (session.channels !== 1) {
+        throw new Error(`暂不支持 ${session.channels} 声道语音识别`);
+      }
+      const pcm = downsample(
+        new Float32Array(samples),
+        captureSampleRateRef.current,
+        session.sampleRate,
+      );
+      const chunkSamples = Math.max(
+        1,
+        Math.round((session.sampleRate * session.chunkMs) / 1_000),
+      );
+      for (let offset = 0; offset < pcm.length; offset += chunkSamples) {
+        if (
+          !voiceModeRef.current ||
+          sessionIdRef.current !== session.sessionId
+        ) {
+          return;
+        }
+        await speechApi.sendChunk(
+          session.sessionId,
+          pcm16Base64(pcm.slice(offset, offset + chunkSamples)),
+        );
+        if (offset + chunkSamples < pcm.length) {
+          await new Promise((resolve) => window.setTimeout(resolve, session.chunkMs));
+        }
+      }
+      if (
+        voiceModeRef.current &&
+        sessionIdRef.current === session.sessionId
+      ) {
+        await speechApi.finish(session.sessionId);
+      }
+    } catch (error) {
+      fail(error);
     }
-  }, [enqueuePcm, fail, stopCapture]);
+  }, [fail, stopCapture]);
 
   const beginRecording = useCallback(async () => {
     if (
       !enabled ||
       startingRef.current ||
       recordingRef.current ||
-      waiting ||
+      waitingRef.current ||
       failedRef.current
     ) {
       return;
@@ -130,45 +150,30 @@ export function useRealtimeSpeech({
           noiseSuppression: true,
         },
       });
-      streamRef.current = stream;
-      const session = await speechApi.start();
-      sessionIdRef.current = session.sessionId;
       if (!mountedRef.current || !voiceModeRef.current) {
         for (const track of stream.getTracks()) track.stop();
-        streamRef.current = undefined;
-        sessionIdRef.current = undefined;
-        await speechApi.cancel(session.sessionId).catch(() => undefined);
         return;
       }
-      targetSampleRateRef.current = session.sampleRate;
-      chunkSamplesRef.current = Math.max(
-        1,
-        Math.round((session.sampleRate * session.chunkMs) / 1_000),
-      );
-      pendingSamplesRef.current = [];
-      uploadChainRef.current = Promise.resolve();
+      streamRef.current = stream;
+      recordedSamplesRef.current = [];
       failedRef.current = false;
 
       const context = new AudioContext();
+      contextRef.current = context;
       await context.resume();
+      if (!mountedRef.current || !voiceModeRef.current) {
+        stopCapture();
+        return;
+      }
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(4_096, 1, 1);
-      contextRef.current = context;
+      captureSampleRateRef.current = context.sampleRate;
       sourceRef.current = source;
       processorRef.current = processor;
       processor.onaudioprocess = (event) => {
         if (!recordingRef.current) return;
-        const samples = downsample(
-          event.inputBuffer.getChannelData(0),
-          context.sampleRate,
-          targetSampleRateRef.current,
-        );
-        pendingSamplesRef.current.push(...samples);
-        while (pendingSamplesRef.current.length >= chunkSamplesRef.current) {
-          enqueuePcm(
-            pendingSamplesRef.current.splice(0, chunkSamplesRef.current),
-          );
-        }
+        const samples = event.inputBuffer.getChannelData(0);
+        for (const sample of samples) recordedSamplesRef.current.push(sample);
       };
       source.connect(processor);
       processor.connect(context.destination);
@@ -181,15 +186,16 @@ export function useRealtimeSpeech({
     } finally {
       startingRef.current = false;
     }
-  }, [enabled, enqueuePcm, fail, finishRecording, waiting]);
+  }, [enabled, fail, finishRecording, stopCapture]);
 
   const leaveVoiceMode = useCallback(() => {
     spaceDownRef.current = false;
     const sessionId = sessionIdRef.current;
     sessionIdRef.current = undefined;
     stopCapture();
-    pendingSamplesRef.current = [];
+    recordedSamplesRef.current = [];
     voiceModeRef.current = false;
+    waitingRef.current = false;
     setWaiting(false);
     setVoiceMode(false);
     setTranscript("");
@@ -199,6 +205,7 @@ export function useRealtimeSpeech({
   const enterVoiceMode = useCallback(() => {
     if (!enabled) return;
     failedRef.current = false;
+    waitingRef.current = false;
     voiceModeRef.current = true;
     setTranscript("");
     setVoiceMode(true);
@@ -255,6 +262,7 @@ export function useRealtimeSpeech({
           const text = typeof params.text === "string" ? params.text.trim() : "";
           sessionIdRef.current = undefined;
           voiceModeRef.current = false;
+          waitingRef.current = false;
           setWaiting(false);
           setVoiceMode(false);
           setTranscript("");
@@ -276,6 +284,7 @@ export function useRealtimeSpeech({
     return () => {
       mountedRef.current = false;
       voiceModeRef.current = false;
+      waitingRef.current = false;
       const sessionId = sessionIdRef.current;
       sessionIdRef.current = undefined;
       stopCapture();

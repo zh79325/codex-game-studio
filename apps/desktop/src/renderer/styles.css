@@ -621,7 +621,19 @@ textarea {
   align-self: end;
 }
 
+.chat-composer-input {
+  position: relative;
+  min-width: 0;
+}
+
+.chat-composer-input > .ant-mentions {
+  width: 100%;
+}
+
 .speech-input {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
   display: flex;
   min-height: 86px;
   align-items: center;
@@ -631,13 +643,14 @@ textarea {
   overflow: hidden;
   border: 1px solid rgba(100, 181, 246, 0.36);
   border-radius: 8px;
-  background: rgba(24, 144, 255, 0.08);
+  background: rgba(18, 24, 33, 0.62);
+  backdrop-filter: blur(1px);
   text-align: center;
 }
 
 .speech-input-recording {
   border-color: rgba(255, 77, 79, 0.55);
-  background: rgba(255, 77, 79, 0.08);
+  background: rgba(55, 22, 27, 0.62);
 }
 
 .speech-wave {
@@ -654,16 +667,19 @@ textarea {
   background: #69b1ff;
 }
 
-.speech-input-recording .speech-wave span {
-  background: #ff7875;
+.speech-input-active .speech-wave span {
   animation: speech-wave-pulse 0.8s ease-in-out infinite alternate;
 }
 
-.speech-input-recording .speech-wave span:nth-child(2n) {
+.speech-input-recording .speech-wave span {
+  background: #ff7875;
+}
+
+.speech-input-active .speech-wave span:nth-child(2n) {
   animation-delay: 0.18s;
 }
 
-.speech-input-recording .speech-wave span:nth-child(3n) {
+.speech-input-active .speech-wave span:nth-child(3n) {
   animation-delay: 0.36s;
 }
 

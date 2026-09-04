@@ -8,6 +8,7 @@ use flate2::write::GzEncoder;
 use serde_json::Value;
 use serde_json::json;
 
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum ServerFrame {
     Transcript {
         text: String,
@@ -30,12 +31,10 @@ pub(super) fn full_client_request(route: &RealtimeSpeechRoute) -> Result<Vec<u8>
         },
         "request": {
             "model_name": route.model,
-            "enable_nonstream": true,
             "enable_itn": true,
             "enable_punc": true,
             "show_utterances": true,
-            "result_type": "full",
-            "end_window_size": 800
+            "result_type": "full"
         }
     }))
     .map_err(|error| error.to_string())?;
@@ -93,29 +92,54 @@ pub(super) fn decode_server_frame(frame: &[u8]) -> Result<ServerFrame, String> {
     let payload = read_payload(frame, offset, compression)?;
     let value: Value = serde_json::from_slice(&payload)
         .map_err(|error| format!("语音识别结果格式错误：{error}"))?;
-    let result = value.get("result").and_then(|result| {
+    if let Some(code) = value.get("code").and_then(Value::as_i64)
+        && !matches!(code, 0 | 20_000_000)
+    {
+        return Ok(ServerFrame::Error(format!(
+            "语音识别服务错误 {code}：{}",
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
+        )));
+    }
+    let parsed_payload;
+    let response = match value.get("payload_msg") {
+        Some(Value::String(payload)) => {
+            parsed_payload = serde_json::from_str(payload)
+                .map_err(|error| format!("语音识别结果格式错误：{error}"))?;
+            &parsed_payload
+        }
+        Some(payload) => payload,
+        None => &value,
+    };
+    let results = match response.get("result") {
+        Some(Value::Array(items)) => items.iter().collect::<Vec<_>>(),
+        Some(result) => vec![result],
+        None => Vec::new(),
+    };
+    let text = results
+        .iter()
+        .filter_map(|result| result.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    let definite = results.iter().any(|result| {
         result
-            .as_array()
-            .and_then(|items| items.last())
-            .or(Some(result))
+            .get("utterances")
+            .and_then(Value::as_array)
+            .is_some_and(|utterances| {
+                utterances.iter().any(|utterance| {
+                    utterance.get("definite").and_then(Value::as_bool) == Some(true)
+                })
+            })
     });
-    let text = result
-        .and_then(|result| result.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let definite = result
-        .and_then(|result| result.get("utterances"))
-        .and_then(Value::as_array)
-        .is_some_and(|utterances| {
-            utterances
-                .iter()
-                .any(|utterance| utterance.get("definite").and_then(Value::as_bool) == Some(true))
-        });
     Ok(ServerFrame::Transcript {
         text,
         definite,
-        is_final: flags & 0x02 != 0,
+        is_final: flags & 0x02 != 0
+            || value
+                .get("is_last_package")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
     })
 }
 

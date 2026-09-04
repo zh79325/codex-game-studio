@@ -52,7 +52,10 @@ export default function ChatPanel(props: ChatPanelProps) {
   const [followLatestRequest, setFollowLatestRequest] = useState(0);
   const speech = useRealtimeSpeech({
     enabled: props.canWrite && !props.busy && Boolean(props.snapshot),
-    onCompleted: setContent,
+    onCompleted: (text) =>
+      setContent((current) =>
+        current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`,
+      ),
     onError: (error) => message.error(error),
   });
   const availableAgents = useMemo(
@@ -309,31 +312,12 @@ export function Composer({
 }) {
   return (
     <div className="chat-composer">
-      {voiceMode ? (
-        <div
-          className={`speech-input ${recording ? "speech-input-recording" : ""}`}
-          role="status"
-          aria-live="polite"
-        >
-          <div className="speech-wave" aria-hidden="true">
-            {Array.from({ length: 7 }, (_, index) => (
-              <span key={index} />
-            ))}
-          </div>
-          <Typography.Text>
-            {speechTranscript ||
-              (speechWaiting
-                ? "正在整理识别结果…"
-                : recording
-                  ? "正在识别，松开空格键结束"
-                  : "长按空格键开始进行语音输入")}
-          </Typography.Text>
-        </div>
-      ) : (
+      <div className="chat-composer-input">
         <Mentions
           value={value}
           autoSize={{ minRows: 3, maxRows: 8 }}
           disabled={disabled || busy}
+          readOnly={voiceMode}
           placeholder="描述素材要求，输入 @ 可指定 Agent"
           options={agents.map((agent) => ({
             value: agent.role,
@@ -347,7 +331,28 @@ export function Composer({
             }
           }}
         />
-      )}
+        {voiceMode && (
+          <div
+            className={`speech-input ${recording || speechWaiting ? "speech-input-active" : ""} ${recording ? "speech-input-recording" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            <div className="speech-wave" aria-hidden="true">
+              {Array.from({ length: 7 }, (_, index) => (
+                <span key={index} />
+              ))}
+            </div>
+            <Typography.Text>
+              {speechTranscript ||
+                (speechWaiting
+                  ? "正在识别整句…"
+                  : recording
+                    ? "正在录音，松开空格键发送语音"
+                    : "长按空格键开始进行语音输入")}
+            </Typography.Text>
+          </div>
+        )}
+      </div>
       <Space className="chat-composer-actions">
         <Button
           aria-label={voiceMode ? "退出语音输入" : "进入语音输入"}

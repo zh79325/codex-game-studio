@@ -94,7 +94,7 @@ impl GameAppServerAdapter {
                         .capabilities
                         .contains(&AiCapability::SpeechRecognition)
             })
-            .ok_or_else(|| "实时语音 Agent 没有可用的语音识别模型".to_string())?;
+            .ok_or_else(|| "语音输入 Agent 没有可用的语音识别模型".to_string())?;
         let provider = providers
             .into_iter()
             .find(|provider| provider.code == route.provider)

@@ -939,6 +939,7 @@ fn capability_name(capability: &AiCapability) -> String {
 fn parse_limit_kind(value: &str) -> Result<LimitKind, String> {
     match value {
         "calls" => Ok(LimitKind::Calls),
+        "images" => Ok(LimitKind::Images),
         "input_tokens" => Ok(LimitKind::InputTokens),
         "output_tokens" => Ok(LimitKind::OutputTokens),
         "total_tokens" => Ok(LimitKind::TotalTokens),
@@ -951,6 +952,7 @@ fn parse_limit_kind(value: &str) -> Result<LimitKind, String> {
 fn limit_kind_name(kind: &LimitKind) -> String {
     match kind {
         LimitKind::Calls => "calls",
+        LimitKind::Images => "images",
         LimitKind::InputTokens => "input_tokens",
         LimitKind::OutputTokens => "output_tokens",
         LimitKind::TotalTokens => "total_tokens",

@@ -937,6 +937,7 @@ async fn ensure_model_unbound(pool: &SqlitePool, model_id: &str) -> Result<(), S
 fn limit_kind_name(kind: &LimitKind) -> &'static str {
     match kind {
         LimitKind::Calls => "calls",
+        LimitKind::Images => "images",
         LimitKind::InputTokens => "input_tokens",
         LimitKind::OutputTokens => "output_tokens",
         LimitKind::TotalTokens => "total_tokens",
@@ -948,6 +949,7 @@ fn limit_kind_name(kind: &LimitKind) -> &'static str {
 fn parse_limit_kind(value: &str) -> Result<LimitKind, StoreError> {
     match value {
         "calls" => Ok(LimitKind::Calls),
+        "images" => Ok(LimitKind::Images),
         "input_tokens" => Ok(LimitKind::InputTokens),
         "output_tokens" => Ok(LimitKind::OutputTokens),
         "total_tokens" => Ok(LimitKind::TotalTokens),

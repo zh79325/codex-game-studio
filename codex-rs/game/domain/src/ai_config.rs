@@ -20,6 +20,7 @@ pub enum AiCapability {
 #[serde(rename_all = "snake_case")]
 pub enum LimitKind {
     Calls,
+    Images,
     InputTokens,
     OutputTokens,
     TotalTokens,

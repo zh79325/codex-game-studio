@@ -34,6 +34,7 @@ const roleTypeLabels: Record<AiAgent["roleType"], string> = {
 };
 const limitKinds = [
   "calls",
+  "images",
   "input_tokens",
   "output_tokens",
   "total_tokens",

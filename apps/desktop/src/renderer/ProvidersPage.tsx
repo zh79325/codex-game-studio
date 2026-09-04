@@ -61,6 +61,7 @@ const capabilityOptions = [
 ].map((value) => ({ value, label: value }));
 const limitKinds = [
   "calls",
+  "images",
   "input_tokens",
   "output_tokens",
   "total_tokens",
@@ -69,6 +70,7 @@ const limitKinds = [
 ];
 const limitUnits: Record<string, string> = {
   calls: "次",
+  images: "张",
   tokens: "tokens",
   credits: "credits",
 };
@@ -155,9 +157,9 @@ export default function ProvidersPage() {
   const [modelProvider, setModelProvider] = useState<AiProvider>();
   const [modelOpen, setModelOpen] = useState(false);
   const [limitEditing, setLimitEditing] = useState<AiModel>();
-  const [expandedProviderCodes, setExpandedProviderCodes] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [expandedProviderCodes, setExpandedProviderCodes] = useState<
+    Set<string>
+  >(() => new Set());
   const [transferMode, setTransferMode] = useState<"export" | "import">();
   const [transferText, setTransferText] = useState("");
   const [importPreview, setImportPreview] = useState<{
@@ -595,15 +597,15 @@ export default function ProvidersPage() {
             <Card
               key={provider.code}
               className="content-card"
-              styles={{ body: { display: modelsExpanded ? undefined : "none" } }}
+              styles={{
+                body: { display: modelsExpanded ? undefined : "none" },
+              }}
               title={
                 <Space>
                   <Button
                     type="text"
                     size="small"
-                    icon={
-                      modelsExpanded ? <DownOutlined /> : <RightOutlined />
-                    }
+                    icon={modelsExpanded ? <DownOutlined /> : <RightOutlined />}
                     aria-label={modelsExpanded ? "收起模型" : "展开模型"}
                     aria-expanded={modelsExpanded}
                     onClick={() => toggleProviderModels(provider.code)}

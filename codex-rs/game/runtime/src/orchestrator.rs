@@ -499,7 +499,10 @@ impl TaskOrchestrator {
         mut decision: RouteDecision,
     ) -> Result<(ConversationCodexThread, RouteDecision), OrchestrationError> {
         loop {
-            match self.reserve_request_usage(&decision, idempotency_key).await {
+            match self
+                .reserve_request_usage(&decision, request.capability, idempotency_key)
+                .await
+            {
                 Ok(()) => return Ok((binding, decision)),
                 Err(OrchestrationError::Route(RouteError::QuotaExceeded { .. })) => {
                     self.routes.report(
@@ -516,10 +519,19 @@ impl TaskOrchestrator {
     async fn reserve_request_usage(
         &self,
         decision: &RouteDecision,
+        capability: Capability,
         idempotency_key: &str,
     ) -> Result<(), OrchestrationError> {
+        let (metric, limit_kind) = if matches!(
+            capability,
+            Capability::ImageTextToImage | Capability::ImageImageToImage
+        ) {
+            ("images", codex_game_domain::LimitKind::Images)
+        } else {
+            ("calls", codex_game_domain::LimitKind::Calls)
+        };
         let requirements = [QuotaRequirement {
-            metric: "calls".to_string(),
+            metric: metric.to_string(),
             amount: 1,
         }];
         let Some(studio_storage) = &self.studio_storage else {
@@ -532,14 +544,14 @@ impl TaskOrchestrator {
             &studio,
             &decision.account_id,
             idempotency_key,
-            &[(codex_game_domain::LimitKind::Calls, 1)],
+            &[(limit_kind, 1)],
             now(),
         )
         .await
         .map_err(|error| match error {
             StoreError::Conflict(_) => RouteError::QuotaExceeded {
                 account_id: decision.account_id.clone(),
-                metric: "calls".to_string(),
+                metric: metric.to_string(),
             }
             .into(),
             other => OrchestrationError::Store(other),
@@ -549,7 +561,7 @@ impl TaskOrchestrator {
         }
         let events = vec![RouteEvent::UsageUpdated {
             account_id: decision.account_id.clone(),
-            metric: "calls".to_string(),
+            metric: metric.to_string(),
             amount: 1,
         }];
         let entries = events

@@ -137,6 +137,27 @@ pub fn append_turn_audit_stream_response(
     append_raw_record(context, b"\n### Stream Response\n\n", response)
 }
 
+pub fn append_turn_audit_stream_operation(
+    context: &TurnAuditContext,
+    stage: &str,
+    operation: &str,
+    detail: &str,
+) -> io::Result<()> {
+    let path = audit_path(context);
+    if !path.exists() {
+        return Ok(());
+    }
+    let detail = truncate_chars(&redact_data_urls(detail), 4096);
+    append(
+        &path,
+        &format!(
+            "\n### Stream Operation\n\n- Time：{}\n- Stage：{stage}\n- Operation：{operation}\n\n{}",
+            now(),
+            code_block(&detail, "text"),
+        ),
+    )
+}
+
 fn append_raw_record(context: &TurnAuditContext, heading: &[u8], content: &[u8]) -> io::Result<()> {
     let path = audit_path(context);
     if !path.exists() {
@@ -212,6 +233,16 @@ fn code_block(content: &str, language: &str) -> String {
         .unwrap_or_default();
     let fence = "`".repeat(longest.saturating_add(1).max(3));
     format!("{fence}{language}\n{content}\n{fence}\n")
+}
+
+fn truncate_chars(content: &str, max_chars: usize) -> String {
+    let mut chars = content.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}\n[truncated after {max_chars} characters]")
+    } else {
+        truncated
+    }
 }
 
 fn redact_data_urls(content: &str) -> String {

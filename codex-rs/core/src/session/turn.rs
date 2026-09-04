@@ -76,6 +76,8 @@ use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_http_client::StreamResponseAuditEvent;
+use codex_http_client::record_stream_response_audit_event;
 use codex_login::CodexAuth;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
@@ -2663,6 +2665,18 @@ async fn try_run_sampling_request(
                             .await;
                     }
                 } else {
+                    record_stream_response_audit_event(
+                        &sess.thread_id.to_string(),
+                        StreamResponseAuditEvent::DeltaWithoutActiveItem {
+                            event_type: "response.output_text.delta",
+                            delta_bytes: delta.len(),
+                            action: if cfg!(debug_assertions) {
+                                "panic"
+                            } else {
+                                "log_error_and_continue"
+                            },
+                        },
+                    );
                     error_or_panic("OutputTextDelta without active item".to_string());
                 }
             }

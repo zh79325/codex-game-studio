@@ -98,6 +98,7 @@ impl HttpTransport for RecordingTransport {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             bytes: Box::pin(stream),
+            audit: None,
         })
     }
 }
@@ -282,6 +283,7 @@ data: {"id":"resp-1","output":[{"type":"message","role":"assistant","content":[{
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             bytes: Box::pin(stream),
+            audit: None,
         })
     }
 }

@@ -58,5 +58,7 @@ pub use crate::transport::HttpTransport;
 pub use crate::transport::ReqwestTransport;
 pub use crate::transport::StreamResponse;
 pub use crate::transport::StreamResponseAudit;
+pub use crate::transport::StreamResponseAuditEvent;
+pub use crate::transport::record_stream_response_audit_event;
 pub use crate::transport::register_stream_response_audit;
 pub use crate::transport::unregister_stream_response_audit;

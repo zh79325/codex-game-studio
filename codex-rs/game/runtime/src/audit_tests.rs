@@ -19,6 +19,13 @@ fn writes_request_and_completion_when_setting_is_missing() {
         .expect("write response headers");
     append_turn_audit_stream_response(&context, b"streamed ").expect("write stream response");
     append_turn_audit_stream_response(&context, b"done").expect("write stream response");
+    append_turn_audit_stream_operation(
+        &context,
+        "sse_parser",
+        "response_item_normalized",
+        "message content missing; defaulted to an empty array",
+    )
+    .expect("write stream operation");
     append_turn_audit_completion(
         &context,
         &TurnAuditCompletion {
@@ -48,6 +55,10 @@ fn writes_request_and_completion_when_setting_is_missing() {
     assert!(contents.contains("done"));
     assert_eq!(contents.matches("### Stream Response").count(), 2);
     assert!(contents.contains("streamed \n"));
+    assert!(contents.contains("### Stream Operation"));
+    assert!(contents.contains("- Stage：sse_parser"));
+    assert!(contents.contains("- Operation：response_item_normalized"));
+    assert!(contents.contains("message content missing; defaulted to an empty array"));
     assert!(contents.contains("- Total tokens：13"));
     assert!(contents.contains("- Latency：25 ms"));
     assert!(contents.contains("- Time to first token：5 ms"));

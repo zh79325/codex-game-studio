@@ -45,6 +45,7 @@ impl HttpTransport for FixtureSseTransport {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             bytes: Box::pin(stream),
+            audit: None,
         })
     }
 }

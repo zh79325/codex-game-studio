@@ -8,6 +8,8 @@ use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_client::StreamResponseAudit;
+use codex_client::StreamResponseAuditEvent;
 use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MisalignmentErrorDetails;
@@ -61,6 +63,7 @@ pub fn spawn_response_stream(
         .map(str::to_string);
     let safety_buffering_treatment =
         treatment_from_headers(&stream_response.headers).unwrap_or_default();
+    let stream_audit = stream_response.audit.clone();
     if let Some(turn_state) = turn_state.as_ref()
         && let Some(header_value) = stream_response
             .headers
@@ -91,6 +94,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            stream_audit,
         )
         .await;
     });
@@ -353,13 +357,20 @@ impl ResponsesEventError {
 pub fn process_responses_event(
     event: ResponsesStreamEvent,
 ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
+    process_responses_event_with_audit(event, /*audit*/ None)
+}
+
+fn process_responses_event_with_audit(
+    event: ResponsesStreamEvent,
+    audit: Option<&dyn StreamResponseAudit>,
+) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
     match event.kind.as_str() {
         "response.output_item.done" => {
-            if let Some(item_val) = event.item {
-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
-                    return Ok(Some(ResponseEvent::OutputItemDone(item)));
-                }
-                debug!("failed to parse ResponseItem from output_item.done");
+            if let Some(item_val) = event.item
+                && let Some(item) =
+                    parse_response_item(item_val, "response.output_item.done", audit)
+            {
+                return Ok(Some(ResponseEvent::OutputItemDone(item)));
             }
         }
         "response.output_text.delta" => {
@@ -503,11 +514,11 @@ pub fn process_responses_event(
             }
         }
         "response.output_item.added" => {
-            if let Some(item_val) = event.item {
-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
-                    return Ok(Some(ResponseEvent::OutputItemAdded(item)));
-                }
-                debug!("failed to parse ResponseItem from output_item.added");
+            if let Some(item_val) = event.item
+                && let Some(item) =
+                    parse_response_item(item_val, "response.output_item.added", audit)
+            {
+                return Ok(Some(ResponseEvent::OutputItemAdded(item)));
             }
         }
         "response.reasoning_summary_part.added" => {
@@ -544,6 +555,45 @@ pub fn process_responses_event(
     Ok(None)
 }
 
+fn parse_response_item(
+    item: Value,
+    event_type: &'static str,
+    audit: Option<&dyn StreamResponseAudit>,
+) -> Option<ResponseItem> {
+    let item_type = item.get("type").and_then(Value::as_str).map(str::to_string);
+    let item_id = item.get("id").and_then(Value::as_str).map(str::to_string);
+    let role = item.get("role").and_then(Value::as_str).map(str::to_string);
+    if event_type == "response.output_item.added"
+        && item_type.as_deref() == Some("message")
+        && item.get("content").is_none()
+        && let Some(audit) = audit
+    {
+        audit.record_stream_event(StreamResponseAuditEvent::ResponseItemNormalized {
+            event_type,
+            reason: "message content missing; defaulted to an empty array",
+            item_type: item_type.clone(),
+            item_id: item_id.clone(),
+            role: role.clone(),
+        });
+    }
+    match serde_json::from_value(item) {
+        Ok(item) => Some(item),
+        Err(error) => {
+            debug!("failed to parse ResponseItem from {event_type}: {error}");
+            if let Some(audit) = audit {
+                audit.record_stream_event(StreamResponseAuditEvent::ResponseItemRejected {
+                    event_type,
+                    error: error.to_string(),
+                    item_type,
+                    item_id,
+                    role,
+                });
+            }
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 pub async fn process_sse(
     stream: ByteStream,
@@ -557,6 +607,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        /*audit*/ None,
     )
     .await;
 }
@@ -567,6 +618,7 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    audit: Option<Arc<dyn StreamResponseAudit>>,
 ) {
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
@@ -582,6 +634,12 @@ async fn process_sse_with_treatment(
             Ok(Some(Ok(sse))) => sse,
             Ok(Some(Err(e))) => {
                 debug!("SSE Error: {e:#}");
+                if let Some(audit) = &audit {
+                    audit.record_stream_event(StreamResponseAuditEvent::StreamTerminated {
+                        stage: "sse_transport",
+                        reason: e.to_string(),
+                    });
+                }
                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
                 return;
             }
@@ -589,13 +647,24 @@ async fn process_sse_with_treatment(
                 let error = response_error.unwrap_or(ApiError::Stream(
                     "stream closed before response.completed".into(),
                 ));
+                if let Some(audit) = &audit {
+                    audit.record_stream_event(StreamResponseAuditEvent::StreamTerminated {
+                        stage: "sse_parser",
+                        reason: error.to_string(),
+                    });
+                }
                 let _ = tx_event.send(Err(error)).await;
                 return;
             }
             Err(_) => {
-                let _ = tx_event
-                    .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
-                    .await;
+                let reason = "idle timeout waiting for SSE";
+                if let Some(audit) = &audit {
+                    audit.record_stream_event(StreamResponseAuditEvent::StreamTerminated {
+                        stage: "sse_parser",
+                        reason: reason.to_string(),
+                    });
+                }
+                let _ = tx_event.send(Err(ApiError::Stream(reason.into()))).await;
                 return;
             }
         };
@@ -612,6 +681,12 @@ async fn process_sse_with_treatment(
                     payload_bytes = sse.data.len(),
                     "Failed to parse SSE event"
                 );
+                if let Some(audit) = &audit {
+                    audit.record_stream_event(StreamResponseAuditEvent::SseEventRejected {
+                        error: e.to_string(),
+                        payload_bytes: sse.data.len(),
+                    });
+                }
                 continue;
             }
         };
@@ -627,6 +702,7 @@ async fn process_sse_with_treatment(
                 .await
                 .is_err()
             {
+                record_event_consumer_dropped(audit.as_deref());
                 return;
             }
             last_server_model = Some(model);
@@ -637,6 +713,7 @@ async fn process_sse_with_treatment(
                 .await
                 .is_err()
         {
+            record_event_consumer_dropped(audit.as_deref());
             return;
         }
         if let Some(metadata) = turn_moderation_metadata
@@ -645,6 +722,7 @@ async fn process_sse_with_treatment(
                 .await
                 .is_err()
         {
+            record_event_consumer_dropped(audit.as_deref());
             return;
         }
         if let Some(buffering) = safety_buffering
@@ -653,16 +731,28 @@ async fn process_sse_with_treatment(
                 .await
                 .is_err()
         {
+            record_event_consumer_dropped(audit.as_deref());
             return;
         }
 
-        match process_responses_event(event) {
+        match process_responses_event_with_audit(event, audit.as_deref()) {
             Ok(Some(event)) => {
-                let is_completed = matches!(event, ResponseEvent::Completed { .. });
+                let completed_response_id = match &event {
+                    ResponseEvent::Completed { response_id, .. } => Some(response_id.clone()),
+                    _ => None,
+                };
+                if let Some(response_id) = completed_response_id.as_ref()
+                    && let Some(audit) = &audit
+                {
+                    audit.record_stream_event(StreamResponseAuditEvent::ProviderCompleted {
+                        response_id: response_id.clone(),
+                    });
+                }
                 if tx_event.send(Ok(event)).await.is_err() {
+                    record_event_consumer_dropped(audit.as_deref());
                     return;
                 }
-                if is_completed {
+                if completed_response_id.is_some() {
                     return;
                 }
             }
@@ -671,6 +761,14 @@ async fn process_sse_with_treatment(
                 response_error = Some(error.into_api_error());
             }
         };
+    }
+}
+
+fn record_event_consumer_dropped(audit: Option<&dyn StreamResponseAudit>) {
+    if let Some(audit) = audit {
+        audit.record_stream_event(StreamResponseAuditEvent::EventConsumerDropped {
+            stage: "sse_parser",
+        });
     }
 }
 
@@ -755,9 +853,25 @@ mod tests {
     use http::StatusCode;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::sync::Mutex;
     use tokio::sync::mpsc;
     use tokio_test::io::Builder as IoBuilder;
     use tokio_util::io::ReaderStream;
+
+    #[derive(Default)]
+    struct RecordingStreamAudit {
+        events: Mutex<Vec<StreamResponseAuditEvent>>,
+    }
+
+    impl StreamResponseAudit for RecordingStreamAudit {
+        fn record_response_headers(&self, _headers: &[u8]) {}
+
+        fn record_response_chunk(&self, _chunk: &[u8]) {}
+
+        fn record_stream_event(&self, event: StreamResponseAuditEvent) {
+            self.events.lock().expect("audit events mutex").push(event);
+        }
+    }
 
     async fn collect_events(chunks: &[&[u8]]) -> Vec<Result<ResponseEvent, ApiError>> {
         let mut builder = IoBuilder::new();
@@ -816,6 +930,45 @@ mod tests {
 
     fn idle_timeout() -> Duration {
         Duration::from_millis(1000)
+    }
+
+    #[test]
+    fn normalizes_missing_message_content_on_output_item_added() {
+        let event = serde_json::from_value(json!({
+            "type": "response.output_item.added",
+            "item": {
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "in_progress"
+            }
+        }))
+        .expect("valid stream event");
+        let audit = RecordingStreamAudit::default();
+
+        let parsed = process_responses_event_with_audit(event, Some(&audit))
+            .expect("event processing should succeed")
+            .expect("output item should be emitted");
+
+        assert_matches!(
+            parsed,
+            ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                ..
+            }) if id.as_str() == "msg-1" && role == "assistant" && content.is_empty()
+        );
+        assert_eq!(
+            *audit.events.lock().expect("audit events mutex"),
+            vec![StreamResponseAuditEvent::ResponseItemNormalized {
+                event_type: "response.output_item.added",
+                reason: "message content missing; defaulted to an empty array",
+                item_type: Some("message".to_string()),
+                item_id: Some("msg-1".to_string()),
+                role: Some("assistant".to_string()),
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1497,6 +1650,7 @@ mod tests {
             status: StatusCode::OK,
             headers,
             bytes: Box::pin(bytes),
+            audit: None,
         };
 
         let mut stream = spawn_response_stream(
@@ -1537,6 +1691,7 @@ mod tests {
             status: StatusCode::OK,
             headers,
             bytes: Box::pin(bytes),
+            audit: None,
         };
 
         let mut stream = spawn_response_stream(

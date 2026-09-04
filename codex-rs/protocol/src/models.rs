@@ -989,6 +989,7 @@ pub enum ResponseItem {
         #[ts(optional)]
         id: Option<ResponseItemId>,
         role: String,
+        #[serde(default)]
         content: Vec<ContentItem>,
         // Optional output-message phase (for example: "commentary", "final_answer").
         // Availability varies by provider/model, so downstream consumers must
@@ -2484,6 +2485,28 @@ mod tests {
                 internal_chat_message_metadata_passthrough: None,
             }
         );
+    }
+
+    #[test]
+    fn response_message_defaults_missing_content_to_empty() -> Result<()> {
+        let item = serde_json::from_value::<ResponseItem>(serde_json::json!({
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+        }))?;
+
+        assert_eq!(
+            item,
+            ResponseItem::Message {
+                id: Some(ResponseItemId::from_server("msg-1".to_string())),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+        Ok(())
     }
 
     #[test]

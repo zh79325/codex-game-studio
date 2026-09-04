@@ -21,13 +21,55 @@ use tracing::info;
 
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
-/// Receives unparsed streaming HTTP response data for request-scoped auditing.
+/// A lifecycle or parsing operation associated with a streaming response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamResponseAuditEvent {
+    StreamOpened {
+        status: u16,
+    },
+    ResponseItemNormalized {
+        event_type: &'static str,
+        reason: &'static str,
+        item_type: Option<String>,
+        item_id: Option<String>,
+        role: Option<String>,
+    },
+    ResponseItemRejected {
+        event_type: &'static str,
+        error: String,
+        item_type: Option<String>,
+        item_id: Option<String>,
+        role: Option<String>,
+    },
+    SseEventRejected {
+        error: String,
+        payload_bytes: usize,
+    },
+    ProviderCompleted {
+        response_id: String,
+    },
+    StreamTerminated {
+        stage: &'static str,
+        reason: String,
+    },
+    EventConsumerDropped {
+        stage: &'static str,
+    },
+    DeltaWithoutActiveItem {
+        event_type: &'static str,
+        delta_bytes: usize,
+        action: &'static str,
+    },
+}
+
+/// Receives unparsed streaming HTTP response data and lifecycle events for request-scoped auditing.
 ///
 /// Implementations should persist each callback independently and must not alter the response
 /// bytes passed through the transport.
 pub trait StreamResponseAudit: Send + Sync {
     fn record_response_headers(&self, headers: &[u8]);
     fn record_response_chunk(&self, chunk: &[u8]);
+    fn record_stream_event(&self, event: StreamResponseAuditEvent);
 }
 
 type StreamResponseAudits = HashMap<String, Arc<dyn StreamResponseAudit>>;
@@ -47,6 +89,15 @@ pub fn unregister_stream_response_audit(thread_id: &str) {
     };
     if let Ok(mut audits) = audits.lock() {
         audits.remove(thread_id);
+    }
+}
+
+pub fn record_stream_response_audit_event(thread_id: &str, event: StreamResponseAuditEvent) {
+    let audit = STREAM_RESPONSE_AUDITS
+        .get()
+        .and_then(|audits| audits.lock().ok()?.get(thread_id).cloned());
+    if let Some(audit) = audit {
+        audit.record_stream_event(event);
     }
 }
 
@@ -75,6 +126,7 @@ pub struct StreamResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub bytes: ByteStream,
+    pub audit: Option<Arc<dyn StreamResponseAudit>>,
 }
 
 pub trait HttpTransport: Send + Sync {
@@ -246,12 +298,18 @@ impl HttpTransport for ReqwestTransport {
         if self.client.request_logging_enabled() {
             info!(method = %method, url, %status, response_headers = ?headers, "HTTP stream opened");
         }
+        if let Some(audit) = &stream_audit {
+            audit.record_stream_event(StreamResponseAuditEvent::StreamOpened {
+                status: status.as_u16(),
+            });
+        }
         let log_response = self.client.request_logging_enabled() && enabled!(Level::INFO);
         let stream_method = method.clone();
         let stream_url = url.clone();
+        let response_audit = stream_audit.clone();
         let stream = resp.bytes_stream().map(move |result| match result {
             Ok(bytes) => {
-                if let Some(audit) = &stream_audit {
+                if let Some(audit) = &response_audit {
                     audit.record_response_chunk(&bytes);
                 }
                 if log_response {
@@ -266,6 +324,12 @@ impl HttpTransport for ReqwestTransport {
             }
             Err(error) => {
                 let error = Self::map_error(error);
+                if let Some(audit) = &response_audit {
+                    audit.record_stream_event(StreamResponseAuditEvent::StreamTerminated {
+                        stage: "http_transport",
+                        reason: error.to_string(),
+                    });
+                }
                 if log_response {
                     error!(
                         method = %stream_method,
@@ -281,6 +345,7 @@ impl HttpTransport for ReqwestTransport {
             status,
             headers,
             bytes: Box::pin(stream),
+            audit: stream_audit,
         })
     }
 }

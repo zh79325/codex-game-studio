@@ -28,6 +28,7 @@ use codex_game_store::finalize_project_json;
 use codex_game_store::list_registered_projects;
 use codex_game_store::open_studio_store;
 use codex_game_store::register_project as register_studio_project;
+use codex_game_store::unregister_project;
 use codex_game_store::update_project_json;
 use codex_game_store::write_art_bible;
 use serde::Deserialize;
@@ -333,6 +334,19 @@ impl GameService {
         }
         projects.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(projects)
+    }
+
+    pub async fn remove_project(&self, project_id: &str) -> Result<(), GameServiceError> {
+        if let Some(studio_storage) = &self.studio_storage {
+            let studio = open_studio_store(studio_storage).await?;
+            unregister_project(&studio, project_id).await?;
+            studio.close().await;
+        }
+        self.projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?
+            .remove(project_id);
+        Ok(())
     }
 
     pub fn read_project(&self, project_id: &str) -> Result<Project, GameServiceError> {

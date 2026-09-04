@@ -262,6 +262,17 @@ impl GameAppServerAdapter {
             })
     }
 
+    pub async fn project_delete(
+        &self,
+        params: GameProjectDeleteParams,
+    ) -> Result<GameProjectDeleteResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .remove_project(&params.project_id)
+            .await?;
+        Ok(GameProjectDeleteResponse {})
+    }
+
     pub async fn project_commit_art_bible(
         &self,
         params: GameProjectCommitArtBibleParams,

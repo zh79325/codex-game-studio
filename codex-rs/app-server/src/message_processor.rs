@@ -1075,6 +1075,11 @@ impl MessageProcessor {
                 .project_list(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameProjectDelete { params, .. } => self
+                .game_processor
+                .project_delete(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::GameProjectCommitArtBible { params, .. } => self
                 .game_processor
                 .project_commit_art_bible(params)

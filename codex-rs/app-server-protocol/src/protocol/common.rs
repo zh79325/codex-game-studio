@@ -545,6 +545,12 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameProjectListResponse,
     },
+    #[experimental("game/project/delete")]
+    GameProjectDelete => "game/project/delete" {
+        params: v2::GameProjectDeleteParams,
+        serialization: global("game"),
+        response: v2::GameProjectDeleteResponse,
+    },
     #[experimental("game/project/commitArtBible")]
     GameProjectCommitArtBible => "game/project/commitArtBible" {
         params: v2::GameProjectCommitArtBibleParams,

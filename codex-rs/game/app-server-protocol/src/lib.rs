@@ -200,6 +200,8 @@ game_dto!(GameProjectReadResponse {
 });
 empty_params!(GameProjectListParams);
 game_dto!(GameProjectListResponse { projects: Vec<GameProject> });
+game_dto!(GameProjectDeleteParams { project_id: String });
+empty_params!(GameProjectDeleteResponse);
 game_dto!(GameProjectCommitArtBibleParams {
     conversation_id: String,
     draft_id: String

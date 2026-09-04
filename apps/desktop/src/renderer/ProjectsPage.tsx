@@ -103,7 +103,10 @@ export default function ProjectsPage() {
 
   const removeProject = useMutation({
     mutationFn: projectsApi.remove,
-    onSuccess: async () => {
+    onSuccess: async (_, projectId) => {
+      queryClient.setQueryData<ListedProject[]>(["projects"], (current) =>
+        current?.filter((project) => project.id !== projectId),
+      );
       message.success("已从项目列表移除");
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
     },

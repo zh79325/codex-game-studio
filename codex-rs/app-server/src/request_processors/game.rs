@@ -148,6 +148,32 @@ impl GameRequestProcessor {
         self.adapter.project_list(params).await.map_err(game_error)
     }
 
+    pub(crate) async fn project_delete(
+        &self,
+        params: GameProjectDeleteParams,
+    ) -> std::result::Result<GameProjectDeleteResponse, JSONRPCErrorError> {
+        let project_id = params.project_id.clone();
+        let response = self
+            .adapter
+            .project_delete(params)
+            .await
+            .map_err(game_error)?;
+        if self.thread_store.supports_projects()
+            && let Err(error) = self.thread_store.delete_project(project_id.clone()).await
+        {
+            tracing::warn!(%project_id, %error, "failed to delete matching host project");
+        }
+        self.outgoing
+            .send_server_notification(ServerNotification::ProjectChanged(
+                ProjectChangedNotification {
+                    project_id,
+                    change_type: ProjectChangeType::Deleted,
+                },
+            ))
+            .await;
+        Ok(response)
+    }
+
     pub(crate) async fn project_commit_art_bible(
         &self,
         params: GameProjectCommitArtBibleParams,

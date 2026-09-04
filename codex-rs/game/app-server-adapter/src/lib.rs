@@ -106,6 +106,13 @@ impl GameAppServerAdapter {
             })
     }
 
+    pub async fn turn_audit_context(
+        &self,
+        turn_id: &str,
+    ) -> Result<Option<codex_game_runtime::TurnAuditContext>, GameServiceError> {
+        self.runtime.service().turn_audit_context(turn_id).await
+    }
+
     pub async fn observe_turn_completed(
         &self,
         turn_id: &str,
@@ -405,6 +412,29 @@ impl GameAppServerAdapter {
                 return Ok(None);
             }
         };
+        let (audit_target, audit_target_dir) = match prepared.conversation.target_kind {
+            ConversationTargetKind::Project => (
+                "project".to_string(),
+                PathBuf::from(&prepared.project.root),
+            ),
+            ConversationTargetKind::Character => {
+                let character_id = prepared
+                    .conversation
+                    .target_ref
+                    .as_deref()
+                    .ok_or_else(|| "角色会话缺少 targetRef".to_string())?;
+                let character = prepared
+                    .store
+                    .read_character(prepared.project.id.as_str(), character_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("character not found: {character_id}"))?;
+                (
+                    format!("character:{}", character.id),
+                    Path::new(&prepared.project.root).join(character.dir_name),
+                )
+            }
+        };
         match self
             .runtime
             .orchestrator()
@@ -414,11 +444,14 @@ impl GameAppServerAdapter {
                 ExecuteTaskRequest {
                     project_root: prepared.project.root.clone(),
                     conversation_id: prepared.conversation.id.as_str().to_string(),
+                    conversation_turn: prepared.conversation.turn,
                     target_id: prepared
                         .conversation
                         .target_ref
                         .clone()
                         .unwrap_or_else(|| prepared.project.id.as_str().to_string()),
+                    audit_target,
+                    audit_target_dir,
                     stage: prepared.stage.clone(),
                     agent_code: prepared.agent_code.clone(),
                     idempotency_key: prepared.assistant_message.id.clone(),

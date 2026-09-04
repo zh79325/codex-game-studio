@@ -38,6 +38,15 @@ pub fn update_project_json(
         Value::String(project_id.to_string()),
     );
     object.insert("schemaVersion".to_string(), Value::from(2));
+    let conversation_audit = object
+        .get("conversationAudit")
+        .or_else(|| object.get("conversation_audit"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    object.insert(
+        "conversationAudit".to_string(),
+        Value::Bool(conversation_audit),
+    );
     object.insert("name".to_string(), Value::String(name.to_string()));
     object.insert("state".to_string(), Value::String(state.to_string()));
     let contents = serde_json::to_string_pretty(&document)
@@ -63,3 +72,7 @@ pub fn finalize_project_json(
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     write_atomically(path, &format!("{contents}\n"))
 }
+
+#[cfg(test)]
+#[path = "project_files_tests.rs"]
+mod tests;

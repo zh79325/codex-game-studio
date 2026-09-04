@@ -412,6 +412,49 @@ impl GameService {
         Ok(None)
     }
 
+    pub async fn turn_audit_context(
+        &self,
+        codex_turn_id: &str,
+    ) -> Result<Option<crate::TurnAuditContext>, GameServiceError> {
+        let projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?
+            .values()
+            .filter(|session| !session.read_only)
+            .map(|session| (session.project.clone(), Arc::clone(&session.store)))
+            .collect::<Vec<_>>();
+        for (project, store) in projects {
+            let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
+                continue;
+            };
+            let (target, target_dir) = if context.target_id == project.id.as_str() {
+                ("project".to_string(), PathBuf::from(&project.root))
+            } else {
+                let character = store
+                    .read_character(project.id.as_str(), &context.target_id)
+                    .await?
+                    .ok_or_else(|| {
+                        GameServiceError::CharacterNotFound(context.target_id.clone())
+                    })?;
+                (
+                    format!("character:{}", character.id),
+                    Path::new(&project.root).join(character.dir_name),
+                )
+            };
+            return Ok(Some(crate::TurnAuditContext {
+                project_root: PathBuf::from(project.root),
+                target_dir,
+                conversation_id: context.conversation_id,
+                turn: context.turn,
+                target,
+                agent_code: context.agent_code,
+                attempt_id: context.attempt_id,
+            }));
+        }
+        Ok(None)
+    }
+
     pub async fn complete_turn(
         &self,
         codex_turn_id: &str,

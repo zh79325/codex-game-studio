@@ -1,5 +1,6 @@
 mod action;
 mod agents;
+mod audit;
 mod execution;
 mod orchestrator;
 mod routing;
@@ -7,6 +8,7 @@ mod service;
 
 pub use action::*;
 pub use agents::*;
+pub use audit::*;
 pub use execution::*;
 pub use orchestrator::*;
 pub use routing::*;

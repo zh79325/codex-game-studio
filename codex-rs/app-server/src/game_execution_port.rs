@@ -149,12 +149,9 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
 
     async fn start_turn(&self, request: StartTurnRequest) -> Result<StartedTurn, ExecutionError> {
         let thread = self.thread(&request.thread_id).await?;
-        let context = serde_json::to_string(&request.context)
+        let input = request
+            .model_input()
             .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
-        let input = format!(
-            "<game_agent_definition>\n{}\n</game_agent_definition>\n\n{}\n\n<game_context attempt_id=\"{}\">\n{}\n</game_context>",
-            request.agent_definition, request.prompt, request.attempt_id, context
-        );
         let mut turn = TurnInputRequest::user_input(vec![UserInput::Text {
             text: input,
             text_elements: Vec::new(),

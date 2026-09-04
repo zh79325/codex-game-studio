@@ -53,7 +53,10 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
     ExecuteTaskRequest {
         project_root: root.to_string(),
         conversation_id: "conversation-1".to_string(),
+        conversation_turn: 1,
         target_id: "project-1".to_string(),
+        audit_target: "project".to_string(),
+        audit_target_dir: root.into(),
         stage: "project".to_string(),
         agent_code: "game_designer".to_string(),
         idempotency_key: key.to_string(),

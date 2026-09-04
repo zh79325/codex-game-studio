@@ -12,6 +12,9 @@ use crate::RouteSelector;
 use crate::StartThreadRequest;
 use crate::StartTurnRequest;
 use crate::SteerTurnRequest;
+use crate::TurnAuditContext;
+use crate::append_turn_audit_start_error;
+use crate::write_turn_audit_request;
 use crate::bundled_agent_definition;
 use codex_game_domain::AiCapability;
 use codex_game_domain::ContextPackage;
@@ -55,7 +58,10 @@ use uuid::Uuid;
 pub struct ExecuteTaskRequest {
     pub project_root: String,
     pub conversation_id: String,
+    pub conversation_turn: u64,
     pub target_id: String,
+    pub audit_target: String,
+    pub audit_target_dir: PathBuf,
     pub stage: String,
     pub agent_code: String,
     pub idempotency_key: String,
@@ -204,25 +210,46 @@ impl TaskOrchestrator {
             )
             .await?;
 
-        let turn = match execution
-            .start_turn(StartTurnRequest {
-                thread_id: binding.codex_thread_id.clone(),
-                attempt_id: attempt.id.as_str().to_string(),
-                agent_definition: bundled_agent_definition(&request.agent_code)
-                    .ok_or_else(|| {
-                        ExecutionError::InvalidRequest(format!(
-                            "unknown game agent: {}",
-                            request.agent_code
-                        ))
-                    })?
-                    .to_string(),
-                prompt: request.prompt,
-                context: request.context,
-            })
-            .await
-        {
+        let audit_context = TurnAuditContext {
+            project_root: PathBuf::from(&request.project_root),
+            target_dir: request.audit_target_dir,
+            conversation_id: request.conversation_id,
+            turn: request.conversation_turn,
+            target: request.audit_target,
+            agent_code: request.agent_code.clone(),
+            attempt_id: attempt.id.as_str().to_string(),
+        };
+        let start_request = StartTurnRequest {
+            thread_id: binding.codex_thread_id.clone(),
+            attempt_id: attempt.id.as_str().to_string(),
+            agent_definition: bundled_agent_definition(&request.agent_code)
+                .ok_or_else(|| {
+                    ExecutionError::InvalidRequest(format!(
+                        "unknown game agent: {}",
+                        request.agent_code
+                    ))
+                })?
+                .to_string(),
+            prompt: request.prompt,
+            context: request.context,
+        };
+        if let Err(error) = write_turn_audit_request(&audit_context, &route, &start_request) {
+            tracing::warn!(
+                path = %audit_context.target_dir.display(),
+                "failed to write game turn audit request: {error}"
+            );
+        }
+        let turn = match execution.start_turn(start_request).await {
             Ok(turn) => turn,
             Err(error) => {
+                if let Err(audit_error) =
+                    append_turn_audit_start_error(&audit_context, &error.to_string())
+                {
+                    tracing::warn!(
+                        path = %audit_context.target_dir.display(),
+                        "failed to write game turn audit error: {audit_error}"
+                    );
+                }
                 if let Some(kind) = route_failure_kind(&error) {
                     self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
                         .await?;

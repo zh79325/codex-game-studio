@@ -291,6 +291,7 @@ pub struct TurnAttemptContext {
     pub attempt_id: String,
     pub task_id: String,
     pub conversation_id: String,
+    pub turn: u64,
     pub target_id: String,
     pub stage: String,
     pub agent_code: String,
@@ -1575,7 +1576,7 @@ impl ProjectStore {
         codex_turn_id: &str,
     ) -> Result<Option<TurnAttemptContext>, StoreError> {
         let row = sqlx::query(
-            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
+            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, m.turn, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id JOIN messages m ON m.id = i.idempotency_key WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
         )
         .bind(codex_turn_id)
         .fetch_optional(&self.pool)
@@ -1585,6 +1586,7 @@ impl ProjectStore {
                 attempt_id: row.try_get("attempt_id")?,
                 task_id: row.try_get("task_id")?,
                 conversation_id: row.try_get("conversation_id")?,
+                turn: row.try_get::<i64, _>("turn")? as u64,
                 target_id: row.try_get("target_id")?,
                 stage: row.try_get("stage")?,
                 agent_code: row.try_get("agent_code")?,

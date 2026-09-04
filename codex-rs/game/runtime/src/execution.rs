@@ -25,6 +25,16 @@ pub struct StartTurnRequest {
     pub context: ContextPackage,
 }
 
+impl StartTurnRequest {
+    pub fn model_input(&self) -> Result<String, serde_json::Error> {
+        let context = serde_json::to_string(&self.context)?;
+        Ok(format!(
+            "<game_agent_definition>\n{}\n</game_agent_definition>\n\n{}\n\n<game_context attempt_id=\"{}\">\n{}\n</game_context>",
+            self.agent_definition, self.prompt, self.attempt_id, context
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedTurn {
     pub turn_id: String,

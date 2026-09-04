@@ -92,7 +92,8 @@ impl App {
         {
             return;
         }
-        let keymap = match RuntimeKeymap::from_config(&config.tui_keymap) {
+        let local_settings = crate::local_settings::LocalSettings::from(&config);
+        let keymap = match RuntimeKeymap::from_config(&local_settings.tui.keymap) {
             Ok(keymap) => keymap,
             Err(error) => return self.chat_widget.add_error_message(error),
         };
@@ -144,6 +145,7 @@ impl App {
         let transitioned = if has_rollout {
             app_server
                 .fork_thread_at(
+                    &local_settings,
                     config.clone(),
                     thread_id,
                     /*last_turn_id*/ None,
@@ -154,7 +156,10 @@ impl App {
         } else {
             app_server
                 .start_thread_with_session_start_source(
-                    &config, /*session_start_source*/ None, /*remote_cwd_override*/ None,
+                    &local_settings,
+                    &config,
+                    /*session_start_source*/ None,
+                    /*remote_cwd_override*/ None,
                 )
                 .await
         };
@@ -191,10 +196,11 @@ impl App {
                 tracing::warn!("failed to unsubscribe tracked thread {tracked_id}: {error}");
             }
         }
+        self.local_settings = local_settings;
         self.config = config;
         self.file_search
             .update_search_dir(self.config.cwd.to_path_buf());
-        let notify = &self.config.tui_notifications;
+        let notify = &self.local_settings.tui.notification_settings;
         tui.set_notification_settings(notify.method, notify.condition);
         if let Err(error) = tui.clear_ambient_pet_image() {
             tracing::warn!(%error, "failed to clear ambient pet image");
@@ -206,9 +212,12 @@ impl App {
         }
         self.cancel_pending_key_chord();
         self.keymap = keymap;
+        self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
         self.restore_runtime_theme_from_config();
         self.runtime_working_directory_override = Some(cwd.to_path_buf());
-        emit_project_config_warnings(&self.app_event_tx, &self.config);
+        if let Some(message) = project_config_warning(&self.config) {
+            self.chat_widget.add_warning_message(message);
+        }
         let message = format!("Working directory changed to: {}", cwd.display());
         self.chat_widget.add_info_message(message, /*hint*/ None);
         if !self.config.bypass_hook_trust {

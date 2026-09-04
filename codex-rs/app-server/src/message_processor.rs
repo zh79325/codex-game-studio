@@ -377,6 +377,7 @@ impl MessageProcessor {
                     config.codex_home.clone(),
                 )),
                 Some(analytics_events_client.clone()),
+                codex_core::passthrough_image_store(),
                 Arc::clone(&thread_store),
                 codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
                 installation_id,
@@ -484,6 +485,7 @@ impl MessageProcessor {
             thread_list_state_permit: Arc::clone(&thread_list_state_permit),
             fallback_model_provider: config.model_provider_id.clone(),
             codex_home: config.codex_home.to_path_buf(),
+            thread_unload_delay: config.thread_unload_delay,
             skills_watcher: Arc::clone(&skills_watcher),
             turn_cost_worker: turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             game_event_sender: Some(game_event_sender),
@@ -1869,8 +1871,8 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
-            ClientRequest::GetAccountRateLimits { .. } => {
-                self.account_processor.get_account_rate_limits().await
+            ClientRequest::GetAccountRateLimits { params, .. } => {
+                self.account_processor.get_account_rate_limits(params).await
             }
             ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
                 self.account_processor

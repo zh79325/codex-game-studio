@@ -50,7 +50,10 @@ pub(crate) fn spawn_game_event_observer(
         let mut partial_response_by_turn = HashMap::<String, String>::new();
         while let Some(observed) = receiver.recv().await {
             if let EventMsg::TurnStarted(started) = &observed.event.msg {
-                if matches!(adapter.turn_event_context(&started.turn_id).await, Ok(Some(_))) {
+                if matches!(
+                    adapter.turn_event_context(&started.turn_id).await,
+                    Ok(Some(_))
+                ) {
                     active_game_turns.insert(observed.thread_id, started.turn_id.clone());
                 }
                 continue;

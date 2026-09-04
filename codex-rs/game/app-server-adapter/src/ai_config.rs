@@ -33,6 +33,8 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+const GAME_STREAM_IDLE_TIMEOUT_MS: i64 = 60_000;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AiSecrets {
@@ -431,6 +433,11 @@ impl GameAppServerAdapter {
                 "requires_openai_auth".to_string(),
                 toml::Value::Boolean(false),
             );
+            entry.insert(
+                "stream_idle_timeout_ms".to_string(),
+                toml::Value::Integer(GAME_STREAM_IDLE_TIMEOUT_MS),
+            );
+            entry.insert("stream_max_retries".to_string(), toml::Value::Integer(0));
             model_providers.insert(provider.code, toml::Value::Table(entry));
         }
         let temporary = config_path.with_extension("toml.tmp");

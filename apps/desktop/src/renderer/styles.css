@@ -341,6 +341,13 @@ textarea {
   white-space: pre-wrap;
 }
 
+.thinking-stream {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-left: 2px solid rgba(112, 214, 164, 0.45);
+  background: rgba(112, 214, 164, 0.06);
+}
+
 .message-meta,
 .action-summary,
 .choice-group,

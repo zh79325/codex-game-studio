@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { conversationApi } from "../api";
 
 export type ConversationTarget = {
@@ -12,7 +12,10 @@ export type ConversationTarget = {
 export function useConversation(target: ConversationTarget, enabled = true) {
   const queryClient = useQueryClient();
   const [streamingText, setStreamingText] = useState("");
+  const [thinkingText, setThinkingText] = useState("");
   const [workingAgentCode, setWorkingAgentCode] = useState<string>();
+  const activeTurnIdRef = useRef<string | undefined>(undefined);
+  const pendingThinkingByTurnRef = useRef(new Map<string, string>());
   const [lastError, setLastError] = useState<string>();
   const ensure = useQuery({
     queryKey: [
@@ -48,6 +51,10 @@ export function useConversation(target: ConversationTarget, enabled = true) {
 
   useEffect(() => {
     if (!conversationId) return;
+    activeTurnIdRef.current = undefined;
+    pendingThinkingByTurnRef.current.clear();
+    setStreamingText("");
+    setThinkingText("");
     return window.codexGame.onEvent((event) => {
       if (typeof event !== "object" || !event || !("method" in event)) return;
       const notification = event as {
@@ -56,6 +63,18 @@ export function useConversation(target: ConversationTarget, enabled = true) {
       };
       const method = String(notification.method);
       const params = notification.params;
+      if (method === "item/reasoning/summaryTextDelta") {
+        const turnId = typeof params?.turnId === "string" ? params.turnId : "";
+        const delta = typeof params?.delta === "string" ? params.delta : "";
+        if (!turnId || !delta) return;
+        if (turnId === activeTurnIdRef.current) {
+          setThinkingText((current) => current + delta);
+        } else {
+          const pending = pendingThinkingByTurnRef.current;
+          pending.set(turnId, (pending.get(turnId) ?? "") + delta);
+        }
+        return;
+      }
       if (params?.conversationId !== conversationId) return;
       if (method === "game/conversation/delta") {
         const delta = typeof params.delta === "string" ? params.delta : "";
@@ -63,11 +82,20 @@ export function useConversation(target: ConversationTarget, enabled = true) {
         return;
       }
       if (method === "game/conversation/actor") {
+        const isWorking = params.status === "working";
+        const turnId =
+          typeof params.turnId === "string" ? params.turnId : undefined;
+        activeTurnIdRef.current = isWorking ? turnId : undefined;
         setWorkingAgentCode(
-          params.status === "working" && typeof params.agentCode === "string"
+          isWorking && typeof params.agentCode === "string"
             ? params.agentCode
             : undefined,
         );
+        if (isWorking && turnId) {
+          const pending = pendingThinkingByTurnRef.current;
+          setThinkingText(pending.get(turnId) ?? "");
+          pending.delete(turnId);
+        }
       }
       if (
         method === "game/conversation/error" &&
@@ -76,7 +104,9 @@ export function useConversation(target: ConversationTarget, enabled = true) {
         setLastError(params.message);
       }
       if (method === "game/conversation/turn" && params.status !== "running") {
+        activeTurnIdRef.current = undefined;
         setStreamingText("");
+        setThinkingText("");
         setWorkingAgentCode(undefined);
       }
       if (
@@ -98,7 +128,10 @@ export function useConversation(target: ConversationTarget, enabled = true) {
       recipientAgentCode?: string;
     }) => conversationApi.send(conversationId!, content, recipientAgentCode),
     onMutate: () => {
+      activeTurnIdRef.current = undefined;
+      pendingThinkingByTurnRef.current.clear();
       setStreamingText("");
+      setThinkingText("");
       setLastError(undefined);
     },
     onSuccess: async (next) => {
@@ -126,6 +159,7 @@ export function useConversation(target: ConversationTarget, enabled = true) {
       sendMutation.isPending,
     isInterrupting: interruptMutation.isPending,
     streamingText,
+    thinkingText,
     workingAgentCode,
     lastError,
     send: (content: string, recipientAgentCode?: string) =>

@@ -262,6 +262,7 @@ export default function ProjectWorkspacePage() {
             busy={conversation.isBusy}
             interrupting={conversation.isInterrupting}
             streamingText={conversation.streamingText}
+            thinkingText={conversation.thinkingText}
             workingAgentCode={conversation.workingAgentCode}
             lastError={conversation.lastError}
             starterPrompt="我要开发一款类似我的世界地下城的刷怪RPG，玩家扮演的角色是西游记中的人物例如孙悟空，猪八戒，二郎神等，怪物是类似奥特曼电视剧中的怪兽，场景是在现代各个城市的地标建筑附近。"

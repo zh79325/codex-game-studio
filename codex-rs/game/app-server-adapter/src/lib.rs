@@ -406,10 +406,9 @@ impl GameAppServerAdapter {
             }
         };
         let (audit_target, audit_target_dir) = match prepared.conversation.target_kind {
-            ConversationTargetKind::Project => (
-                "project".to_string(),
-                PathBuf::from(&prepared.project.root),
-            ),
+            ConversationTargetKind::Project => {
+                ("project".to_string(), PathBuf::from(&prepared.project.root))
+            }
             ConversationTargetKind::Character => {
                 let character_id = prepared
                     .conversation

@@ -27,6 +27,7 @@ export type ChatPanelProps = {
   busy: boolean;
   interrupting?: boolean;
   streamingText?: string;
+  thinkingText?: string;
   workingAgentCode?: string;
   lastError?: string;
   starterPrompt?: string;
@@ -92,6 +93,7 @@ export default function ChatPanel(props: ChatPanelProps) {
       <MessageList
         messages={props.snapshot?.messages ?? []}
         streamingText={props.streamingText}
+        thinkingText={props.thinkingText}
         workingAgentCode={props.workingAgentCode}
         starterPrompt={props.starterPrompt}
         onChoice={send}
@@ -147,6 +149,7 @@ export default function ChatPanel(props: ChatPanelProps) {
 export function MessageList({
   messages,
   streamingText,
+  thinkingText,
   workingAgentCode,
   starterPrompt,
   disabled,
@@ -154,6 +157,7 @@ export function MessageList({
 }: {
   messages: ConversationMessage[];
   streamingText?: string;
+  thinkingText?: string;
   workingAgentCode?: string;
   starterPrompt?: string;
   disabled: boolean;
@@ -194,12 +198,22 @@ export function MessageList({
             </Typography.Text>
             <Tag>{item.status}</Tag>
           </Space>
+          {item.status === "thinking" &&
+            thinkingText &&
+            item.agentCode === workingAgentCode && (
+              <div className="thinking-stream">
+                <Typography.Text type="secondary">Thinking</Typography.Text>
+                <Typography.Paragraph type="secondary">
+                  {thinkingText}
+                </Typography.Paragraph>
+              </div>
+            )}
           {item.status === "thinking" && !item.content ? (
             streamingText && item.agentCode === workingAgentCode ? (
               <Typography.Paragraph>
                 {stripActionBlock(streamingText)}
               </Typography.Paragraph>
-            ) : (
+            ) : thinkingText && item.agentCode === workingAgentCode ? null : (
               <Spin size="small" />
             )
           ) : (

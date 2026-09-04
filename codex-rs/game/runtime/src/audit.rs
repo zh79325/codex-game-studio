@@ -80,10 +80,7 @@ pub fn write_turn_audit_request(
         model,
         code_block(&redact_data_urls(&input), "text"),
     );
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(body.as_bytes())?;
     file.flush()?;
     file.sync_all()
@@ -133,10 +130,7 @@ pub fn append_turn_audit_completion(
     append(&path, &body)
 }
 
-pub fn append_turn_audit_start_error(
-    context: &TurnAuditContext,
-    error: &str,
-) -> io::Result<()> {
+pub fn append_turn_audit_start_error(context: &TurnAuditContext, error: &str) -> io::Result<()> {
     let path = audit_path(context);
     if !path.exists() {
         return Ok(());
@@ -173,10 +167,14 @@ fn audit_path(context: &TurnAuditContext) -> PathBuf {
             }
         })
         .collect::<String>();
-    context.target_dir.join("tmp").join("conversation").join(format!(
-        "{agent_code}-turn-{}-{}.md",
-        context.turn, context.attempt_id
-    ))
+    context
+        .target_dir
+        .join("tmp")
+        .join("conversation")
+        .join(format!(
+            "{agent_code}-turn-{}-{}.md",
+            context.turn, context.attempt_id
+        ))
 }
 
 fn append(path: &Path, content: &str) -> io::Result<()> {

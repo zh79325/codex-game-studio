@@ -105,6 +105,9 @@ export class BackendSupervisor extends EventEmitter {
           ...this.providerEnvironment(),
           CODEX_HOME: this.codexHome,
           CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
+          RUST_LOG: process.env.RUST_LOG
+            ? `${process.env.RUST_LOG},codex_http_client::transport=info`
+            : "codex_http_client::transport=info",
         },
       },
     );
@@ -112,7 +115,11 @@ export class BackendSupervisor extends EventEmitter {
     createInterface({ input: child.stdout }).on("line", (line) =>
       this.handleLine(line),
     );
-    child.stderr.on("data", (chunk) => this.emit("stderr", chunk.toString()));
+    child.stderr.on("data", (chunk) => {
+      const message = chunk.toString();
+      process.stderr.write(message);
+      this.emit("stderr", message);
+    });
     child.on("exit", (_code, signal) => this.handleExit(signal));
     void this.initialize();
   }

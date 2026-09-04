@@ -12,7 +12,8 @@ use http::Method;
 use http::StatusCode;
 use tracing::Level;
 use tracing::enabled;
-use tracing::trace;
+use tracing::error;
+use tracing::info;
 
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
@@ -87,14 +88,20 @@ impl ReqwestTransport {
         }
     }
 
-    fn trace_request(&self, req: &Request) {
-        if self.client.request_logging_enabled() && enabled!(Level::TRACE) {
-            trace!(
-                "{} to {}: {}",
-                req.method,
-                req.url,
-                request_body_for_trace(req)
+    fn log_request(&self, req: &Request) {
+        if self.client.request_logging_enabled() && enabled!(Level::INFO) {
+            info!(
+                method = %req.method,
+                url = %req.url,
+                request = %request_body_for_trace(req),
+                "HTTP request"
             );
+        }
+    }
+
+    fn log_error(&self, method: &Method, url: &str, error: &TransportError) {
+        if self.client.request_logging_enabled() {
+            error!(method = %method, url, error = %error, "HTTP request failed");
         }
     }
 }
@@ -112,22 +119,38 @@ fn request_body_for_trace(req: &Request) -> String {
 
 impl HttpTransport for ReqwestTransport {
     async fn execute(&self, req: Request) -> Result<Response, TransportError> {
-        self.trace_request(&req);
+        self.log_request(&req);
 
+        let method = req.method.clone();
         let url = req.url.clone();
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let builder = self.build(req).inspect_err(|error| {
+            self.log_error(&method, &url, error);
+        })?;
+        let resp = builder
+            .send()
+            .await
+            .map_err(Self::map_error)
+            .inspect_err(|error| self.log_error(&method, &url, error))?;
         let status = resp.status();
         let headers = resp.headers().clone();
-        let bytes = resp.bytes().await.map_err(Self::map_error)?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(Self::map_error)
+            .inspect_err(|error| self.log_error(&method, &url, error))?;
+        let body = String::from_utf8_lossy(&bytes);
+        if self.client.request_logging_enabled() {
+            info!(method = %method, url, %status, response = %body, "HTTP response");
+        }
         if !status.is_success() {
-            let body = String::from_utf8(bytes.to_vec()).ok();
-            return Err(TransportError::Http {
+            let error = TransportError::Http {
                 status,
-                url: Some(url),
+                url: Some(url.clone()),
                 headers: Some(headers),
-                body,
-            });
+                body: Some(body.into_owned()),
+            };
+            self.log_error(&method, &url, &error);
+            return Err(error);
         }
         Ok(Response {
             status,
@@ -137,25 +160,62 @@ impl HttpTransport for ReqwestTransport {
     }
 
     async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
-        self.trace_request(&req);
+        self.log_request(&req);
 
+        let method = req.method.clone();
         let url = req.url.clone();
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let builder = self.build(req).inspect_err(|error| {
+            self.log_error(&method, &url, error);
+        })?;
+        let resp = builder
+            .send()
+            .await
+            .map_err(Self::map_error)
+            .inspect_err(|error| self.log_error(&method, &url, error))?;
         let status = resp.status();
         let headers = resp.headers().clone();
         if !status.is_success() {
             let body = resp.text().await.ok();
-            return Err(TransportError::Http {
+            let error = TransportError::Http {
                 status,
-                url: Some(url),
+                url: Some(url.clone()),
                 headers: Some(headers),
                 body,
-            });
+            };
+            self.log_error(&method, &url, &error);
+            return Err(error);
         }
-        let stream = resp
-            .bytes_stream()
-            .map(|result| result.map_err(Self::map_error));
+        if self.client.request_logging_enabled() {
+            info!(method = %method, url, %status, response_headers = ?headers, "HTTP stream opened");
+        }
+        let log_response = self.client.request_logging_enabled() && enabled!(Level::INFO);
+        let stream_method = method.clone();
+        let stream_url = url.clone();
+        let stream = resp.bytes_stream().map(move |result| match result {
+            Ok(bytes) => {
+                if log_response {
+                    info!(
+                        method = %stream_method,
+                        url = %stream_url,
+                        response = %String::from_utf8_lossy(&bytes),
+                        "HTTP stream response"
+                    );
+                }
+                Ok(bytes)
+            }
+            Err(error) => {
+                let error = Self::map_error(error);
+                if log_response {
+                    error!(
+                        method = %stream_method,
+                        url = %stream_url,
+                        error = %error,
+                        "HTTP stream failed"
+                    );
+                }
+                Err(error)
+            }
+        });
         Ok(StreamResponse {
             status,
             headers,

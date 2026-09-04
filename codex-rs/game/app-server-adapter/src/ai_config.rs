@@ -932,7 +932,7 @@ fn agent_dto(agent: AgentDefinition) -> GameAiAgent {
         agent_code: agent.agent_code,
         role: agent.role,
         role_type: agent_role_type_name(&agent.role_type).to_string(),
-        capability: agent_capability_name(&agent.capability).to_string(),
+        capability: agent_capability_name(agent.capability).to_string(),
         required_model_capability: capability_name(&required_model_capability),
         focusable: agent.focusable,
         aliases: agent.aliases,
@@ -1036,7 +1036,7 @@ fn parse_capability(value: &str) -> Result<AiCapability, String> {
     }
 }
 
-fn agent_capability_name(capability: &AgentCapability) -> &'static str {
+fn agent_capability_name(capability: AgentCapability) -> &'static str {
     match capability {
         AgentCapability::Text => "text",
         AgentCapability::T2i => "t2i",

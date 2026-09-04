@@ -43,10 +43,7 @@ pub(super) fn full_client_request(route: &RealtimeSpeechRoute) -> Result<Vec<u8>
 }
 
 pub(super) fn audio_request(audio: &[u8], is_last: bool) -> Result<Vec<u8>, String> {
-    encode_request(
-        [0x11, if is_last { 0x22 } else { 0x20 }, 0x01, 0x00],
-        audio,
-    )
+    encode_request([0x11, if is_last { 0x22 } else { 0x20 }, 0x01, 0x00], audio)
 }
 
 fn encode_request(header: [u8; 4], payload: &[u8]) -> Result<Vec<u8>, String> {

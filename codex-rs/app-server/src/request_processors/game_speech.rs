@@ -12,8 +12,10 @@ use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_game_app_server_adapter::RealtimeSpeechRoute;
 use futures::SinkExt;
 use futures::StreamExt;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -21,8 +23,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::HOST;
 use tokio_tungstenite::tungstenite::http::header::HeaderName;
-use tokio_tungstenite::MaybeTlsStream;
-use tokio::net::TcpStream;
 use uuid::Uuid;
 
 use crate::outgoing_message::ConnectionId;
@@ -98,7 +98,13 @@ impl RealtimeSpeechSessions {
         let task_session_id = session_id;
         tokio::spawn(async move {
             let result = sessions
-                .run_session(connection_id, &task_session_id, route.clone(), socket, receiver)
+                .run_session(
+                    connection_id,
+                    &task_session_id,
+                    route.clone(),
+                    socket,
+                    receiver,
+                )
                 .await;
             sessions.sessions.lock().await.remove(&task_session_id);
             match result {

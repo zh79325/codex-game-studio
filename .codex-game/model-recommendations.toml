@@ -41,7 +41,7 @@ remark = "速度优先，适合 spec_reviewer / prompt_smith 等单次调用"
 
 [[presets.models]]
 model_id = "doubao-seed-2.0-lite"
-capabilities = ["text_reasoning", "text_structured_output"]
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
 driver = "openai_compat"
 api_path = "/api/coding/v3"
 limit_kind = "tokens"
@@ -51,7 +51,7 @@ remark = "轻量档，适合会话摘要压缩这类低价值调用"
 
 [[presets.models]]
 model_id = "minimax-m3"
-capabilities = ["text_reasoning", "text_structured_output"]
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
 driver = "openai_compat"
 api_path = "/api/coding/v3"
 limit_kind = "tokens"
@@ -71,7 +71,7 @@ remark = "别名 glm-latest"
 
 [[presets.models]]
 model_id = "glm-5.3-flash"
-capabilities = ["text_reasoning", "text_structured_output"]
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
 driver = "openai_compat"
 api_path = "/api/coding/v3"
 limit_kind = "tokens"
@@ -101,7 +101,7 @@ remark = "Coding Plan 套餐内第三方模型"
 
 [[presets.models]]
 model_id = "kimi-k2.7-code"
-capabilities = ["text_reasoning", "text_structured_output"]
+capabilities = ["text_reasoning", "text_structured_output", "vision_analysis"]
 driver = "openai_compat"
 api_path = "/api/coding/v3"
 limit_kind = "tokens"

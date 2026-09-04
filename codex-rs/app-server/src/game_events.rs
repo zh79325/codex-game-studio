@@ -1,8 +1,13 @@
-use codex_app_server_protocol::GameArtifactCommittedNotification;
+use codex_app_server_protocol::GameAgentHandoffNotification;
 use codex_app_server_protocol::GameAttemptUpdatedNotification;
-use codex_app_server_protocol::GameDesignConfirmationRequiredNotification;
+use codex_app_server_protocol::GameCharacterUpdatedNotification;
+use codex_app_server_protocol::GameConversationActorNotification;
+use codex_app_server_protocol::GameConversationDeltaNotification;
+use codex_app_server_protocol::GameConversationErrorNotification;
+use codex_app_server_protocol::GameConversationFocusNotification;
+use codex_app_server_protocol::GameConversationTurnNotification;
+use codex_app_server_protocol::GameGenerationUpdatedNotification;
 use codex_app_server_protocol::GameTaskUpdatedNotification;
-use codex_app_server_protocol::GameWorkflowUpdatedNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_protocol::ThreadId;
@@ -37,6 +42,35 @@ pub(crate) fn spawn_game_event_observer(
 ) {
     tokio::spawn(async move {
         while let Some(observed) = receiver.recv().await {
+            if let EventMsg::AgentMessageContentDelta(delta) = &observed.event.msg {
+                match adapter.turn_event_context(&delta.turn_id).await {
+                    Ok(Some(context)) => {
+                        outgoing
+                            .send_server_notification(ServerNotification::GameConversationDelta(
+                                GameConversationDeltaNotification {
+                                    conversation_id: context.conversation_id,
+                                    turn_id: delta.turn_id.clone(),
+                                    agent_code: context.agent_code,
+                                    delta: delta.delta.clone(),
+                                },
+                            ))
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        thread_id = %observed.thread_id,
+                        turn_id = %delta.turn_id,
+                        "failed to resolve game delta context: {error}"
+                    ),
+                }
+                continue;
+            }
+            let terminal_error = match &observed.event.msg {
+                EventMsg::TurnComplete(completed) => {
+                    completed.error.as_ref().map(|error| error.message.clone())
+                }
+                _ => None,
+            };
             let (turn_id, result) = match &observed.event.msg {
                 EventMsg::TurnComplete(completed) => (
                     completed.turn_id.as_str(),
@@ -56,7 +90,7 @@ pub(crate) fn spawn_game_event_observer(
             };
             match result {
                 Ok(Some(projection)) => {
-                    let conversation_id = projection.conversation_id;
+                    let conversation_id = projection.conversation_id.clone();
                     outgoing
                         .send_server_notification(ServerNotification::GameAttemptUpdated(
                             GameAttemptUpdatedNotification {
@@ -73,99 +107,180 @@ pub(crate) fn spawn_game_event_observer(
                             GameTaskUpdatedNotification {
                                 conversation_id: conversation_id.clone(),
                                 task_id: projection.task_id,
+                                status: projection.status.clone(),
+                            },
+                        ))
+                        .await;
+                    outgoing
+                        .send_server_notification(ServerNotification::GameConversationTurn(
+                            GameConversationTurnNotification {
+                                conversation_id: conversation_id.clone(),
                                 status: projection.status,
                             },
                         ))
                         .await;
-                    for (artifact_id, artifact_type) in projection.artifacts {
+                    if let Some(agent_code) = projection.agent_code.clone() {
                         outgoing
-                            .send_server_notification(ServerNotification::GameArtifactCommitted(
-                                GameArtifactCommittedNotification {
+                            .send_server_notification(ServerNotification::GameConversationActor(
+                                GameConversationActorNotification {
                                     conversation_id: conversation_id.clone(),
-                                    artifact_id,
-                                    artifact_type,
+                                    turn_id: Some(turn_id.to_string()),
+                                    agent_code: agent_code.clone(),
+                                    status: "idle".to_string(),
+                                },
+                            ))
+                            .await;
+                        outgoing
+                            .send_server_notification(ServerNotification::GameConversationFocus(
+                                GameConversationFocusNotification {
+                                    conversation_id: conversation_id.clone(),
+                                    agent_code: projection
+                                        .handoff_target
+                                        .clone()
+                                        .unwrap_or(agent_code),
                                 },
                             ))
                             .await;
                     }
-                    let workflow_id = projection
-                        .workflow
-                        .as_ref()
-                        .map(|workflow| workflow.id.clone());
-                    if let Some(workflow) = projection.workflow {
-                        let should_start_synthesis = workflow.state == "merging";
+                    if let Some(message) = terminal_error {
                         outgoing
-                            .send_server_notification(ServerNotification::GameWorkflowUpdated(
-                                GameWorkflowUpdatedNotification { workflow },
+                            .send_server_notification(ServerNotification::GameConversationError(
+                                GameConversationErrorNotification {
+                                    conversation_id: conversation_id.clone(),
+                                    turn_id: Some(turn_id.to_string()),
+                                    message,
+                                },
                             ))
                             .await;
-                        if should_start_synthesis {
-                            let Some(connection_id) = observed.connection_ids.first().copied()
-                            else {
+                    }
+                    if let Some(character) = projection.character {
+                        outgoing
+                            .send_server_notification(ServerNotification::GameCharacterUpdated(
+                                GameCharacterUpdatedNotification { character },
+                            ))
+                            .await;
+                    }
+                    for generation in projection.generations {
+                        outgoing
+                            .send_server_notification(ServerNotification::GameGenerationUpdated(
+                                GameGenerationUpdatedNotification { generation },
+                            ))
+                            .await;
+                    }
+                    if let Some(target_agent) = projection.handoff_target {
+                        let from_agent = projection.agent_code.unwrap_or_default();
+                        let reason = projection.handoff_reason.unwrap_or_default();
+                        outgoing
+                            .send_server_notification(ServerNotification::GameAgentHandoff(
+                                GameAgentHandoffNotification {
+                                    conversation_id: conversation_id.clone(),
+                                    from_agent_code: from_agent,
+                                    to_agent_code: target_agent.clone(),
+                                    reason,
+                                },
+                            ))
+                            .await;
+                        let Some(connection_id) = observed.connection_ids.first().copied() else {
+                            tracing::warn!(
+                                thread_id = %observed.thread_id,
+                                "cannot continue game handoff without a subscribed connection"
+                            );
+                            continue;
+                        };
+                        let scoped_execution = execution.scoped(connection_id);
+                        match adapter
+                            .continue_handoff(&scoped_execution, &conversation_id, &target_agent)
+                            .await
+                        {
+                            Ok(Some(started)) => {
+                                let task_id = started.task.id.as_str().to_string();
+                                let agent_code = started.task.agent_code;
+                                let turn_id = started.attempt.codex_turn_id;
+                                outgoing
+                                    .send_server_notification(ServerNotification::GameTaskUpdated(
+                                        GameTaskUpdatedNotification {
+                                            conversation_id: conversation_id.clone(),
+                                            task_id: task_id.clone(),
+                                            status: "running".to_string(),
+                                        },
+                                    ))
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameAttemptUpdated(
+                                            GameAttemptUpdatedNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                task_id,
+                                                attempt_id: started.attempt.id.as_str().to_string(),
+                                                turn_id: turn_id.clone(),
+                                                status: "running".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationTurn(
+                                            GameConversationTurnNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                status: "running".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationActor(
+                                            GameConversationActorNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                turn_id,
+                                                agent_code: agent_code.clone(),
+                                                status: "working".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationFocus(
+                                            GameConversationFocusNotification {
+                                                conversation_id,
+                                                agent_code,
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Ok(None) => {
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationTurn(
+                                            GameConversationTurnNotification {
+                                                conversation_id,
+                                                status: "blocked".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
                                 tracing::warn!(
                                     thread_id = %observed.thread_id,
-                                    "cannot start game synthesis without a subscribed connection"
+                                    "failed to continue game handoff: {error}"
                                 );
-                                continue;
-                            };
-                            let scoped_execution = execution.scoped(connection_id);
-                            match adapter
-                                .start_synthesis(&scoped_execution, &conversation_id)
-                                .await
-                            {
-                                Ok(started) => {
-                                    outgoing
-                                        .send_server_notification(
-                                            ServerNotification::GameTaskUpdated(
-                                                GameTaskUpdatedNotification {
-                                                    conversation_id: conversation_id.clone(),
-                                                    task_id: started.task.id.as_str().to_string(),
-                                                    status: "running".to_string(),
-                                                },
-                                            ),
-                                        )
-                                        .await;
-                                    outgoing
-                                        .send_server_notification(
-                                            ServerNotification::GameAttemptUpdated(
-                                                GameAttemptUpdatedNotification {
-                                                    conversation_id: conversation_id.clone(),
-                                                    task_id: started.task.id.as_str().to_string(),
-                                                    attempt_id: started
-                                                        .attempt
-                                                        .id
-                                                        .as_str()
-                                                        .to_string(),
-                                                    turn_id: started.attempt.codex_turn_id,
-                                                    status: "running".to_string(),
-                                                },
-                                            ),
-                                        )
-                                        .await;
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        thread_id = %observed.thread_id,
-                                        "failed to start game synthesis: {error}"
-                                    );
-                                }
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationError(
+                                            GameConversationErrorNotification {
+                                                conversation_id,
+                                                turn_id: Some(turn_id.to_string()),
+                                                message: error,
+                                            },
+                                        ),
+                                    )
+                                    .await;
                             }
                         }
-                    }
-                    if let (Some(workflow_id), Some(conflict_count)) =
-                        (workflow_id, projection.conflict_count)
-                    {
-                        outgoing
-                            .send_server_notification(
-                                ServerNotification::GameDesignConfirmationRequired(
-                                    GameDesignConfirmationRequiredNotification {
-                                        conversation_id,
-                                        workflow_id,
-                                        conflict_count,
-                                    },
-                                ),
-                            )
-                            .await;
                     }
                 }
                 Ok(None) => {}

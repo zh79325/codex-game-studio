@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "GameGeneration": {
+      "properties": {
+        "assetSpec": true,
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "fileHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "isFinal": {
+          "type": "boolean"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "targetKind": {
+          "type": "string"
+        },
+        "targetRef": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assetSpec",
+        "createdAt",
+        "filePath",
+        "id",
+        "isFinal",
+        "projectId",
+        "source",
+        "stage",
+        "targetKind",
+        "targetRef"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "generation": {
+      "$ref": "#/definitions/GameGeneration"
+    }
+  },
+  "required": [
+    "generation"
+  ],
+  "title": "GameGenerationUpdatedNotification",
+  "type": "object"
+}

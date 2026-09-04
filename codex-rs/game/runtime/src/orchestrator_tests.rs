@@ -1,7 +1,6 @@
 use super::*;
 use crate::StartedThread;
 use crate::StartedTurn;
-use codex_game_domain::ArtifactId;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
@@ -54,19 +53,25 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
     ExecuteTaskRequest {
         project_root: root.to_string(),
         conversation_id: "conversation-1".to_string(),
-        target_id: "workflow-1".to_string(),
-        stage: "brief".to_string(),
-        agent_code: "brief".to_string(),
+        target_id: "project-1".to_string(),
+        stage: "project".to_string(),
+        agent_code: "game_designer".to_string(),
         idempotency_key: key.to_string(),
         prompt: "design a game".to_string(),
         context: ContextPackage {
-            brief_artifact_id: ArtifactId::new("brief-1"),
-            confirmed_decisions: Vec::new(),
-            artifact_summaries: Vec::new(),
+            conversation_history: Vec::new(),
             context_version: 1,
-            workflow_version: 1,
+            contract_version: 1,
             agent_definition_version: "1".to_string(),
             output_schema: "{}".to_string(),
+            target_kind: "project".to_string(),
+            target_ref: None,
+            stage: "project".to_string(),
+            art_bible: None,
+            character_context: None,
+            memories: Vec::new(),
+            allowed_handoffs: Vec::new(),
+            action_protocol: "strict action".to_string(),
         },
         capability: Capability::TextStructuredOutput,
     }
@@ -210,54 +215,6 @@ async fn concurrent_first_tasks_share_one_active_thread() {
 }
 
 #[tokio::test]
-async fn retry_reuses_the_task_but_starts_a_new_attempt_and_turn() {
-    let directory = tempdir().expect("tempdir");
-    let store = ProjectStore::open(directory.path()).await.expect("store");
-    let execution = FakeExecution::default();
-    let orchestrator = TaskOrchestrator::default();
-    let first = orchestrator
-        .execute(
-            &execution,
-            &store,
-            request(directory.path().to_str().expect("root"), "message-1"),
-        )
-        .await
-        .expect("first attempt");
-    store
-        .complete_turn(
-            first.attempt.codex_turn_id.as_deref().expect("turn"),
-            TaskAttemptStatus::Failed,
-        )
-        .await
-        .expect("fail first turn");
-    let workflow = FocusWorkflow {
-        id: codex_game_domain::FocusWorkflowId::new("workflow-1"),
-        project_id: codex_game_domain::ProjectId::new("project-1"),
-        conversation_id: ConversationId::new("conversation-1"),
-        state: codex_game_domain::WorkflowState::Clarifying,
-        input_version: 1,
-        workflow_version: 2,
-    };
-
-    let retried = orchestrator
-        .retry(
-            &execution,
-            &store,
-            directory.path().to_string_lossy().into_owned(),
-            "conversation-1",
-            &workflow,
-        )
-        .await
-        .expect("retry");
-
-    assert_eq!(retried.task.id, first.task.id);
-    assert_eq!(retried.attempt.attempt_no, 2);
-    assert_ne!(retried.attempt.id, first.attempt.id);
-    assert_ne!(retried.attempt.codex_turn_id, first.attempt.codex_turn_id);
-    assert_eq!(retried.task.workflow_version, 2);
-}
-
-#[tokio::test]
 async fn interrupt_cancels_the_current_attempt_and_task() {
     let directory = tempdir().expect("tempdir");
     let store = ProjectStore::open(directory.path()).await.expect("store");
@@ -277,7 +234,7 @@ async fn interrupt_cancels_the_current_attempt_and_task() {
             &execution,
             &store,
             "conversation-1",
-            "brief",
+            "game_designer",
             started.attempt.id.as_str(),
             started.binding.codex_thread_id,
             started.attempt.codex_turn_id.clone().expect("running turn"),
@@ -339,7 +296,7 @@ async fn rebuilds_an_unavailable_active_thread() {
     assert_eq!(restarted_execution.starts.load(Ordering::SeqCst), 1);
     assert_eq!(
         store
-            .active_thread("conversation-1", "brief")
+            .active_thread("conversation-1", "game_designer")
             .await
             .expect("active binding")
             .expect("binding")

@@ -1,11 +1,13 @@
+mod action;
+mod agents;
 mod execution;
-mod focus;
 mod orchestrator;
 mod routing;
 mod service;
 
+pub use action::*;
+pub use agents::*;
 pub use execution::*;
-pub use focus::*;
 pub use orchestrator::*;
 pub use routing::*;
 pub use service::*;
@@ -33,7 +35,7 @@ impl Default for GameRuntime {
         reason = "bundled agent definitions are static and covered by tests"
     )]
     fn default() -> Self {
-        validate_bundled_agents().expect("bundled focus agent definitions must be valid");
+        validate_bundled_agents().expect("bundled agent definitions must be valid");
         Self {
             store_state: StoreState::new(BackendStatus::Ready),
             recovery_lock: Mutex::new(()),
@@ -62,7 +64,7 @@ impl GameRuntime {
         reason = "bundled agent definitions are static and covered by tests"
     )]
     pub fn new_with_routes(studio_storage: PathBuf, candidates: Vec<RouteCandidate>) -> Self {
-        validate_bundled_agents().expect("bundled focus agent definitions must be valid");
+        validate_bundled_agents().expect("bundled agent definitions must be valid");
         Self {
             store_state: StoreState::new(BackendStatus::Ready),
             recovery_lock: Mutex::new(()),

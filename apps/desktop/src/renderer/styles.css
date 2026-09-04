@@ -1,7 +1,14 @@
 :root {
   color: #e8edf1;
   background: #0e1114;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   font-synthesis: none;
 }
 
@@ -19,7 +26,11 @@ body,
 
 body {
   background:
-    radial-gradient(circle at 16% -10%, rgba(57, 138, 103, 0.2), transparent 32rem),
+    radial-gradient(
+      circle at 16% -10%,
+      rgba(57, 138, 103, 0.2),
+      transparent 32rem
+    ),
     #0e1114;
 }
 
@@ -278,6 +289,90 @@ textarea {
   margin: 18px 0 6px;
 }
 
+.chat-panel .ant-card-body {
+  display: flex;
+  min-height: 640px;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.message-list {
+  display: flex;
+  max-height: 58vh;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.chat-empty {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  color: #8e999f;
+}
+
+.chat-message {
+  max-width: 88%;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: #11161a;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  background: rgba(112, 214, 164, 0.1);
+}
+
+.chat-message .ant-typography {
+  margin-bottom: 0;
+  white-space: pre-wrap;
+}
+
+.message-meta,
+.action-summary,
+.choice-group,
+.draft-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.message-meta {
+  flex-direction: row;
+}
+
+.action-summary {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.draft-panel {
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.draft-panel > .ant-card {
+  width: 100%;
+}
+
+.draft-document {
+  max-height: 260px;
+  margin-top: 10px;
+}
+
+.chat-composer {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) 1fr auto;
+  align-items: end;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 @media (max-width: 1100px) {
   .app-header {
     grid-template-columns: auto 1fr;
@@ -289,5 +384,13 @@ textarea {
 
   .app-content {
     padding: 20px;
+  }
+
+  .chat-composer {
+    grid-template-columns: 1fr auto;
+  }
+
+  .chat-composer .ant-select {
+    grid-column: 1 / -1;
   }
 }

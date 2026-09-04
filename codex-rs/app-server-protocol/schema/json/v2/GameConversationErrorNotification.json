@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "conversationId": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "conversationId",
+    "message"
+  ],
+  "title": "GameConversationErrorNotification",
+  "type": "object"
+}

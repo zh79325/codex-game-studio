@@ -60,23 +60,64 @@ macro_rules! empty_params {
 game_dto!(GameProject {
     id: String,
     name: String,
+    code: Option<String>,
     root: String,
     state: String
 });
-game_dto!(GameConversation { id: String, project_id: String, target_id: Option<String>, created_at: i64 });
+game_dto!(GameConversation {
+    id: String,
+    project_id: String,
+    target_kind: String,
+    target_ref: Option<String>,
+    title: String,
+    director_agent_code: String,
+    focus_agent_code: Option<String>,
+    status: String,
+    turn: u64,
+    created_at: i64,
+    updated_at: i64
+});
 game_dto!(GameMessage {
     id: String,
+    turn: u64,
     role: String,
+    content: String,
+    agent_code: String,
+    recipient_agent_code: Option<String>,
+    status: String,
+    token_count: u64,
+    folded: bool,
+    attachments: Vec<serde_json::Value>,
+    action: Option<serde_json::Value>,
+    created_at: i64
+});
+game_dto!(GameArtifactDraft {
+    id: String,
+    conversation_id: String,
+    target_path: String,
+    content: String,
+    based_on_hash: Option<String>,
+    status: String,
+    created_at: i64
+});
+game_dto!(GameConversationMemory {
+    id: String,
+    conversation_id: String,
+    scope: String,
+    kind: String,
     content: String,
     created_at: i64
 });
-game_dto!(GameFocusWorkflow {
-    id: String,
-    project_id: String,
+game_dto!(GameAgentHandoff {
+    id: i64,
     conversation_id: String,
-    state: String,
-    input_version: u64,
-    workflow_version: u64
+    turn: u64,
+    from_agent_code: String,
+    to_agent_code: String,
+    source: String,
+    reason: String,
+    status: String,
+    created_at: i64
 });
 game_dto!(GameArtBibleVersion {
     id: String,
@@ -91,44 +132,60 @@ game_dto!(GameTask {
     agent_code: String,
     status: String
 });
-game_dto!(GameReviewReport {
-    agent_code: String,
-    findings: Vec<String>,
-    risks: Vec<String>,
-    recommendations: Vec<String>
-});
-game_dto!(GameConflict {
-    key: String,
-    description: String,
-    options: Vec<String>,
-    high_impact: bool
-});
-game_dto!(GameWorkflowUpdatedNotification {
-    workflow: GameFocusWorkflow
-});
 game_dto!(GameTaskUpdatedNotification {
     conversation_id: String,
     task_id: String,
     status: String
 });
 game_dto!(GameAttemptUpdatedNotification { conversation_id: String, task_id: String, attempt_id: String, turn_id: Option<String>, status: String });
+game_dto!(GameConversationTurnNotification {
+    conversation_id: String,
+    status: String
+});
+game_dto!(GameConversationDeltaNotification {
+    conversation_id: String,
+    turn_id: String,
+    agent_code: String,
+    delta: String
+});
+game_dto!(GameConversationActorNotification { conversation_id: String, turn_id: Option<String>, agent_code: String, status: String });
+game_dto!(GameConversationFocusNotification {
+    conversation_id: String,
+    agent_code: String
+});
+game_dto!(GameConversationErrorNotification { conversation_id: String, turn_id: Option<String>, message: String });
+game_dto!(GameAgentHandoffNotification {
+    conversation_id: String,
+    from_agent_code: String,
+    to_agent_code: String,
+    reason: String
+});
+game_dto!(GameCharacterUpdatedNotification {
+    character: GameCharacter
+});
+game_dto!(GameGenerationUpdatedNotification {
+    generation: GameGeneration
+});
 game_dto!(GameArtifactCommittedNotification {
     conversation_id: String,
     artifact_id: String,
     artifact_type: String
 });
-game_dto!(GameDesignConfirmationRequiredNotification {
-    conversation_id: String,
-    workflow_id: String,
-    conflict_count: u64
-});
 game_dto!(GameRecoveryStatusNotification {
     status: GameBackendStatus
 });
 
+game_dto!(GameProjectInspectParams { root: String });
+game_dto!(GameProjectInspectResponse {
+    root: String,
+    occupied: bool,
+    project_id: Option<String>,
+    supported: bool
+});
 game_dto!(GameProjectCreateParams {
-    name: String,
-    root: String
+    name: Option<String>,
+    root: String,
+    overwrite: Option<bool>
 });
 game_dto!(GameProjectCreateResponse {
     project: GameProject
@@ -143,79 +200,141 @@ game_dto!(GameProjectReadResponse {
 });
 empty_params!(GameProjectListParams);
 game_dto!(GameProjectListResponse { projects: Vec<GameProject> });
-game_dto!(GameProjectImportParams {
-    source: String,
-    destination: String
+game_dto!(GameProjectCommitArtBibleParams {
+    conversation_id: String,
+    draft_id: String
 });
-game_dto!(GameProjectImportResponse { project: GameProject, warnings: Vec<String> });
+game_dto!(GameProjectCommitArtBibleResponse {
+    version: GameArtBibleVersion,
+    markdown: String
+});
+game_dto!(GameProjectFinalizeParams {
+    project_id: String,
+    name: String,
+    code: String
+});
+game_dto!(GameProjectFinalizeResponse {
+    project: GameProject
+});
 
-game_dto!(GameConversationEnsureParams { project_id: String, target_id: Option<String> });
+game_dto!(GameConversationEnsureParams {
+    project_id: String,
+    target_kind: String,
+    target_ref: Option<String>,
+    title: Option<String>,
+    director_agent_code: Option<String>
+});
 game_dto!(GameConversationEnsureResponse {
     conversation: GameConversation
 });
 game_dto!(GameConversationSubmitParams {
     conversation_id: String,
-    content: String
+    content: String,
+    recipient_agent_code: Option<String>
 });
 game_dto!(GameConversationSubmitResponse {
-    message: GameMessage
+    conversation: GameConversation,
+    messages: Vec<GameMessage>,
+    drafts: Vec<GameArtifactDraft>,
+    memories: Vec<GameConversationMemory>,
+    handoffs: Vec<GameAgentHandoff>
 });
 game_dto!(GameConversationReadParams {
     conversation_id: String
 });
-game_dto!(GameConversationReadResponse { conversation: GameConversation, messages: Vec<GameMessage> });
-
-game_dto!(GameFocusStartParams {
+game_dto!(GameConversationReadResponse {
+    conversation: GameConversation,
+    messages: Vec<GameMessage>,
+    drafts: Vec<GameArtifactDraft>,
+    memories: Vec<GameConversationMemory>,
+    handoffs: Vec<GameAgentHandoff>
+});
+game_dto!(GameConversationInterruptParams {
     conversation_id: String
 });
-game_dto!(GameFocusStartResponse {
-    workflow: GameFocusWorkflow
-});
-game_dto!(GameFocusReadParams {
-    conversation_id: String
-});
-game_dto!(GameFocusReadResponse {
-    workflow: GameFocusWorkflow,
-    reviews: Vec<GameReviewReport>,
-    conflicts: Vec<GameConflict>,
-    art_bible_draft: Option<String>,
-    decisions: Vec<GameUserDecision>
-});
+empty_params!(GameConversationInterruptResponse);
+game_dto!(GameConversationCommitDraftsParams { conversation_id: String, draft_ids: Vec<String> });
+empty_params!(GameConversationCommitDraftsResponse);
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub enum GameFocusAction {
-    SubmitClarification,
-    AcceptBrief,
-    CompleteReviews,
-    CompleteMerge,
-    RecordConflictDecision,
-    ConfirmArtBible,
-    VersionArtBible,
-}
+game_dto!(GameCharacter {
+    id: String,
+    project_id: String,
+    name: String,
+    group: Option<String>,
+    dir_name: String,
+    state: String,
+    spec_path: Option<String>,
+    render_path: Option<String>,
+    view_paths: serde_json::Value,
+    hard_constraints: Vec<serde_json::Value>,
+    gate_spec_confirmed_at: Option<i64>,
+    gate_render_confirmed_at: Option<i64>,
+    gate_views_confirmed_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64
+});
+game_dto!(GameGeneration {
+    id: String,
+    project_id: String,
+    target_kind: String,
+    target_ref: String,
+    stage: String,
+    variant: Option<String>,
+    file_path: String,
+    file_hash: Option<String>,
+    is_final: bool,
+    source: String,
+    task_id: Option<String>,
+    asset_spec: serde_json::Value,
+    created_at: i64
+});
+game_dto!(GameCharacterCreateParams { project_id: String, name: String, group: Option<String>, overwrite: bool });
+game_dto!(GameCharacterCreateResponse {
+    character: GameCharacter
+});
+game_dto!(GameCharacterListParams { project_id: String });
+game_dto!(GameCharacterListResponse { characters: Vec<GameCharacter> });
+game_dto!(GameCharacterReadParams {
+    project_id: String,
+    character_id: String
+});
+game_dto!(GameCharacterReadResponse { character: GameCharacter, generations: Vec<GameGeneration> });
+game_dto!(GameCharacterConfirmSpecParams {
+    project_id: String,
+    character_id: String,
+    draft_id: String
+});
+game_dto!(GameCharacterRejectSpecParams {
+    project_id: String,
+    character_id: String,
+    reason: String
+});
+game_dto!(GameCharacterConfirmRenderParams {
+    project_id: String,
+    character_id: String,
+    generation_id: String
+});
+game_dto!(GameCharacterRejectRenderParams {
+    project_id: String,
+    character_id: String,
+    reason: String
+});
+game_dto!(GameCharacterConfirmViewsParams { project_id: String, character_id: String, generation_ids: Vec<String> });
+game_dto!(GameCharacterRejectViewsParams {
+    project_id: String,
+    character_id: String,
+    reason: String
+});
+game_dto!(GameCharacterResponse {
+    character: GameCharacter
+});
+game_dto!(GameGenerationRegisterParams { project_id: String, character_id: String, stage: String, variant: Option<String>, file_path: String, source: String, asset_spec: serde_json::Value });
+game_dto!(GameGenerationRegisterResponse {
+    generation: GameGeneration
+});
+game_dto!(GameGenerationListParams { project_id: String, character_id: String, stage: Option<String> });
+game_dto!(GameGenerationListResponse { generations: Vec<GameGeneration> });
 
-game_dto!(GameUserDecision {
-    conflict_key: String,
-    selected_option: String,
-    note: Option<String>
-});
-game_dto!(GameFocusDecideParams { conversation_id: String, expected_input_version: u64, action: GameFocusAction, art_bible_markdown: Option<String>, user_decision: Option<GameUserDecision> });
-game_dto!(GameFocusDecideResponse { workflow: GameFocusWorkflow, art_bible: Option<GameArtBibleVersion> });
-game_dto!(GameFocusRetryParams {
-    conversation_id: String,
-    expected_input_version: u64
-});
-game_dto!(GameFocusRetryResponse {
-    workflow: GameFocusWorkflow
-});
-game_dto!(GameFocusCancelParams {
-    conversation_id: String,
-    expected_input_version: u64
-});
-game_dto!(GameFocusCancelResponse {
-    workflow: GameFocusWorkflow
-});
 game_dto!(GameTaskListParams {
     conversation_id: String
 });
@@ -267,8 +386,20 @@ game_dto!(GameAiProvider {
 game_dto!(GameAiAgent {
     agent_code: String,
     role: String,
+    role_type: String,
     capability: String,
+    required_model_capability: String,
+    focusable: bool,
+    aliases: Vec<String>,
+    target_kinds: Vec<String>,
+    stages: Vec<String>,
+    max_turns: u32,
+    conversational: bool,
+    memory_scope: String,
+    context_budget: u32,
+    max_output_tokens: Option<u32>,
     output_contract: String,
+    allow_tools: Vec<String>,
     source_file: String,
     model_ids: Vec<String>
 });

@@ -1911,6 +1911,29 @@
       ],
       "type": "object"
     },
+    "GameAgentHandoffNotification": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "fromAgentCode": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "toAgentCode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "fromAgentCode",
+        "reason",
+        "toAgentCode"
+      ],
+      "type": "object"
+    },
     "GameArtifactCommittedNotification": {
       "properties": {
         "artifactId": {
@@ -1968,59 +1991,271 @@
       ],
       "type": "string"
     },
-    "GameDesignConfirmationRequiredNotification": {
+    "GameCharacter": {
       "properties": {
-        "conflictCount": {
-          "format": "uint64",
-          "minimum": 0.0,
+        "createdAt": {
+          "format": "int64",
           "type": "integer"
+        },
+        "dirName": {
+          "type": "string"
+        },
+        "gateRenderConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gateSpecConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gateViewsConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hardConstraints": {
+          "items": true,
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "renderPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "specPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "viewPaths": true
+      },
+      "required": [
+        "createdAt",
+        "dirName",
+        "hardConstraints",
+        "id",
+        "name",
+        "projectId",
+        "state",
+        "updatedAt",
+        "viewPaths"
+      ],
+      "type": "object"
+    },
+    "GameCharacterUpdatedNotification": {
+      "properties": {
+        "character": {
+          "$ref": "#/definitions/GameCharacter"
+        }
+      },
+      "required": [
+        "character"
+      ],
+      "type": "object"
+    },
+    "GameConversationActorNotification": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
         },
         "conversationId": {
           "type": "string"
         },
-        "workflowId": {
+        "status": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agentCode",
+        "conversationId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "GameConversationDeltaNotification": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "turnId": {
           "type": "string"
         }
       },
       "required": [
-        "conflictCount",
+        "agentCode",
         "conversationId",
-        "workflowId"
+        "delta",
+        "turnId"
       ],
       "type": "object"
     },
-    "GameFocusWorkflow": {
+    "GameConversationErrorNotification": {
       "properties": {
         "conversationId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "message"
+      ],
+      "type": "object"
+    },
+    "GameConversationFocusNotification": {
+      "properties": {
+        "agentCode": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentCode",
+        "conversationId"
+      ],
+      "type": "object"
+    },
+    "GameConversationTurnNotification": {
+      "properties": {
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "GameGeneration": {
+      "properties": {
+        "assetSpec": true,
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "fileHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filePath": {
           "type": "string"
         },
         "id": {
           "type": "string"
         },
-        "inputVersion": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
+        "isFinal": {
+          "type": "boolean"
         },
         "projectId": {
           "type": "string"
         },
-        "state": {
+        "source": {
           "type": "string"
         },
-        "workflowVersion": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
+        "stage": {
+          "type": "string"
+        },
+        "targetKind": {
+          "type": "string"
+        },
+        "targetRef": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variant": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "conversationId",
+        "assetSpec",
+        "createdAt",
+        "filePath",
         "id",
-        "inputVersion",
+        "isFinal",
         "projectId",
-        "state",
-        "workflowVersion"
+        "source",
+        "stage",
+        "targetKind",
+        "targetRef"
+      ],
+      "type": "object"
+    },
+    "GameGenerationUpdatedNotification": {
+      "properties": {
+        "generation": {
+          "$ref": "#/definitions/GameGeneration"
+        }
+      },
+      "required": [
+        "generation"
       ],
       "type": "object"
     },
@@ -2051,17 +2286,6 @@
         "conversationId",
         "status",
         "taskId"
-      ],
-      "type": "object"
-    },
-    "GameWorkflowUpdatedNotification": {
-      "properties": {
-        "workflow": {
-          "$ref": "#/definitions/GameFocusWorkflow"
-        }
-      },
-      "required": [
-        "workflow"
       ],
       "type": "object"
     },
@@ -7143,20 +7367,160 @@
       "properties": {
         "method": {
           "enum": [
-            "game/workflow/updated"
+            "game/conversation/turn"
           ],
-          "title": "Game/workflow/updatedNotificationMethod",
+          "title": "Game/conversation/turnNotificationMethod",
           "type": "string"
         },
         "params": {
-          "$ref": "#/definitions/GameWorkflowUpdatedNotification"
+          "$ref": "#/definitions/GameConversationTurnNotification"
         }
       },
       "required": [
         "method",
         "params"
       ],
-      "title": "Game/workflow/updatedNotification",
+      "title": "Game/conversation/turnNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/conversation/delta"
+          ],
+          "title": "Game/conversation/deltaNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameConversationDeltaNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/conversation/deltaNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/conversation/actor"
+          ],
+          "title": "Game/conversation/actorNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameConversationActorNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/conversation/actorNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/conversation/focus"
+          ],
+          "title": "Game/conversation/focusNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameConversationFocusNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/conversation/focusNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/conversation/error"
+          ],
+          "title": "Game/conversation/errorNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameConversationErrorNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/conversation/errorNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/conversation/handoff"
+          ],
+          "title": "Game/conversation/handoffNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameAgentHandoffNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/conversation/handoffNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/character/updated"
+          ],
+          "title": "Game/character/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameCharacterUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/character/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/generation/updated"
+          ],
+          "title": "Game/generation/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameGenerationUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/generation/updatedNotification",
       "type": "object"
     },
     {
@@ -7217,26 +7581,6 @@
         "params"
       ],
       "title": "Game/artifact/committedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
-            "game/designConfirmation/required"
-          ],
-          "title": "Game/designConfirmation/requiredNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/GameDesignConfirmationRequiredNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "Game/designConfirmation/requiredNotification",
       "type": "object"
     },
     {

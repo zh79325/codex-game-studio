@@ -1052,6 +1052,10 @@ impl MessageProcessor {
             ClientRequest::GamePing { params, .. } => {
                 Ok(Some(self.game_processor.ping(params).into()))
             }
+            ClientRequest::GameProjectInspect { params, .. } => self
+                .game_processor
+                .project_inspect(params)
+                .map(|response| Some(response.into())),
             ClientRequest::GameProjectCreate { params, .. } => self
                 .game_processor
                 .project_create(params)
@@ -1071,9 +1075,14 @@ impl MessageProcessor {
                 .project_list(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameProjectImport { params, .. } => self
+            ClientRequest::GameProjectCommitArtBible { params, .. } => self
                 .game_processor
-                .project_import(params)
+                .project_commit_art_bible(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameProjectFinalize { params, .. } => self
+                .game_processor
+                .project_finalize(params)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::GameConversationEnsure { params, .. } => self
@@ -1089,30 +1098,71 @@ impl MessageProcessor {
             ClientRequest::GameConversationRead { params, .. } => self
                 .game_processor
                 .conversation_read(params)
-                .map(|response| Some(response.into())),
-            ClientRequest::GameFocusStart { params, .. } => self
-                .game_processor
-                .focus_start(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameFocusRead { params, .. } => self
+            ClientRequest::GameConversationInterrupt { params, .. } => self
                 .game_processor
-                .focus_read(params)
+                .conversation_interrupt(connection_id, params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameFocusDecide { params, .. } => self
+            ClientRequest::GameConversationCommitDrafts { params, .. } => self
                 .game_processor
-                .focus_decide(connection_id, params)
+                .conversation_commit_drafts(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameFocusRetry { params, .. } => self
+            ClientRequest::GameCharacterCreate { params, .. } => self
                 .game_processor
-                .focus_retry(connection_id, params)
+                .character_create(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::GameFocusCancel { params, .. } => self
+            ClientRequest::GameCharacterList { params, .. } => self
                 .game_processor
-                .focus_cancel(connection_id, params)
+                .character_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterRead { params, .. } => self
+                .game_processor
+                .character_read(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterConfirmSpec { params, .. } => self
+                .game_processor
+                .character_confirm_spec(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterConfirmSpec(response))),
+            ClientRequest::GameCharacterRejectSpec { params, .. } => self
+                .game_processor
+                .character_reject_spec(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterRejectSpec(response))),
+            ClientRequest::GameCharacterConfirmRender { params, .. } => self
+                .game_processor
+                .character_confirm_render(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterConfirmRender(response))),
+            ClientRequest::GameCharacterRejectRender { params, .. } => self
+                .game_processor
+                .character_reject_render(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterRejectRender(response))),
+            ClientRequest::GameCharacterConfirmViews { params, .. } => self
+                .game_processor
+                .character_confirm_views(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterConfirmViews(response))),
+            ClientRequest::GameCharacterRejectViews { params, .. } => self
+                .game_processor
+                .character_reject_views(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterRejectViews(response))),
+            ClientRequest::GameGenerationRegister { params, .. } => self
+                .game_processor
+                .generation_register(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameGenerationList { params, .. } => self
+                .game_processor
+                .generation_list(params)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::GameTaskList { params, .. } => self

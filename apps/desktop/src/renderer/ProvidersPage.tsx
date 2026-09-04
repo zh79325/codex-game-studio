@@ -83,7 +83,14 @@ type PresetModelValues = ProviderPresetModel & {
 
 type ProviderValues = Pick<
   AiProvider,
-  "code" | "name" | "baseUrl" | "driver" | "authStyle" | "priority" | "enabled" | "remark"
+  | "code"
+  | "name"
+  | "baseUrl"
+  | "driver"
+  | "authStyle"
+  | "priority"
+  | "enabled"
+  | "remark"
 > & {
   presetCode?: string;
   apiKey?: string;
@@ -187,7 +194,10 @@ export default function ProvidersPage() {
       for (const model of values.presetModels ?? []) {
         if (!selectedIds.has(model.id)) continue;
         for (const agentCode of model.agentCodes) {
-          bindingMap.set(agentCode, [...(bindingMap.get(agentCode) ?? []), model.id]);
+          bindingMap.set(agentCode, [
+            ...(bindingMap.get(agentCode) ?? []),
+            model.id,
+          ]);
         }
       }
       const agentBindings: AiAgentBinding[] = [...bindingMap].map(
@@ -200,7 +210,9 @@ export default function ProvidersPage() {
       );
     },
     onSuccess: async () => {
-      message.success(providerEditing ? "Provider 已更新" : "Provider 套餐已创建");
+      message.success(
+        providerEditing ? "Provider 已更新" : "Provider 套餐已创建",
+      );
       setProviderOpen(false);
       await refresh();
     },
@@ -322,7 +334,9 @@ export default function ProvidersPage() {
         maxValue: null,
         periodExpr: model.defaultPeriod,
         agentCodes: (agents.data ?? [])
-          .filter((agent) => model.capabilities.includes(agent.capability))
+          .filter((agent) =>
+            model.capabilities.includes(agent.requiredModelCapability),
+          )
           .map((agent) => agent.agentCode),
       })),
     });
@@ -382,13 +396,16 @@ export default function ProvidersPage() {
         title: "能力",
         render: (_, model) => (
           <Space wrap>
-            {model.capabilities.map((item) => <Tag key={item}>{item}</Tag>)}
+            {model.capabilities.map((item) => (
+              <Tag key={item}>{item}</Tag>
+            ))}
           </Space>
         ),
       },
       {
         title: "限额",
-        render: (_, model) => model.limits.length ? `${model.limits.length} 项` : "不限量",
+        render: (_, model) =>
+          model.limits.length ? `${model.limits.length} 项` : "不限量",
       },
       {
         title: "启用",
@@ -413,7 +430,9 @@ export default function ProvidersPage() {
               disabled={!canWrite}
               onClick={() =>
                 openModel(
-                  providers.data!.find((item) => item.code === model.providerCode)!,
+                  providers.data!.find(
+                    (item) => item.code === model.providerCode,
+                  )!,
                   model,
                 )
               }
@@ -422,7 +441,12 @@ export default function ProvidersPage() {
               title="删除该模型？"
               onConfirm={() => removeModel.mutate(model.id)}
             >
-              <Button type="text" danger icon={<DeleteOutlined />} disabled={!canWrite} />
+              <Button
+                type="text"
+                danger
+                icon={<DeleteOutlined />}
+                disabled={!canWrite}
+              />
             </Popconfirm>
           </Space>
         ),
@@ -437,11 +461,14 @@ export default function ProvidersPage() {
         <div>
           <Typography.Title level={2}>Provider 与模型</Typography.Title>
           <Typography.Text type="secondary">
-            从公共套餐预置创建账号；私有配置与 API Key 仅保存在 .codex-game/local。
+            从公共套餐预置创建账号；私有配置与 API Key 仅保存在
+            .codex-game/local。
           </Typography.Text>
         </div>
         <Space wrap>
-          <Button icon={<ExportOutlined />} onClick={() => void exportConfig()}>导出配置</Button>
+          <Button icon={<ExportOutlined />} onClick={() => void exportConfig()}>
+            导出配置
+          </Button>
           <Button
             icon={<ImportOutlined />}
             disabled={!canWrite}
@@ -476,42 +503,57 @@ export default function ProvidersPage() {
           <Card
             key={provider.code}
             className="content-card"
-            title={(
+            title={
               <Space>
                 <ApiOutlined />
                 <span>{provider.name}</span>
                 <Tag>{provider.code}</Tag>
-                {provider.hasKey
-                  ? <Tag color="success">Key {provider.keyMask}</Tag>
-                  : <Tag color="warning">未配置 Key</Tag>}
+                {provider.hasKey ? (
+                  <Tag color="success">Key {provider.keyMask}</Tag>
+                ) : (
+                  <Tag color="warning">未配置 Key</Tag>
+                )}
               </Space>
-            )}
-            extra={(
+            }
+            extra={
               <Space>
                 <Switch
                   checked={provider.enabled}
                   disabled={!canWrite}
                   onChange={() => toggleProvider.mutate(provider)}
                 />
-                <Button icon={<PlusOutlined />} disabled={!canWrite} onClick={() => openModel(provider)}>
+                <Button
+                  icon={<PlusOutlined />}
+                  disabled={!canWrite}
+                  onClick={() => openModel(provider)}
+                >
                   添加模型
                 </Button>
-                <Button icon={<EditOutlined />} disabled={!canWrite} onClick={() => openProvider(provider)}>
+                <Button
+                  icon={<EditOutlined />}
+                  disabled={!canWrite}
+                  onClick={() => openProvider(provider)}
+                >
                   编辑
                 </Button>
                 <Popconfirm
                   title="删除 Provider 及其模型？"
                   onConfirm={() => removeProvider.mutate(provider.code)}
                 >
-                  <Button danger icon={<DeleteOutlined />} disabled={!canWrite}>删除</Button>
+                  <Button danger icon={<DeleteOutlined />} disabled={!canWrite}>
+                    删除
+                  </Button>
                 </Popconfirm>
               </Space>
-            )}
+            }
           >
             <Typography.Paragraph type="secondary">
-              {provider.driver} · {provider.authStyle} · 优先级 {provider.priority} · {provider.baseUrl || "默认 Base URL"}
+              {provider.driver} · {provider.authStyle} · 优先级{" "}
+              {provider.priority} · {provider.baseUrl || "默认 Base URL"}
             </Typography.Paragraph>
-            {provider.remark && <Typography.Paragraph>{provider.remark}</Typography.Paragraph>}
+            {provider.remark && (
+              <Typography.Paragraph>{provider.remark}</Typography.Paragraph>
+            )}
             <Table
               rowKey="id"
               size="small"
@@ -523,7 +565,11 @@ export default function ProvidersPage() {
           </Card>
         ))}
         {!providers.isLoading && !providers.data?.length && (
-          <Card><Typography.Text type="secondary">尚未配置 Provider，请从套餐预置创建账号。</Typography.Text></Card>
+          <Card>
+            <Typography.Text type="secondary">
+              尚未配置 Provider，请从套餐预置创建账号。
+            </Typography.Text>
+          </Card>
         )}
       </Space>
 
@@ -589,13 +635,24 @@ export default function ProvidersPage() {
             </Form.Item>
           </Space>
           <Form.Item name="baseUrl" label="Base URL">
-            <Input readOnly={Boolean(selectedPreset)} placeholder="https://api.example.com" />
+            <Input
+              readOnly={Boolean(selectedPreset)}
+              placeholder="https://api.example.com"
+            />
           </Form.Item>
           <Space className="form-row" align="start" wrap>
-            <Form.Item name="driver" label="Driver" rules={[{ required: true }]}>
+            <Form.Item
+              name="driver"
+              label="Driver"
+              rules={[{ required: true }]}
+            >
               <Input readOnly={Boolean(selectedPreset)} />
             </Form.Item>
-            <Form.Item name="authStyle" label="鉴权方式" rules={[{ required: true }]}>
+            <Form.Item
+              name="authStyle"
+              label="鉴权方式"
+              rules={[{ required: true }]}
+            >
               <Select
                 disabled={Boolean(selectedPreset)}
                 options={[
@@ -624,7 +681,8 @@ export default function ProvidersPage() {
             <>
               <Typography.Title level={5}>模型与额度</Typography.Title>
               <Typography.Paragraph type="secondary">
-                模型默认全选；额度留空表示不创建限制记录。能力匹配的 Agent 会自动绑定。
+                模型默认全选；额度留空表示不创建限制记录。能力匹配的 Agent
+                会自动绑定。
               </Typography.Paragraph>
               <Form.List name="presetModels">
                 {(fields) => (
@@ -642,23 +700,35 @@ export default function ProvidersPage() {
                             >
                               <Checkbox />
                             </Form.Item>
-                            <Space direction="vertical" size={2} style={{ width: 350 }}>
+                            <Space
+                              direction="vertical"
+                              size={2}
+                              style={{ width: 350 }}
+                            >
                               <Tooltip title={row.remark}>
-                                <Typography.Text strong>{row.modelId}</Typography.Text>
+                                <Typography.Text strong>
+                                  {row.modelId}
+                                </Typography.Text>
                               </Tooltip>
                               <Typography.Text type="secondary">
                                 {row.driver} · {row.apiPath}
                               </Typography.Text>
-                              <Typography.Text type="secondary">{row.remark}</Typography.Text>
+                              <Typography.Text type="secondary">
+                                {row.remark}
+                              </Typography.Text>
                               <Space wrap size={2}>
                                 {row.capabilities.map((capability) => (
                                   <Tag key={capability}>{capability}</Tag>
                                 ))}
                                 {contextWindow(row.paramsJson) && (
-                                  <Tag>context {contextWindow(row.paramsJson)}</Tag>
+                                  <Tag>
+                                    context {contextWindow(row.paramsJson)}
+                                  </Tag>
                                 )}
                                 {unsupportedDrivers.has(row.driver) && (
-                                  <Tag color="warning">仅配置，执行器待接入</Tag>
+                                  <Tag color="warning">
+                                    仅配置，执行器待接入
+                                  </Tag>
                                 )}
                               </Space>
                               {row.agentCodes.length > 0 && (
@@ -674,7 +744,9 @@ export default function ProvidersPage() {
                               <InputNumber
                                 min={0}
                                 placeholder="不限量"
-                                addonAfter={limitUnits[row.limitKind] ?? row.limitKind}
+                                addonAfter={
+                                  limitUnits[row.limitKind] ?? row.limitKind
+                                }
                               />
                             </Form.Item>
                             <Form.Item
@@ -704,39 +776,81 @@ export default function ProvidersPage() {
         onCancel={() => setModelOpen(false)}
         onOk={() => modelForm.submit()}
       >
-        <Form form={modelForm} layout="vertical" onFinish={(values) => saveModel.mutate(values)}>
-          <Form.Item name="id" hidden><Input /></Form.Item>
+        <Form
+          form={modelForm}
+          layout="vertical"
+          onFinish={(values) => saveModel.mutate(values)}
+        >
+          <Form.Item name="id" hidden>
+            <Input />
+          </Form.Item>
           <Space className="form-row" align="start">
-            <Form.Item name="modelId" label="模型 ID" rules={[{ required: true }]}><Input /></Form.Item>
-            <Form.Item name="displayName" label="展示名" rules={[{ required: true }]}><Input /></Form.Item>
+            <Form.Item
+              name="modelId"
+              label="模型 ID"
+              rules={[{ required: true }]}
+            >
+              <Input />
+            </Form.Item>
+            <Form.Item
+              name="displayName"
+              label="展示名"
+              rules={[{ required: true }]}
+            >
+              <Input />
+            </Form.Item>
           </Space>
-          <Form.Item name="capabilities" label="能力" rules={[{ required: true }]}>
+          <Form.Item
+            name="capabilities"
+            label="能力"
+            rules={[{ required: true }]}
+          >
             <Select mode="multiple" options={capabilityOptions} />
           </Form.Item>
           <Space className="form-row" align="start">
-            <Form.Item name="driver" label="Driver" rules={[{ required: true }]}><Input /></Form.Item>
-            <Form.Item name="apiPath" label="API Path"><Input /></Form.Item>
-            <Form.Item name="sortNo" label="排序"><InputNumber /></Form.Item>
-            <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+            <Form.Item
+              name="driver"
+              label="Driver"
+              rules={[{ required: true }]}
+            >
+              <Input />
+            </Form.Item>
+            <Form.Item name="apiPath" label="API Path">
+              <Input />
+            </Form.Item>
+            <Form.Item name="sortNo" label="排序">
+              <InputNumber />
+            </Form.Item>
+            <Form.Item name="enabled" label="启用" valuePropName="checked">
+              <Switch />
+            </Form.Item>
           </Space>
           <Form.Item
             name="paramsJson"
             label="参数 JSON"
-            rules={[{
-              validator: (_, value) => {
-                try {
-                  JSON.parse(value || "{}");
-                  return Promise.resolve();
-                } catch {
-                  return Promise.reject(new Error("请输入合法 JSON"));
-                }
+            rules={[
+              {
+                validator: (_, value) => {
+                  try {
+                    JSON.parse(value || "{}");
+                    return Promise.resolve();
+                  } catch {
+                    return Promise.reject(new Error("请输入合法 JSON"));
+                  }
+                },
               },
-            }]}
+            ]}
           >
             <Input.TextArea rows={3} />
           </Form.Item>
-          <Form.Item name="remark" label="备注"><Input /></Form.Item>
-          <Collapse items={[{ key: "limits", label: "模型限额", children: <LimitFields /> }]} />
+          <Form.Item name="remark" label="备注">
+            <Input />
+          </Form.Item>
+          <Collapse
+            items={[
+              { key: "limits", label: "模型限额", children: <LimitFields /> },
+            ]}
+          />
         </Form>
       </Modal>
 
@@ -748,21 +862,35 @@ export default function ProvidersPage() {
           setTransferMode(undefined);
           setImportPreview(undefined);
         }}
-        footer={transferMode === "import" ? (
-          <Space>
-            <Button onClick={() => setTransferMode(undefined)}>取消</Button>
-            <Button onClick={() => void previewImport().catch((error: Error) => message.error(error.message))}>
-              校验预览
-            </Button>
-            <Button
-              type="primary"
-              disabled={!importPreview}
-              onClick={() => void applyImport().catch((error: Error) => message.error(error.message))}
-            >
-              确认覆盖
-            </Button>
-          </Space>
-        ) : <Button onClick={() => setTransferMode(undefined)}>关闭</Button>}
+        footer={
+          transferMode === "import" ? (
+            <Space>
+              <Button onClick={() => setTransferMode(undefined)}>取消</Button>
+              <Button
+                onClick={() =>
+                  void previewImport().catch((error: Error) =>
+                    message.error(error.message),
+                  )
+                }
+              >
+                校验预览
+              </Button>
+              <Button
+                type="primary"
+                disabled={!importPreview}
+                onClick={() =>
+                  void applyImport().catch((error: Error) =>
+                    message.error(error.message),
+                  )
+                }
+              >
+                确认覆盖
+              </Button>
+            </Space>
+          ) : (
+            <Button onClick={() => setTransferMode(undefined)}>关闭</Button>
+          )
+        }
       >
         <Alert type="warning" showIcon message="导入导出不包含任何 API Key" />
         {importPreview && (
@@ -806,34 +934,53 @@ function LimitFields() {
         <Space direction="vertical" className="workspace-main">
           {fields.map((field) => (
             <Space key={field.key} align="start" wrap>
-              <Form.Item name={[field.name, "limitKind"]} rules={[{ required: true }]}>
+              <Form.Item
+                name={[field.name, "limitKind"]}
+                rules={[{ required: true }]}
+              >
                 <Select
                   placeholder="口径"
                   options={limitKinds.map((value) => ({ value, label: value }))}
                   style={{ width: 150 }}
                 />
               </Form.Item>
-              <Form.Item name={[field.name, "maxValue"]} rules={[{ required: true }]}>
+              <Form.Item
+                name={[field.name, "maxValue"]}
+                rules={[{ required: true }]}
+              >
                 <InputNumber min={0} placeholder="0 为不限" />
               </Form.Item>
-              <Form.Item name={[field.name, "periodExpr"]} rules={[{ required: true }]}>
+              <Form.Item
+                name={[field.name, "periodExpr"]}
+                rules={[{ required: true }]}
+              >
                 <Input placeholder="例如 day+11H" />
               </Form.Item>
-              <Form.Item name={[field.name, "groupName"]} rules={[{ required: true }]}>
+              <Form.Item
+                name={[field.name, "groupName"]}
+                rules={[{ required: true }]}
+              >
                 <Input placeholder="共享组" />
               </Form.Item>
-              <Button danger type="text" icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
+              <Button
+                danger
+                type="text"
+                icon={<DeleteOutlined />}
+                onClick={() => remove(field.name)}
+              />
             </Space>
           ))}
           <Button
             type="dashed"
             icon={<PlusOutlined />}
-            onClick={() => add({
-              limitKind: "calls",
-              maxValue: 0,
-              periodExpr: "day",
-              groupName: "default",
-            })}
+            onClick={() =>
+              add({
+                limitKind: "calls",
+                maxValue: 0,
+                periodExpr: "day",
+                groupName: "default",
+              })
+            }
           >
             增加限额
           </Button>

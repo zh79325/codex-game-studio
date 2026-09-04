@@ -75,13 +75,58 @@ fn default_auth_style() -> String {
     "bearer".to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCapability {
+    Text,
+    T2i,
+    I2i,
+    Vision,
+    Model3d,
+    T2v,
+    I2v,
+}
+
+impl AgentCapability {
+    pub fn required_model_capability(self) -> AiCapability {
+        match self {
+            Self::Text => AiCapability::TextStructuredOutput,
+            Self::T2i => AiCapability::ImageTextToImage,
+            Self::I2i => AiCapability::ImageImageToImage,
+            Self::Vision => AiCapability::VisionAnalysis,
+            Self::Model3d => AiCapability::Model3d,
+            Self::T2v => AiCapability::VideoTextToVideo,
+            Self::I2v => AiCapability::VideoImageToVideo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRoleType {
+    Director,
+    Specialist,
+    Executor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
     pub agent_code: String,
     pub role: String,
-    pub capability: AiCapability,
+    pub role_type: AgentRoleType,
+    pub capability: AgentCapability,
+    pub focusable: bool,
+    pub aliases: Vec<String>,
+    pub target_kinds: Vec<String>,
+    pub stages: Vec<String>,
+    pub max_turns: u32,
+    pub conversational: bool,
+    pub memory_scope: String,
+    pub context_budget: u32,
+    pub max_output_tokens: Option<u32>,
     pub output_contract: String,
+    pub allow_tools: Vec<String>,
     pub source_file: String,
     pub model_ids: Vec<String>,
 }

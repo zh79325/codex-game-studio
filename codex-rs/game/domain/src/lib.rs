@@ -1,14 +1,16 @@
+mod action;
 mod ai_config;
-mod artifacts;
+mod character;
+mod conversation;
 mod entities;
 mod ids;
-mod workflow;
 
+pub use action::*;
 pub use ai_config::*;
-pub use artifacts::*;
+pub use character::*;
+pub use conversation::*;
 pub use entities::*;
 pub use ids::*;
-pub use workflow::*;
 
 /// Current lifecycle state of the game backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

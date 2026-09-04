@@ -8,7 +8,12 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Layout, Menu, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Outlet, useLocation, useNavigate, useOutletContext } from "react-router-dom";
+import {
+  Outlet,
+  useLocation,
+  useNavigate,
+  useOutletContext,
+} from "react-router-dom";
 import type { BackendState } from "../shared/ipc";
 import type { Project } from "./types";
 
@@ -41,12 +46,6 @@ export default function AppShell() {
     });
     const removeEvent = window.codexGame.onEvent((event) => {
       if (typeof event === "object" && event && "method" in event) {
-        if (event.method === "game/designConfirmation/required") {
-          void window.codexGame.notify(
-            "需要设计确认",
-            "Art Bible 草案包含高影响冲突，请返回应用完成决策。",
-          );
-        }
         if (String(event.method).startsWith("game/")) {
           void queryClient.invalidateQueries();
         }
@@ -89,7 +88,8 @@ export default function AppShell() {
       ? "agents"
       : location.pathname.startsWith("/ai/usage")
         ? "usage"
-        : location.pathname.includes("/workspace")
+        : location.pathname.includes("/workspace") ||
+            location.pathname.includes("/characters/")
           ? "workspace"
           : "projects";
 
@@ -126,9 +126,17 @@ export default function AppShell() {
               icon: <SettingOutlined />,
               label: "AI 配置",
               children: [
-                { key: "providers", icon: <ApiOutlined />, label: "Provider 与模型" },
+                {
+                  key: "providers",
+                  icon: <ApiOutlined />,
+                  label: "Provider 与模型",
+                },
                 { key: "agents", icon: <RobotOutlined />, label: "Agent 配置" },
-                { key: "usage", icon: <DashboardOutlined />, label: "额度看板" },
+                {
+                  key: "usage",
+                  icon: <DashboardOutlined />,
+                  label: "额度看板",
+                },
               ],
             },
           ]}

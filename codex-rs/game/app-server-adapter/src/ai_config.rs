@@ -1,6 +1,8 @@
 use super::GameAppServerAdapter;
 use codex_game_app_server_protocol::*;
+use codex_game_domain::AgentCapability;
 use codex_game_domain::AgentDefinition;
+use codex_game_domain::AgentRoleType;
 use codex_game_domain::AiCapability;
 use codex_game_domain::AiProvider;
 use codex_game_domain::LimitKind;
@@ -8,6 +10,7 @@ use codex_game_domain::LimitPolicy;
 use codex_game_domain::ProviderModel;
 use codex_game_domain::ProviderPreset;
 use codex_game_domain::ProviderPresetModel;
+use codex_game_runtime::bundled_agent_definitions;
 use codex_game_store::clear_ai_breaker;
 use codex_game_store::create_ai_provider_configuration;
 use codex_game_store::delete_ai_model;
@@ -188,7 +191,7 @@ impl GameAppServerAdapter {
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
-        let agents = agent_definitions()
+        let agents = agent_definitions()?
             .into_iter()
             .map(|mut agent| {
                 agent.model_ids = bindings.get(&agent.agent_code).cloned().unwrap_or_default();
@@ -202,7 +205,7 @@ impl GameAppServerAdapter {
         &self,
         params: GameAiAgentBindingWriteParams,
     ) -> Result<GameAiAgentBindingWriteResponse, String> {
-        if !agent_definitions()
+        if !agent_definitions()?
             .iter()
             .any(|agent| agent.agent_code == params.agent_code)
         {
@@ -515,7 +518,7 @@ fn validate_create_bindings(
     provider: &AiProvider,
     bindings: Vec<GameAiAgentBinding>,
 ) -> Result<HashMap<String, Vec<String>>, String> {
-    let known_agents = agent_definitions()
+    let known_agents = agent_definitions()?
         .into_iter()
         .map(|agent| agent.agent_code)
         .collect::<HashSet<_>>();
@@ -617,7 +620,7 @@ fn responses_base_url(provider: &AiProvider) -> Option<String> {
 }
 
 fn validate_import_bundle(bundle: &ExportedAiConfig) -> Result<(), String> {
-    let known_agents = agent_definitions()
+    let known_agents = agent_definitions()?
         .into_iter()
         .map(|agent| agent.agent_code)
         .collect::<HashSet<_>>();
@@ -790,11 +793,24 @@ fn model_dto(model: ProviderModel) -> GameAiModel {
 }
 
 fn agent_dto(agent: AgentDefinition) -> GameAiAgent {
+    let required_model_capability = agent.capability.required_model_capability();
     GameAiAgent {
         agent_code: agent.agent_code,
         role: agent.role,
-        capability: capability_name(&agent.capability),
+        role_type: agent_role_type_name(&agent.role_type).to_string(),
+        capability: agent_capability_name(&agent.capability).to_string(),
+        required_model_capability: capability_name(&required_model_capability),
+        focusable: agent.focusable,
+        aliases: agent.aliases,
+        target_kinds: agent.target_kinds,
+        stages: agent.stages,
+        max_turns: agent.max_turns,
+        conversational: agent.conversational,
+        memory_scope: agent.memory_scope,
+        context_budget: agent.context_budget,
+        max_output_tokens: agent.max_output_tokens,
         output_contract: agent.output_contract,
+        allow_tools: agent.allow_tools,
         source_file: agent.source_file,
         model_ids: agent.model_ids,
     }
@@ -885,6 +901,26 @@ fn parse_capability(value: &str) -> Result<AiCapability, String> {
     }
 }
 
+fn agent_capability_name(capability: &AgentCapability) -> &'static str {
+    match capability {
+        AgentCapability::Text => "text",
+        AgentCapability::T2i => "t2i",
+        AgentCapability::I2i => "i2i",
+        AgentCapability::Vision => "vision",
+        AgentCapability::Model3d => "model3d",
+        AgentCapability::T2v => "t2v",
+        AgentCapability::I2v => "i2v",
+    }
+}
+
+fn agent_role_type_name(role_type: &AgentRoleType) -> &'static str {
+    match role_type {
+        AgentRoleType::Director => "director",
+        AgentRoleType::Specialist => "specialist",
+        AgentRoleType::Executor => "executor",
+    }
+}
+
 fn capability_name(capability: &AiCapability) -> String {
     match capability {
         AiCapability::TextReasoning => "text_reasoning",
@@ -946,36 +982,8 @@ fn mask_key(key: &str) -> String {
     format!("••••{suffix}")
 }
 
-fn agent_definitions() -> Vec<AgentDefinition> {
-    [
-        ("brief", "需求分析", AiCapability::TextReasoning),
-        (
-            "game-design-review",
-            "玩法设计评审",
-            AiCapability::TextStructuredOutput,
-        ),
-        (
-            "visual-style-review",
-            "视觉风格评审",
-            AiCapability::VisionAnalysis,
-        ),
-        (
-            "production-feasibility-review",
-            "制作可行性评审",
-            AiCapability::TextReasoning,
-        ),
-        ("synthesis", "方案综合", AiCapability::TextStructuredOutput),
-    ]
-    .into_iter()
-    .map(|(code, role, capability)| AgentDefinition {
-        agent_code: code.to_string(),
-        role: role.to_string(),
-        capability,
-        output_contract: "json_schema".to_string(),
-        source_file: format!("game/runtime/agents/{code}.md"),
-        model_ids: Vec::new(),
-    })
-    .collect()
+fn agent_definitions() -> Result<Vec<AgentDefinition>, String> {
+    bundled_agent_definitions()
 }
 
 #[cfg(unix)]

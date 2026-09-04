@@ -3335,6 +3335,7 @@ dependencies = [
  "codex-game-domain",
  "schemars 0.8.22",
  "serde",
+ "serde_json",
  "ts-rs",
 ]
 
@@ -3370,6 +3371,7 @@ dependencies = [
  "codex-game-store",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -3388,6 +3390,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

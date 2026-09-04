@@ -29,8 +29,28 @@ pub fn update_project_json(
         "projectId".to_string(),
         Value::String(project_id.to_string()),
     );
+    object.insert("schemaVersion".to_string(), Value::from(2));
     object.insert("name".to_string(), Value::String(name.to_string()));
     object.insert("state".to_string(), Value::String(state.to_string()));
+    let contents = serde_json::to_string_pretty(&document)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    write_atomically(path, &format!("{contents}\n"))
+}
+
+pub fn finalize_project_json(
+    path: &Path,
+    project_id: &str,
+    name: &str,
+    code: &str,
+) -> io::Result<()> {
+    update_project_json(path, project_id, name, "ready")?;
+    let contents = fs::read_to_string(path)?;
+    let mut document = serde_json::from_str::<Value>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "project.json must be an object"))?;
+    object.insert("code".to_string(), Value::String(code.to_string()));
     let contents = serde_json::to_string_pretty(&document)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     write_atomically(path, &format!("{contents}\n"))

@@ -18,7 +18,6 @@ use codex_game_domain::ContextPackage;
 use codex_game_domain::ConversationCodexThread;
 use codex_game_domain::ConversationCodexThreadId;
 use codex_game_domain::ConversationId;
-use codex_game_domain::FocusWorkflow;
 use codex_game_domain::Interaction;
 use codex_game_domain::InteractionId;
 use codex_game_domain::Task;
@@ -172,7 +171,7 @@ impl TaskOrchestrator {
             agent_code: request.agent_code.clone(),
             input_artifact_ids: Vec::new(),
             input_version: request.context.context_version,
-            workflow_version: request.context.workflow_version,
+            contract_version: request.context.contract_version,
             status: TaskStatus::Pending,
         };
         let mut attempt = TaskAttempt {
@@ -219,115 +218,6 @@ impl TaskOrchestrator {
                     .to_string(),
                 prompt: request.prompt,
                 context: request.context,
-            })
-            .await
-        {
-            Ok(turn) => turn,
-            Err(error) => {
-                if let Some(kind) = route_failure_kind(&error) {
-                    self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
-                        .await?;
-                }
-                store
-                    .mark_attempt_status(attempt.id.as_str(), TaskAttemptStatus::Failed)
-                    .await?;
-                return Err(error.into());
-            }
-        };
-        store
-            .bind_turn_to_attempt(attempt.id.as_str(), &turn.turn_id, now())
-            .await?;
-        task.status = TaskStatus::Running;
-        attempt.status = TaskAttemptStatus::Running;
-        attempt.codex_turn_id = Some(turn.turn_id);
-        Ok(TaskExecution {
-            task,
-            attempt,
-            binding,
-        })
-    }
-
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "serializes binding creation and turn start per conversation+agent"
-    )]
-    pub async fn retry<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
-        store: &ProjectStore,
-        project_root: String,
-        conversation_id: &str,
-        workflow: &FocusWorkflow,
-    ) -> Result<TaskExecution, OrchestrationError> {
-        let retryable = store
-            .latest_retryable_task(conversation_id)
-            .await?
-            .ok_or_else(|| StoreError::NotFound("retryable task".to_string()))?;
-        let mut context = retryable.context;
-        context.context_version = workflow.input_version;
-        context.workflow_version = workflow.workflow_version;
-        self.routes.reset_transient_failures()?;
-        let request = ExecuteTaskRequest {
-            project_root,
-            conversation_id: retryable.conversation_id,
-            target_id: retryable.task.target_id.clone(),
-            stage: retryable.task.stage.clone(),
-            agent_code: retryable.task.agent_code.clone(),
-            idempotency_key: format!(
-                "retry:{}:{}",
-                retryable.task.id.as_str(),
-                retryable.next_attempt_no
-            ),
-            prompt: retryable.prompt,
-            context: context.clone(),
-            capability: Capability::TextStructuredOutput,
-        };
-        let lock = self
-            .binding_lock(&request.conversation_id, &request.agent_code)
-            .await;
-        let _guard = lock.lock().await;
-        let (binding, route) = self.ensure_binding(execution, store, &request).await?;
-        let mut task = retryable.task;
-        task.input_version = workflow.input_version;
-        task.workflow_version = workflow.workflow_version;
-        task.status = TaskStatus::Pending;
-        let mut attempt = TaskAttempt {
-            id: TaskAttemptId::new(Uuid::now_v7().to_string()),
-            task_id: task.id.clone(),
-            attempt_no: retryable.next_attempt_no,
-            conversation_codex_thread_id: binding.id.clone(),
-            codex_turn_id: None,
-            output_artifact_id: None,
-            status: TaskAttemptStatus::Pending,
-        };
-        let (binding, route) = self
-            .reserve_usage_with_failover(
-                execution,
-                store,
-                &request,
-                attempt.id.as_str(),
-                binding,
-                route,
-            )
-            .await?;
-        attempt.conversation_codex_thread_id = binding.id.clone();
-        store
-            .create_retry_attempt(&task, &attempt, &context)
-            .await?;
-        let turn = match execution
-            .start_turn(StartTurnRequest {
-                thread_id: binding.codex_thread_id.clone(),
-                attempt_id: attempt.id.as_str().to_string(),
-                agent_definition: bundled_agent_definition(&request.agent_code)
-                    .ok_or_else(|| {
-                        ExecutionError::InvalidRequest(format!(
-                            "unknown game agent: {}",
-                            request.agent_code
-                        ))
-                    })?
-                    .to_string(),
-                prompt: request.prompt,
-                context,
             })
             .await
         {

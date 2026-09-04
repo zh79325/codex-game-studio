@@ -215,13 +215,15 @@ const RESTART_AFTER_METHODS = new Set([
 
 const READ_ONLY_METHODS = new Set([
   "game/ping",
+  "game/project/inspect",
   "game/project/create",
   "game/project/open",
   "game/project/read",
   "game/project/list",
-  "game/project/import",
   "game/conversation/read",
-  "game/focus/read",
+  "game/character/list",
+  "game/character/read",
+  "game/generation/list",
   "game/task/list",
   "game/artBible/list",
   "game/artBible/read",

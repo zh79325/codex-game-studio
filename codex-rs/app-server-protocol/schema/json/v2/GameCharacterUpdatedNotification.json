@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "GameCharacter": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "dirName": {
+          "type": "string"
+        },
+        "gateRenderConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gateSpecConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gateViewsConfirmedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hardConstraints": {
+          "items": true,
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "renderPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "specPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "viewPaths": true
+      },
+      "required": [
+        "createdAt",
+        "dirName",
+        "hardConstraints",
+        "id",
+        "name",
+        "projectId",
+        "state",
+        "updatedAt",
+        "viewPaths"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "character": {
+      "$ref": "#/definitions/GameCharacter"
+    }
+  },
+  "required": [
+    "character"
+  ],
+  "title": "GameCharacterUpdatedNotification",
+  "type": "object"
+}

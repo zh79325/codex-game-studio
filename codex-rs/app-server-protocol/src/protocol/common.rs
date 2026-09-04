@@ -515,6 +515,12 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GamePingResponse,
     },
+    #[experimental("game/project/inspect")]
+    GameProjectInspect => "game/project/inspect" {
+        params: v2::GameProjectInspectParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameProjectInspectResponse,
+    },
     #[experimental("game/project/create")]
     GameProjectCreate => "game/project/create" {
         params: v2::GameProjectCreateParams,
@@ -539,11 +545,17 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameProjectListResponse,
     },
-    #[experimental("game/project/import")]
-    GameProjectImport => "game/project/import" {
-        params: v2::GameProjectImportParams,
+    #[experimental("game/project/commitArtBible")]
+    GameProjectCommitArtBible => "game/project/commitArtBible" {
+        params: v2::GameProjectCommitArtBibleParams,
         serialization: global("game"),
-        response: v2::GameProjectImportResponse,
+        response: v2::GameProjectCommitArtBibleResponse,
+    },
+    #[experimental("game/project/finalize")]
+    GameProjectFinalize => "game/project/finalize" {
+        params: v2::GameProjectFinalizeParams,
+        serialization: global("game"),
+        response: v2::GameProjectFinalizeResponse,
     },
     #[experimental("game/conversation/ensure")]
     GameConversationEnsure => "game/conversation/ensure" {
@@ -563,35 +575,89 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameConversationReadResponse,
     },
-    #[experimental("game/focus/start")]
-    GameFocusStart => "game/focus/start" {
-        params: v2::GameFocusStartParams,
+    #[experimental("game/conversation/interrupt")]
+    GameConversationInterrupt => "game/conversation/interrupt" {
+        params: v2::GameConversationInterruptParams,
         serialization: global("game"),
-        response: v2::GameFocusStartResponse,
+        response: v2::GameConversationInterruptResponse,
     },
-    #[experimental("game/focus/read")]
-    GameFocusRead => "game/focus/read" {
-        params: v2::GameFocusReadParams,
+    #[experimental("game/conversation/commitDrafts")]
+    GameConversationCommitDrafts => "game/conversation/commitDrafts" {
+        params: v2::GameConversationCommitDraftsParams,
+        serialization: global("game"),
+        response: v2::GameConversationCommitDraftsResponse,
+    },
+    #[experimental("game/character/create")]
+    GameCharacterCreate => "game/character/create" {
+        params: v2::GameCharacterCreateParams,
+        serialization: global("game"),
+        response: v2::GameCharacterCreateResponse,
+    },
+    #[experimental("game/character/list")]
+    GameCharacterList => "game/character/list" {
+        params: v2::GameCharacterListParams,
         serialization: global_shared_read("game"),
-        response: v2::GameFocusReadResponse,
+        response: v2::GameCharacterListResponse,
     },
-    #[experimental("game/focus/decide")]
-    GameFocusDecide => "game/focus/decide" {
-        params: v2::GameFocusDecideParams,
-        serialization: global("game"),
-        response: v2::GameFocusDecideResponse,
+    #[experimental("game/character/read")]
+    GameCharacterRead => "game/character/read" {
+        params: v2::GameCharacterReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameCharacterReadResponse,
     },
-    #[experimental("game/focus/retry")]
-    GameFocusRetry => "game/focus/retry" {
-        params: v2::GameFocusRetryParams,
+    #[experimental("game/character/confirmSpec")]
+    GameCharacterConfirmSpec => "game/character/confirmSpec" {
+        params: v2::GameCharacterConfirmSpecParams,
         serialization: global("game"),
-        response: v2::GameFocusRetryResponse,
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
     },
-    #[experimental("game/focus/cancel")]
-    GameFocusCancel => "game/focus/cancel" {
-        params: v2::GameFocusCancelParams,
+    #[experimental("game/character/rejectSpec")]
+    GameCharacterRejectSpec => "game/character/rejectSpec" {
+        params: v2::GameCharacterRejectSpecParams,
         serialization: global("game"),
-        response: v2::GameFocusCancelResponse,
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
+    #[experimental("game/character/confirmRender")]
+    GameCharacterConfirmRender => "game/character/confirmRender" {
+        params: v2::GameCharacterConfirmRenderParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
+    #[experimental("game/character/rejectRender")]
+    GameCharacterRejectRender => "game/character/rejectRender" {
+        params: v2::GameCharacterRejectRenderParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
+    #[experimental("game/character/confirmViews")]
+    GameCharacterConfirmViews => "game/character/confirmViews" {
+        params: v2::GameCharacterConfirmViewsParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
+    #[experimental("game/character/rejectViews")]
+    GameCharacterRejectViews => "game/character/rejectViews" {
+        params: v2::GameCharacterRejectViewsParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
+    #[experimental("game/generation/register")]
+    GameGenerationRegister => "game/generation/register" {
+        params: v2::GameGenerationRegisterParams,
+        serialization: global("game"),
+        response: v2::GameGenerationRegisterResponse,
+    },
+    #[experimental("game/generation/list")]
+    GameGenerationList => "game/generation/list" {
+        params: v2::GameGenerationListParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameGenerationListResponse,
     },
     #[experimental("game/task/list")]
     GameTaskList => "game/task/list" {
@@ -2050,16 +2116,28 @@ server_notification_definitions! {
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
     #[experimental("project/changed")]
     ProjectChanged => "project/changed" (v2::ProjectChangedNotification),
-    #[experimental("game/workflow/updated")]
-    GameWorkflowUpdated => "game/workflow/updated" (v2::GameWorkflowUpdatedNotification),
+    #[experimental("game/conversation/turn")]
+    GameConversationTurn => "game/conversation/turn" (v2::GameConversationTurnNotification),
+    #[experimental("game/conversation/delta")]
+    GameConversationDelta => "game/conversation/delta" (v2::GameConversationDeltaNotification),
+    #[experimental("game/conversation/actor")]
+    GameConversationActor => "game/conversation/actor" (v2::GameConversationActorNotification),
+    #[experimental("game/conversation/focus")]
+    GameConversationFocus => "game/conversation/focus" (v2::GameConversationFocusNotification),
+    #[experimental("game/conversation/error")]
+    GameConversationError => "game/conversation/error" (v2::GameConversationErrorNotification),
+    #[experimental("game/conversation/handoff")]
+    GameAgentHandoff => "game/conversation/handoff" (v2::GameAgentHandoffNotification),
+    #[experimental("game/character/updated")]
+    GameCharacterUpdated => "game/character/updated" (v2::GameCharacterUpdatedNotification),
+    #[experimental("game/generation/updated")]
+    GameGenerationUpdated => "game/generation/updated" (v2::GameGenerationUpdatedNotification),
     #[experimental("game/task/updated")]
     GameTaskUpdated => "game/task/updated" (v2::GameTaskUpdatedNotification),
     #[experimental("game/attempt/updated")]
     GameAttemptUpdated => "game/attempt/updated" (v2::GameAttemptUpdatedNotification),
     #[experimental("game/artifact/committed")]
     GameArtifactCommitted => "game/artifact/committed" (v2::GameArtifactCommittedNotification),
-    #[experimental("game/designConfirmation/required")]
-    GameDesignConfirmationRequired => "game/designConfirmation/required" (v2::GameDesignConfirmationRequiredNotification),
     #[experimental("game/recovery/status")]
     GameRecoveryStatus => "game/recovery/status" (v2::GameRecoveryStatusNotification),
     #[experimental("thread/project/updated")]

@@ -1,8 +1,4 @@
-import {
-  CheckCircleOutlined,
-  HistoryOutlined,
-  SendOutlined,
-} from "@ant-design/icons";
+import { CheckCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -10,344 +6,342 @@ import {
   Button,
   Card,
   Col,
-  Collapse,
-  Empty,
+  Form,
   Input,
   List,
+  Modal,
   Row,
   Space,
   Steps,
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import type { GameConflict } from "../generated/game";
-import { rpc, workspaceApi } from "./api";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
+import ChatPanel from "./chat/ChatPanel";
+import { useConversation } from "./chat/useConversation";
+import type { ArtifactDraft } from "./types";
 
-const focusSteps = [
-  { title: "游戏简报", states: ["CLARIFYING", "BRIEF_READY"] },
-  { title: "并行评审", states: ["REVIEWING", "MERGING"] },
-  { title: "冲突决策", states: ["USER_REVIEW"] },
-  { title: "Art Bible", states: ["CONFIRMED", "VERSIONED"] },
+const projectSteps = [
+  { title: "定义美术基调", state: "drafting" },
+  { title: "确认游戏风格", state: "styleSettled" },
+  { title: "确认项目名称与代号", state: "ready" },
 ];
 
 export default function ProjectWorkspacePage() {
   const { message } = App.useApp();
   const { projectId = "" } = useParams();
-  const { canWrite, activeProject, setActiveProject } = useStudio();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [content, setContent] = useState("");
-  const [selectedVersion, setSelectedVersion] = useState<number>();
+  const { canWrite, activeProject, setActiveProject } = useStudio();
+  const [finalizeOpen, setFinalizeOpen] = useState(false);
+  const [characterOpen, setCharacterOpen] = useState(false);
+  const [finalizeForm] = Form.useForm<{ name: string; code: string }>();
+  const [characterForm] = Form.useForm<{ name: string; group?: string }>();
 
   const project = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => workspaceApi.readProject(projectId),
     enabled: Boolean(projectId),
   });
+  const agents = useQuery({
+    queryKey: ["ai-agents"],
+    queryFn: aiApi.listAgents,
+  });
+  const characters = useQuery({
+    queryKey: ["characters", projectId],
+    queryFn: () => charactersApi.list(projectId),
+    enabled: project.data?.state === "ready",
+  });
+  const conversation = useConversation({
+    projectId,
+    targetKind: "project",
+    targetRef: null,
+    title: "项目美术基调",
+  });
 
   useEffect(() => {
-    if (project.data && activeProject?.id !== project.data.id) {
+    if (project.data && activeProject?.id !== project.data.id)
       setActiveProject(project.data);
-    }
   }, [activeProject?.id, project.data, setActiveProject]);
 
-  const conversation = useQuery({
-    queryKey: ["conversation", projectId],
-    queryFn: async () => {
-      const ensured = await workspaceApi.ensureConversation(projectId);
-      await workspaceApi.startFocus(ensured.id);
-      return ensured;
-    },
-    enabled: Boolean(projectId),
-  });
-  const conversationId = conversation.data?.id;
+  const latestNaming = useMemo(
+    () =>
+      conversation.snapshot?.messages
+        .slice()
+        .reverse()
+        .find((item) => item.action?.payload.naming?.length)?.action?.payload
+        .naming ?? [],
+    [conversation.snapshot?.messages],
+  );
 
-  const focus = useQuery({
-    queryKey: ["focus", conversationId],
-    queryFn: () => workspaceApi.readFocus(conversationId!),
-    enabled: Boolean(conversationId),
-  });
-  const tasks = useQuery({
-    queryKey: ["tasks", conversationId],
-    queryFn: () => workspaceApi.listTasks(conversationId!),
-    enabled: Boolean(conversationId),
-  });
-  const versions = useQuery({
-    queryKey: ["art-bible-versions", projectId],
-    queryFn: () => workspaceApi.listVersions(projectId),
-    enabled: Boolean(projectId),
-  });
-  const artBible = useQuery({
-    queryKey: ["art-bible", projectId, selectedVersion],
-    queryFn: () =>
-      rpc<{ markdown: string }>("game/artBible/read", {
-        projectId,
-        version: selectedVersion,
-      }),
-    enabled: selectedVersion !== undefined,
-  });
-
-  const refresh = async () => {
+  const refreshProject = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["focus", conversationId] }),
-      queryClient.invalidateQueries({ queryKey: ["tasks", conversationId] }),
-      queryClient.invalidateQueries({ queryKey: ["art-bible-versions", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["projects"] }),
+      queryClient.invalidateQueries({ queryKey: ["characters", projectId] }),
+      conversation.refresh(),
     ]);
   };
 
-  const submit = useMutation({
-    mutationFn: () =>
-      rpc("game/conversation/submit", {
-        conversationId,
-        content: content.trim(),
-      }),
+  const commitArtBible = useMutation({
+    mutationFn: (draftId: string) =>
+      workspaceApi.commitArtBible(conversation.conversationId!, draftId),
     onSuccess: async () => {
-      setContent("");
-      await refresh();
+      message.success("游戏风格已确认");
+      await refreshProject();
+      await conversation.send(
+        "游戏风格已由用户确认。请基于已确认的 Art Bible 给出 2–3 组项目名称和合法项目代号建议，并在 Action payload.naming 中返回。",
+        "game_designer",
+      );
     },
     onError: (error: Error) => message.error(error.message),
   });
 
-  const decide = useMutation({
-    mutationFn: ({ action, extras = {} }: { action: string; extras?: Record<string, unknown> }) =>
-      rpc("game/focus/decide", {
-        conversationId,
-        expectedInputVersion: Number(focus.data?.workflow.inputVersion ?? 0),
-        action,
-        ...extras,
-      }),
-    onSuccess: refresh,
+  const finalize = useMutation({
+    mutationFn: ({ name, code }: { name: string; code: string }) =>
+      workspaceApi.finalize(projectId, name, code),
+    onSuccess: async (updated) => {
+      setActiveProject(updated);
+      setFinalizeOpen(false);
+      message.success("项目立项完成");
+      await refreshProject();
+    },
     onError: (error: Error) => message.error(error.message),
   });
 
-  const currentStep = Math.max(
-    0,
-    focusSteps.findIndex((step) => step.states.includes(focus.data?.workflow.state ?? "")),
-  );
-  const unresolvedHighImpact =
-    focus.data?.conflicts.some(
-      (conflict) =>
-        conflict.highImpact &&
-        !focus.data?.decisions.some((decision) => decision.conflictKey === conflict.key),
-    ) ?? false;
+  const createCharacter = useMutation({
+    mutationFn: ({ name, group }: { name: string; group?: string }) =>
+      charactersApi.create(projectId, name, group?.trim() || null, false),
+    onSuccess: async (character) => {
+      setCharacterOpen(false);
+      characterForm.resetFields();
+      await queryClient.invalidateQueries({
+        queryKey: ["characters", projectId],
+      });
+      navigate(`/projects/${projectId}/characters/${character.id}`);
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const currentStep =
+    project.data?.state === "ready"
+      ? 2
+      : project.data?.state === "styleSettled"
+        ? 1
+        : 0;
+  const renderDraftAction = (draft: ArtifactDraft) =>
+    draft.targetPath === "art-bible.md" &&
+    project.data?.state === "drafting" ? (
+      <Button
+        type="primary"
+        size="small"
+        icon={<CheckCircleOutlined />}
+        disabled={!canWrite}
+        loading={commitArtBible.isPending}
+        onClick={() => commitArtBible.mutate(draft.id)}
+      >
+        确认游戏风格
+      </Button>
+    ) : null;
 
   return (
     <div className="page-stack workspace-page">
       <section className="page-heading">
         <div>
-          <Space align="center">
-            <Typography.Title level={2}>{project.data?.name ?? "项目工作区"}</Typography.Title>
-            {project.data?.state && <Tag color={canWrite ? "blue" : "warning"}>{project.data.state}</Tag>}
+          <Space align="center" wrap>
+            <Typography.Title level={2}>
+              {project.data?.name ?? "素材项目立项"}
+            </Typography.Title>
+            {project.data?.state && (
+              <Tag
+                color={
+                  project.data.state === "ready" ? "success" : "processing"
+                }
+              >
+                {project.data.state}
+              </Tag>
+            )}
           </Space>
           <Typography.Text type="secondary" className="path-text">
             {project.data?.root}
           </Typography.Text>
         </div>
+        {project.data?.state === "styleSettled" && (
+          <Button
+            type="primary"
+            disabled={!canWrite}
+            onClick={() => setFinalizeOpen(true)}
+          >
+            确认立项
+          </Button>
+        )}
       </section>
 
       {!canWrite && (
-        <Alert type="warning" showIcon message="当前为只读模式，浏览功能可用，所有提交操作已禁用。" />
+        <Alert
+          type="warning"
+          showIcon
+          message="当前为只读模式，所有提交操作已禁用。"
+        />
       )}
-
       <Row gutter={[16, 16]} align="stretch">
-        <Col xs={24} xl={6}>
-          <Card title="对焦流程" className="content-card full-height-card">
-            <Steps direction="vertical" size="small" current={currentStep} items={focusSteps.map(({ title }) => ({ title }))} />
-            <Typography.Title level={5}>Art Bible 版本</Typography.Title>
-            <Space wrap>
-              {(versions.data ?? []).map((version) => (
-                <Button
-                  key={version.id}
-                  type={selectedVersion === Number(version.version) ? "primary" : "default"}
-                  icon={<HistoryOutlined />}
-                  onClick={() => setSelectedVersion(Number(version.version))}
-                >
-                  v{String(version.version)}
-                </Button>
-              ))}
-              {!versions.data?.length && <Typography.Text type="secondary">暂无版本</Typography.Text>}
-            </Space>
-          </Card>
-        </Col>
-
-        <Col xs={24} xl={18}>
-          <Space direction="vertical" size="middle" className="workspace-main">
-            <Card
-              title={focus.data ? `当前阶段：${focus.data.workflow.state}` : "开始设定对焦"}
-              extra={focus.data && <Tag>输入版本 {String(focus.data.workflow.inputVersion)}</Tag>}
-              loading={focus.isLoading || conversation.isLoading}
-              className="content-card"
-            >
-              {!focus.data && !focus.isLoading && <Empty description="描述你的游戏创意，开始设定对焦" />}
-              {focus.data?.workflow.state === "BRIEF_READY" && (
-                <Button
-                  type="primary"
-                  disabled={!canWrite}
-                  loading={decide.isPending}
-                  onClick={() => decide.mutate({ action: "acceptBrief" })}
-                >
-                  接受简报并开始评审
-                </Button>
-              )}
-
-              {Boolean(focus.data?.reviews.length) && (
-                <section className="workspace-section">
-                  <Typography.Title level={4}>评审报告</Typography.Title>
-                  <Row gutter={[12, 12]}>
-                    {focus.data?.reviews.map((review) => (
-                      <Col xs={24} lg={12} key={review.agentCode}>
-                        <Card size="small" title={review.agentCode}>
-                          <ReviewList title="发现" items={review.findings} />
-                          <ReviewList title="风险" items={review.risks} />
-                          <ReviewList title="建议" items={review.recommendations} />
-                        </Card>
-                      </Col>
-                    ))}
-                  </Row>
-                </section>
-              )}
-
-              {Boolean(focus.data?.conflicts.length) && (
-                <section className="workspace-section">
-                  <Typography.Title level={4}>冲突决策</Typography.Title>
-                  <Space direction="vertical" className="workspace-main">
-                    {focus.data?.conflicts.map((conflict) => (
-                      <ConflictCard
-                        key={conflict.key}
-                        conflict={conflict}
-                        selected={focus.data?.decisions.find((item) => item.conflictKey === conflict.key)?.selectedOption}
-                        disabled={!canWrite || decide.isPending}
-                        onSelect={(option) =>
-                          decide.mutate({
-                            action: "recordConflictDecision",
-                            extras: {
-                              userDecision: { conflictKey: conflict.key, selectedOption: option, note: null },
-                            },
-                          })
-                        }
-                      />
-                    ))}
-                  </Space>
-                </section>
-              )}
-
-              {focus.data?.artBibleDraft && (
-                <section className="workspace-section">
-                  <Space className="section-heading">
-                    <Typography.Title level={4}>Art Bible 草案</Typography.Title>
-                    {focus.data.workflow.state === "USER_REVIEW" && (
-                      <Button
-                        type="primary"
-                        icon={<CheckCircleOutlined />}
-                        disabled={!canWrite || unresolvedHighImpact}
-                        onClick={() =>
-                          decide.mutate({
-                            action: "confirmArtBible",
-                            extras: { artBibleMarkdown: focus.data?.artBibleDraft },
-                          })
-                        }
-                      >
-                        确认 Art Bible
-                      </Button>
-                    )}
-                    {focus.data.workflow.state === "CONFIRMED" && (
-                      <Button disabled={!canWrite} onClick={() => decide.mutate({ action: "versionArtBible" })}>
-                        完成版本化
-                      </Button>
-                    )}
-                  </Space>
-                  <pre className="document">{focus.data.artBibleDraft}</pre>
-                </section>
-              )}
-            </Card>
-
-            {artBible.data && (
-              <Card title={`历史版本 v${selectedVersion}`} className="content-card">
-                <pre className="document">{artBible.data.markdown}</pre>
-              </Card>
-            )}
-
-            <Card title="任务" className="content-card" loading={tasks.isLoading}>
-              <Space wrap>
-                {(tasks.data ?? []).map((task) => (
-                  <Tag key={task.id} color={task.status === "succeeded" ? "success" : task.status === "failed" ? "error" : "processing"}>
-                    {task.agentCode} · {task.status}
-                  </Tag>
-                ))}
-                {!tasks.data?.length && <Typography.Text type="secondary">暂无任务</Typography.Text>}
-              </Space>
-            </Card>
-
-            <Card className="composer-card">
-              <Input.TextArea
-                autoSize={{ minRows: 3, maxRows: 8 }}
-                value={content}
-                disabled={!canWrite || !conversationId}
-                placeholder="输入游戏创意或补充信息"
-                onChange={(event) => setContent(event.target.value)}
+        <Col xs={24} xl={7}>
+          <Space direction="vertical" className="workspace-main">
+            <Card title="立项门禁" className="content-card">
+              <Steps
+                direction="vertical"
+                current={currentStep}
+                items={projectSteps}
               />
-              <Button
-                type="primary"
-                icon={<SendOutlined />}
-                loading={submit.isPending}
-                disabled={!canWrite || !conversationId || !content.trim()}
-                onClick={() => submit.mutate()}
-              >
-                提交
-              </Button>
             </Card>
-
-            <Collapse
-              ghost
-              items={[{ key: "debug", label: "运行状态", children: <pre>{JSON.stringify({ conversationId, focus: focus.data?.workflow }, null, 2)}</pre> }]}
-            />
+            <Card
+              title="角色"
+              className="content-card"
+              extra={
+                <Button
+                  size="small"
+                  icon={<PlusOutlined />}
+                  disabled={!canWrite || project.data?.state !== "ready"}
+                  onClick={() => setCharacterOpen(true)}
+                >
+                  新建
+                </Button>
+              }
+            >
+              {project.data?.state !== "ready" ? (
+                <Typography.Text type="secondary">
+                  确认 Art Bible 和项目名称后才能创建角色。
+                </Typography.Text>
+              ) : (
+                <List
+                  dataSource={characters.data ?? []}
+                  locale={{ emptyText: "还没有角色" }}
+                  renderItem={(character) => (
+                    <List.Item
+                      actions={[
+                        <Button
+                          key="open"
+                          type="link"
+                          onClick={() =>
+                            navigate(
+                              `/projects/${projectId}/characters/${character.id}`,
+                            )
+                          }
+                        >
+                          进入
+                        </Button>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={character.name}
+                        description={`${character.group ?? "未分组"} · ${character.state}`}
+                      />
+                    </List.Item>
+                  )}
+                />
+              )}
+            </Card>
           </Space>
         </Col>
+        <Col xs={24} xl={17}>
+          <ChatPanel
+            snapshot={conversation.snapshot}
+            agents={agents.data}
+            loading={conversation.isLoading}
+            canWrite={canWrite}
+            streamingText={conversation.streamingText}
+            workingAgentCode={conversation.workingAgentCode}
+            lastError={conversation.lastError}
+            onSend={conversation.send}
+            onInterrupt={conversation.interrupt}
+            onCommitDrafts={conversation.commitDrafts}
+            renderDraftAction={renderDraftAction}
+          />
+        </Col>
       </Row>
-    </div>
-  );
-}
 
-function ReviewList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <div className="review-list">
-      <Typography.Text strong>{title}</Typography.Text>
-      <List size="small" dataSource={items} renderItem={(item) => <List.Item>{item}</List.Item>} />
-    </div>
-  );
-}
-
-function ConflictCard({
-  conflict,
-  selected,
-  disabled,
-  onSelect,
-}: {
-  conflict: GameConflict;
-  selected?: string;
-  disabled: boolean;
-  onSelect: (option: string) => void;
-}) {
-  return (
-    <Card
-      size="small"
-      title={conflict.description}
-      extra={conflict.highImpact && <Tag color="warning">高影响</Tag>}
-    >
-      <Space wrap>
-        {conflict.options.map((option) => (
-          <Button
-            key={option}
-            type={selected === option ? "primary" : "default"}
-            disabled={disabled}
-            onClick={() => onSelect(option)}
+      <Modal
+        title="确认项目立项"
+        open={finalizeOpen}
+        okText="确认立项"
+        confirmLoading={finalize.isPending}
+        onCancel={() => setFinalizeOpen(false)}
+        onOk={() => finalizeForm.submit()}
+      >
+        <Form
+          form={finalizeForm}
+          layout="vertical"
+          onFinish={(values) => finalize.mutate(values)}
+        >
+          <Form.Item
+            name="name"
+            label="项目名称"
+            rules={[{ required: true, whitespace: true }]}
           >
-            {option}
-          </Button>
-        ))}
-      </Space>
-    </Card>
+            <Input placeholder="项目名称" />
+          </Form.Item>
+          <Form.Item
+            name="code"
+            label="项目代号"
+            rules={[
+              { required: true },
+              {
+                pattern: /^[a-z0-9][a-z0-9_-]*$/,
+                message: "仅允许小写字母、数字、_、-，并以字母或数字开头",
+              },
+            ]}
+          >
+            <Input placeholder="project-code" />
+          </Form.Item>
+          {latestNaming.length > 0 && (
+            <Space direction="vertical" className="workspace-main">
+              <Typography.Text type="secondary">Agent 建议</Typography.Text>
+              {latestNaming.map((suggestion) => (
+                <Button
+                  key={`${suggestion.name}-${suggestion.code}`}
+                  onClick={() =>
+                    finalizeForm.setFieldsValue({
+                      name: suggestion.name,
+                      code: suggestion.code,
+                    })
+                  }
+                >
+                  {suggestion.name} · {suggestion.code}
+                </Button>
+              ))}
+            </Space>
+          )}
+        </Form>
+      </Modal>
+
+      <Modal
+        title="新建角色"
+        open={characterOpen}
+        okText="创建并进入"
+        confirmLoading={createCharacter.isPending}
+        onCancel={() => setCharacterOpen(false)}
+        onOk={() => characterForm.submit()}
+      >
+        <Form
+          form={characterForm}
+          layout="vertical"
+          onFinish={(values) => createCharacter.mutate(values)}
+        >
+          <Form.Item
+            name="name"
+            label="角色名称"
+            rules={[{ required: true, whitespace: true }]}
+          >
+            <Input autoFocus />
+          </Form.Item>
+          <Form.Item name="group" label="分组（可选）">
+            <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </div>
   );
 }

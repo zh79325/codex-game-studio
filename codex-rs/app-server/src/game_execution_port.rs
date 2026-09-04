@@ -151,9 +151,6 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
         let thread = self.thread(&request.thread_id).await?;
         let context = serde_json::to_string(&request.context)
             .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
-        let schema = serde_json::from_str(&request.context.output_schema).map_err(|error| {
-            ExecutionError::InvalidRequest(format!("invalid output schema: {error}"))
-        })?;
         let input = format!(
             "<game_agent_definition>\n{}\n</game_agent_definition>\n\n{}\n\n<game_context attempt_id=\"{}\">\n{}\n</game_context>",
             request.agent_definition, request.prompt, request.attempt_id, context
@@ -162,7 +159,12 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             text: input,
             text_elements: Vec::new(),
         }]);
-        turn.start.final_output_json_schema = Some(schema);
+        if !request.context.output_schema.trim().is_empty() {
+            let schema = serde_json::from_str(&request.context.output_schema).map_err(|error| {
+                ExecutionError::InvalidRequest(format!("invalid output schema: {error}"))
+            })?;
+            turn.start.final_output_json_schema = Some(schema);
+        }
         match thread
             .start_turn_if_idle(turn)
             .await

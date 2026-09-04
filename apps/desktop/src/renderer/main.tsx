@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import AgentsPage from "./AgentsPage";
 import AppShell from "./AppShell";
+import CharacterPage from "./CharacterPage";
 import ProjectWorkspacePage from "./ProjectWorkspacePage";
 import ProjectsPage from "./ProjectsPage";
 import ProvidersPage from "./ProvidersPage";
@@ -41,6 +42,10 @@ createRoot(document.getElementById("root")!).render(
                 <Route
                   path="/projects/:projectId/workspace"
                   element={<ProjectWorkspacePage />}
+                />
+                <Route
+                  path="/projects/:projectId/characters/:characterId"
+                  element={<CharacterPage />}
                 />
                 <Route path="/ai/providers" element={<ProvidersPage />} />
                 <Route path="/ai/agents" element={<AgentsPage />} />

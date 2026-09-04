@@ -1,3 +1,14 @@
+use codex_app_server_protocol::GameAttemptUpdatedNotification;
+use codex_app_server_protocol::GameCharacterUpdatedNotification;
+use codex_app_server_protocol::GameConversationActorNotification;
+use codex_app_server_protocol::GameConversationFocusNotification;
+use codex_app_server_protocol::GameConversationTurnNotification;
+use codex_app_server_protocol::GameGenerationUpdatedNotification;
+use codex_app_server_protocol::GameRecoveryStatusNotification;
+use codex_app_server_protocol::GameTaskUpdatedNotification;
+use codex_app_server_protocol::ProjectChangeType;
+use codex_app_server_protocol::ProjectChangedNotification;
+use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::*;
 use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_thread_store::CreateProjectParams as StoreCreateProjectParams;
@@ -39,30 +50,39 @@ impl GameRequestProcessor {
         self.adapter.ping()
     }
 
+    pub(crate) fn project_inspect(
+        &self,
+        params: GameProjectInspectParams,
+    ) -> std::result::Result<GameProjectInspectResponse, JSONRPCErrorError> {
+        self.adapter.project_inspect(params).map_err(game_error)
+    }
+
     pub(crate) async fn project_create(
         &self,
-        params: GameProjectCreateParams,
+        mut params: GameProjectCreateParams,
     ) -> std::result::Result<GameProjectCreateResponse, JSONRPCErrorError> {
-        let name = params.name.trim().to_string();
-        if name.is_empty() {
-            return Err(invalid_params("project name must not be empty"));
-        }
         let root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path_checked(
             PathBuf::from(&params.root),
         )
         .map_err(|error| invalid_params(format!("invalid project root: {error}")))?
         .to_string_lossy()
         .into_owned();
+        params.root = root.clone();
+        let display_name = params
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "未命名素材项目".to_string());
         let idempotency_key = format!("game-project:create:{root}");
         if idempotency_key.len() > 512 {
             return Err(invalid_params("project root is too long"));
         }
         let mut metadata = BTreeMap::new();
-        metadata.insert("codex.game.kind".to_string(), "focus".to_string());
+        metadata.insert("codex.game.kind".to_string(), "asset".to_string());
         let created = self
             .thread_store
             .create_project(StoreCreateProjectParams {
-                name,
+                name: display_name,
                 roots: vec![StoredProjectRoot { path: root }],
                 metadata,
                 thread_ids: Vec::new(),
@@ -71,24 +91,11 @@ impl GameRequestProcessor {
             .await
             .map_err(game_project_store_error)?;
         let project_id = created.project.id.clone();
-        let project_root = created
-            .project
-            .roots
-            .first()
-            .ok_or_else(|| internal_error("created game project has no root"))?
-            .path
-            .clone();
         self.notify_recovery_status(GameBackendStatus::Recovering)
             .await;
         let response = self
             .adapter
-            .project_create(
-                project_id.clone(),
-                GameProjectCreateParams {
-                    name: created.project.name,
-                    root: project_root,
-                },
-            )
+            .project_create(project_id.clone(), params)
             .await;
         self.notify_recovery_status(self.adapter.ping().status)
             .await;
@@ -141,20 +148,24 @@ impl GameRequestProcessor {
         self.adapter.project_list(params).await.map_err(game_error)
     }
 
-    pub(crate) async fn project_import(
+    pub(crate) async fn project_commit_art_bible(
         &self,
-        params: GameProjectImportParams,
-    ) -> std::result::Result<GameProjectImportResponse, JSONRPCErrorError> {
-        self.notify_recovery_status(GameBackendStatus::Recovering)
-            .await;
-        let response = self
-            .adapter
-            .project_import(params)
+        params: GameProjectCommitArtBibleParams,
+    ) -> std::result::Result<GameProjectCommitArtBibleResponse, JSONRPCErrorError> {
+        self.adapter
+            .project_commit_art_bible(params)
             .await
-            .map_err(game_error);
-        self.notify_recovery_status(self.adapter.ping().status)
-            .await;
-        response
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn project_finalize(
+        &self,
+        params: GameProjectFinalizeParams,
+    ) -> std::result::Result<GameProjectFinalizeResponse, JSONRPCErrorError> {
+        self.adapter
+            .project_finalize(params)
+            .await
+            .map_err(game_error)
     }
 
     pub(crate) async fn conversation_ensure(
@@ -179,150 +190,215 @@ impl GameRequestProcessor {
             .conversation_submit(&execution, params)
             .await
             .map_err(game_error)?;
-        self.outgoing
-            .send_server_notification(ServerNotification::GameTaskUpdated(
-                GameTaskUpdatedNotification {
-                    conversation_id: conversation_id.clone(),
-                    task_id: task_execution.task.id.as_str().to_string(),
-                    status: "running".to_string(),
-                },
-            ))
-            .await;
-        self.outgoing
-            .send_server_notification(ServerNotification::GameAttemptUpdated(
-                GameAttemptUpdatedNotification {
-                    conversation_id,
-                    task_id: task_execution.task.id.as_str().to_string(),
-                    attempt_id: task_execution.attempt.id.as_str().to_string(),
-                    turn_id: task_execution.attempt.codex_turn_id,
-                    status: "running".to_string(),
-                },
-            ))
-            .await;
+        if let Some(task_execution) = task_execution {
+            self.notify_task_started(&conversation_id, task_execution)
+                .await;
+        } else {
+            self.outgoing
+                .send_server_notification(ServerNotification::GameConversationTurn(
+                    GameConversationTurnNotification {
+                        conversation_id,
+                        status: "blocked".to_string(),
+                    },
+                ))
+                .await;
+        }
         Ok(response)
     }
 
-    pub(crate) fn conversation_read(
+    pub(crate) async fn conversation_read(
         &self,
         params: GameConversationReadParams,
     ) -> std::result::Result<GameConversationReadResponse, JSONRPCErrorError> {
-        self.adapter.conversation_read(params).map_err(game_error)
+        self.adapter
+            .conversation_read(params)
+            .await
+            .map_err(game_error)
     }
 
-    pub(crate) async fn focus_start(
-        &self,
-        params: GameFocusStartParams,
-    ) -> std::result::Result<GameFocusStartResponse, JSONRPCErrorError> {
-        let response = self.adapter.focus_start(params).await.map_err(game_error)?;
-        self.notify_workflow_updated(response.workflow.clone())
-            .await;
-        Ok(response)
-    }
-
-    pub(crate) async fn focus_read(
-        &self,
-        params: GameFocusReadParams,
-    ) -> std::result::Result<GameFocusReadResponse, JSONRPCErrorError> {
-        self.adapter.focus_read(params).await.map_err(game_error)
-    }
-
-    pub(crate) async fn focus_decide(
+    pub(crate) async fn conversation_interrupt(
         &self,
         connection_id: ConnectionId,
-        params: GameFocusDecideParams,
-    ) -> std::result::Result<GameFocusDecideResponse, JSONRPCErrorError> {
+        params: GameConversationInterruptParams,
+    ) -> std::result::Result<GameConversationInterruptResponse, JSONRPCErrorError> {
         let conversation_id = params.conversation_id.clone();
         let execution = self.execution.scoped(connection_id);
-        let (response, tasks, artifacts) = self
+        let (response, cancelled) = self
             .adapter
-            .focus_decide(&execution, params)
+            .conversation_interrupt(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_workflow_updated(response.workflow.clone())
-            .await;
-        for task in tasks {
-            self.notify_task_started(&conversation_id, task).await;
-        }
-        for (artifact_id, artifact_type) in artifacts {
-            self.outgoing
-                .send_server_notification(ServerNotification::GameArtifactCommitted(
-                    GameArtifactCommittedNotification {
-                        conversation_id: conversation_id.clone(),
-                        artifact_id,
-                        artifact_type,
-                    },
-                ))
-                .await;
-        }
-        if let Some(art_bible) = &response.art_bible {
-            self.outgoing
-                .send_server_notification(ServerNotification::GameArtifactCommitted(
-                    GameArtifactCommittedNotification {
-                        conversation_id,
-                        artifact_id: art_bible.id.clone(),
-                        artifact_type: "artBibleVersion".to_string(),
-                    },
-                ))
-                .await;
-        }
-        Ok(response)
-    }
-
-    pub(crate) async fn focus_retry(
-        &self,
-        connection_id: ConnectionId,
-        params: GameFocusRetryParams,
-    ) -> std::result::Result<GameFocusRetryResponse, JSONRPCErrorError> {
-        let conversation_id = params.conversation_id.clone();
-        let execution = self.execution.scoped(connection_id);
-        let (response, task) = self
-            .adapter
-            .focus_retry(&execution, params)
-            .await
-            .map_err(game_error)?;
-        self.notify_workflow_updated(response.workflow.clone())
-            .await;
-        self.notify_task_started(&conversation_id, task).await;
-        Ok(response)
-    }
-
-    pub(crate) async fn focus_cancel(
-        &self,
-        connection_id: ConnectionId,
-        params: GameFocusCancelParams,
-    ) -> std::result::Result<GameFocusCancelResponse, JSONRPCErrorError> {
-        let conversation_id = params.conversation_id.clone();
-        let execution = self.execution.scoped(connection_id);
-        let (response, cancelled_attempts) = self
-            .adapter
-            .focus_cancel(&execution, params)
-            .await
-            .map_err(game_error)?;
-        self.notify_workflow_updated(response.workflow.clone())
-            .await;
-        for cancelled in cancelled_attempts {
-            self.outgoing
-                .send_server_notification(ServerNotification::GameTaskUpdated(
-                    GameTaskUpdatedNotification {
-                        conversation_id: conversation_id.clone(),
-                        task_id: cancelled.task_id.clone(),
-                        status: "cancelled".to_string(),
-                    },
-                ))
-                .await;
+        for attempt in cancelled {
             self.outgoing
                 .send_server_notification(ServerNotification::GameAttemptUpdated(
                     GameAttemptUpdatedNotification {
                         conversation_id: conversation_id.clone(),
-                        task_id: cancelled.task_id,
-                        attempt_id: cancelled.attempt_id,
-                        turn_id: Some(cancelled.turn_id),
+                        task_id: attempt.task_id,
+                        attempt_id: attempt.attempt_id,
+                        turn_id: Some(attempt.turn_id),
                         status: "cancelled".to_string(),
                     },
                 ))
                 .await;
         }
         Ok(response)
+    }
+
+    pub(crate) async fn conversation_commit_drafts(
+        &self,
+        params: GameConversationCommitDraftsParams,
+    ) -> std::result::Result<GameConversationCommitDraftsResponse, JSONRPCErrorError> {
+        self.adapter
+            .conversation_commit_drafts(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn character_create(
+        &self,
+        params: GameCharacterCreateParams,
+    ) -> std::result::Result<GameCharacterCreateResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_create(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_list(
+        &self,
+        params: GameCharacterListParams,
+    ) -> std::result::Result<GameCharacterListResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_list(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn character_read(
+        &self,
+        params: GameCharacterReadParams,
+    ) -> std::result::Result<GameCharacterReadResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_read(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn character_confirm_spec(
+        &self,
+        params: GameCharacterConfirmSpecParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_confirm_spec(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_reject_spec(
+        &self,
+        params: GameCharacterRejectSpecParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_reject_spec(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_confirm_render(
+        &self,
+        params: GameCharacterConfirmRenderParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_confirm_render(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_reject_render(
+        &self,
+        params: GameCharacterRejectRenderParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_reject_render(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_confirm_views(
+        &self,
+        params: GameCharacterConfirmViewsParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_confirm_views(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn character_reject_views(
+        &self,
+        params: GameCharacterRejectViewsParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .character_reject_views(params)
+            .await
+            .map_err(game_error)?;
+        self.notify_character_updated(response.character.clone())
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn generation_register(
+        &self,
+        params: GameGenerationRegisterParams,
+    ) -> std::result::Result<GameGenerationRegisterResponse, JSONRPCErrorError> {
+        let response = self
+            .adapter
+            .generation_register(params)
+            .await
+            .map_err(game_error)?;
+        self.outgoing
+            .send_server_notification(ServerNotification::GameGenerationUpdated(
+                GameGenerationUpdatedNotification {
+                    generation: response.generation.clone(),
+                },
+            ))
+            .await;
+        Ok(response)
+    }
+
+    pub(crate) async fn generation_list(
+        &self,
+        params: GameGenerationListParams,
+    ) -> std::result::Result<GameGenerationListResponse, JSONRPCErrorError> {
+        self.adapter
+            .generation_list(params)
+            .await
+            .map_err(game_error)
     }
 
     pub(crate) async fn task_list(
@@ -498,11 +574,14 @@ impl GameRequestProcessor {
         conversation_id: &str,
         execution: codex_game_runtime::TaskExecution,
     ) {
+        let task_id = execution.task.id.as_str().to_string();
+        let agent_code = execution.task.agent_code;
+        let turn_id = execution.attempt.codex_turn_id;
         self.outgoing
             .send_server_notification(ServerNotification::GameTaskUpdated(
                 GameTaskUpdatedNotification {
                     conversation_id: conversation_id.to_string(),
-                    task_id: execution.task.id.as_str().to_string(),
+                    task_id: task_id.clone(),
                     status: "running".to_string(),
                 },
             ))
@@ -511,19 +590,45 @@ impl GameRequestProcessor {
             .send_server_notification(ServerNotification::GameAttemptUpdated(
                 GameAttemptUpdatedNotification {
                     conversation_id: conversation_id.to_string(),
-                    task_id: execution.task.id.as_str().to_string(),
+                    task_id,
                     attempt_id: execution.attempt.id.as_str().to_string(),
-                    turn_id: execution.attempt.codex_turn_id,
+                    turn_id: turn_id.clone(),
                     status: "running".to_string(),
+                },
+            ))
+            .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::GameConversationTurn(
+                GameConversationTurnNotification {
+                    conversation_id: conversation_id.to_string(),
+                    status: "running".to_string(),
+                },
+            ))
+            .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::GameConversationActor(
+                GameConversationActorNotification {
+                    conversation_id: conversation_id.to_string(),
+                    turn_id,
+                    agent_code: agent_code.clone(),
+                    status: "working".to_string(),
+                },
+            ))
+            .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::GameConversationFocus(
+                GameConversationFocusNotification {
+                    conversation_id: conversation_id.to_string(),
+                    agent_code,
                 },
             ))
             .await;
     }
 
-    async fn notify_workflow_updated(&self, workflow: GameFocusWorkflow) {
+    async fn notify_character_updated(&self, character: GameCharacter) {
         self.outgoing
-            .send_server_notification(ServerNotification::GameWorkflowUpdated(
-                GameWorkflowUpdatedNotification { workflow },
+            .send_server_notification(ServerNotification::GameCharacterUpdated(
+                GameCharacterUpdatedNotification { character },
             ))
             .await;
     }

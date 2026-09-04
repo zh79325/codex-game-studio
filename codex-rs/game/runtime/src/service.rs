@@ -1,27 +1,30 @@
+use codex_game_domain::AgentAction;
+use codex_game_domain::AgentActionKind;
+use codex_game_domain::AgentActionPayload;
+use codex_game_domain::AgentHandoff;
 use codex_game_domain::ArtBibleVersion;
 use codex_game_domain::ArtBibleVersionId;
-use codex_game_domain::Artifact;
-use codex_game_domain::ArtifactContent;
-use codex_game_domain::ArtifactId;
+use codex_game_domain::ArtifactDraftRecord;
+use codex_game_domain::Character;
+use codex_game_domain::CharacterState;
+use codex_game_domain::ContextPackage;
 use codex_game_domain::Conversation;
 use codex_game_domain::ConversationId;
+use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
-use codex_game_domain::FocusWorkflow;
-use codex_game_domain::FocusWorkflowId;
+use codex_game_domain::ConversationStatus;
+use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::Generation;
+use codex_game_domain::MAX_HANDOFFS;
+use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
 use codex_game_domain::ProjectState;
-use codex_game_domain::ReviewReport;
-use codex_game_domain::StructuredBrief;
-use codex_game_domain::SynthesisResult;
 use codex_game_domain::TaskAttemptStatus;
-use codex_game_domain::UserDecision;
-use codex_game_domain::WorkflowCommand;
-use codex_game_domain::WorkflowError;
-use codex_game_domain::WorkflowState;
 use codex_game_store::ProjectAccess;
 use codex_game_store::ProjectStore;
 use codex_game_store::StoreError;
+use codex_game_store::finalize_project_json;
 use codex_game_store::list_registered_projects;
 use codex_game_store::open_studio_store;
 use codex_game_store::register_project as register_studio_project;
@@ -31,7 +34,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -50,10 +55,33 @@ pub struct ArtBibleDocument {
     pub markdown: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConversationSnapshot {
     pub conversation: Conversation,
     pub messages: Vec<ConversationMessage>,
+    pub drafts: Vec<ArtifactDraftRecord>,
+    pub memories: Vec<ConversationMemory>,
+    pub handoffs: Vec<AgentHandoff>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedConversationTurn {
+    pub user_message: ConversationMessage,
+    pub assistant_message: ConversationMessage,
+    pub conversation: Conversation,
+    pub agent_code: String,
+    pub stage: String,
+    pub project: Project,
+    pub store: Arc<ProjectStore>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDirState {
+    pub root: String,
+    pub occupied: bool,
+    pub project_id: Option<String>,
+    pub supported: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,9 +90,8 @@ pub struct CompletedTaskAttempt {
     pub task_id: String,
     pub conversation_id: String,
     pub status: TaskAttemptStatus,
-    pub artifacts: Vec<Artifact>,
-    pub workflow: Option<FocusWorkflow>,
-    pub conflict_count: Option<u64>,
+    pub agent_code: Option<String>,
+    pub action: Option<AgentAction>,
 }
 
 #[derive(Debug, Error)]
@@ -75,16 +102,18 @@ pub enum GameServiceError {
     ProjectNotFound(String),
     #[error("conversation not found: {0}")]
     ConversationNotFound(String),
-    #[error("focus workflow not found for conversation: {0}")]
-    WorkflowNotFound(String),
     #[error("project is read-only: {0}")]
     ReadOnly(String),
     #[error("invalid project path: {0}")]
     InvalidProjectPath(String),
-    #[error("invalid design decision: {0}")]
-    InvalidDesignDecision(String),
-    #[error(transparent)]
-    Workflow(#[from] WorkflowError),
+    #[error("invalid action output: {0}")]
+    InvalidAction(String),
+    #[error("project gate is not satisfied: {0}")]
+    ProjectGate(String),
+    #[error("character not found: {0}")]
+    CharacterNotFound(String),
+    #[error("invalid character operation: {0}")]
+    InvalidCharacterOperation(String),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -112,7 +141,6 @@ struct ProjectSession {
     read_only: bool,
     store: Arc<ProjectStore>,
     conversations: HashMap<String, ConversationSnapshot>,
-    workflows: HashMap<String, FocusWorkflow>,
     art_bibles: Vec<ArtBibleDocument>,
 }
 
@@ -135,14 +163,15 @@ impl GameService {
         let project = Project {
             id: ProjectId::new(project_id),
             name,
+            code: None,
             root: root_path.to_string_lossy().into_owned(),
-            state: ProjectState::Unversioned,
+            state: ProjectState::Drafting,
         };
         update_project_json(
             &root_path.join("project.json"),
             project.id.as_str(),
             &project.name,
-            "unversioned",
+            "drafting",
         )?;
         fs::create_dir_all(root_path.join(".codex-game"))?;
         let store = Arc::new(ProjectStore::open(&root_path).await?);
@@ -166,6 +195,15 @@ impl GameService {
         let document = fs::read_to_string(root_path.join("project.json"))?;
         let value: serde_json::Value = serde_json::from_str(&document)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            != Some(2)
+        {
+            return Err(GameServiceError::InvalidProjectPath(
+                "不支持旧项目，请新建项目".to_string(),
+            ));
+        }
         let id = value
             .get("projectId")
             .or_else(|| value.get("id"))
@@ -176,13 +214,22 @@ impl GameService {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("Untitled Game");
         let state = match value.get("state").and_then(serde_json::Value::as_str) {
-            Some("focusInProgress") => ProjectState::FocusInProgress,
-            Some("versioned") => ProjectState::Versioned,
-            _ => ProjectState::Unversioned,
+            Some("drafting") => ProjectState::Drafting,
+            Some("styleSettled") => ProjectState::StyleSettled,
+            Some("ready") => ProjectState::Ready,
+            _ => {
+                return Err(GameServiceError::InvalidProjectPath(
+                    "不支持旧项目，请新建项目".to_string(),
+                ));
+            }
         };
-        let mut project = Project {
+        let project = Project {
             id: ProjectId::new(id),
             name: name.to_string(),
+            code: value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             root: root_path.to_string_lossy().into_owned(),
             state,
         };
@@ -204,9 +251,7 @@ impl GameService {
         });
         let recovered = store.access() == ProjectAccess::ReadOnly;
         let conversations = store.load_conversations(project.id.as_str()).await?;
-        let workflows = store.load_workflows(project.id.as_str()).await?;
         let art_bibles = store.load_art_bible_versions(project.id.as_str()).await?;
-        project.state = recovered_project_state(&workflows, &art_bibles);
         if store.access() == ProjectAccess::ReadWrite {
             store.recover_incomplete_attempts().await?;
             if let Some((_, markdown)) = art_bibles.last() {
@@ -229,13 +274,12 @@ impl GameService {
                     ConversationSnapshot {
                         conversation,
                         messages,
+                        drafts: Vec::new(),
+                        memories: Vec::new(),
+                        handoffs: Vec::new(),
                     },
                 )
             })
-            .collect();
-        session.workflows = workflows
-            .into_iter()
-            .map(|workflow| (workflow.conversation_id.as_str().to_string(), workflow))
             .collect();
         session.art_bibles = art_bibles
             .into_iter()
@@ -329,6 +373,18 @@ impl GameService {
         Ok((session.project.clone(), Arc::clone(&session.store)))
     }
 
+    pub async fn turn_attempt_context(
+        &self,
+        codex_turn_id: &str,
+    ) -> Result<Option<codex_game_store::TurnAttemptContext>, GameServiceError> {
+        for store in self.writable_stores()? {
+            if let Some(context) = store.turn_attempt_context(codex_turn_id).await? {
+                return Ok(Some(context));
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn complete_turn(
         &self,
         codex_turn_id: &str,
@@ -336,15 +392,35 @@ impl GameService {
     ) -> Result<Option<CompletedTaskAttempt>, GameServiceError> {
         let stores = self.writable_stores()?;
         for store in stores {
+            let agent_code = store
+                .turn_attempt_context(codex_turn_id)
+                .await?
+                .map(|context| context.agent_code);
             if let Some(completion) = store.complete_turn(codex_turn_id, status).await? {
+                let message_status = match status {
+                    TaskAttemptStatus::Cancelled | TaskAttemptStatus::Interrupted => {
+                        MessageStatus::Interrupted
+                    }
+                    TaskAttemptStatus::Failed | TaskAttemptStatus::Unknown => MessageStatus::Failed,
+                    _ => MessageStatus::Completed,
+                };
+                let fallback = match message_status {
+                    MessageStatus::Interrupted => "运行已中断".to_string(),
+                    MessageStatus::Failed => "Agent 执行失败，可重试本轮。".to_string(),
+                    _ => String::new(),
+                };
+                self.apply_latest_running_message(
+                    &completion.conversation_id,
+                    message_status,
+                    fallback,
+                )?;
                 return Ok(Some(CompletedTaskAttempt {
                     attempt_id: completion.attempt_id,
                     task_id: completion.task_id,
                     conversation_id: completion.conversation_id,
                     status,
-                    artifacts: Vec::new(),
-                    workflow: None,
-                    conflict_count: None,
+                    agent_code,
+                    action: None,
                 }));
             }
         }
@@ -360,160 +436,416 @@ impl GameService {
             let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
                 continue;
             };
-            let current_workflow = self.read_focus(&context.conversation_id)?;
-            if current_workflow.id.as_str() != context.workflow_id
-                || current_workflow.input_version != context.input_version
-                || current_workflow.workflow_version != context.workflow_version
-            {
-                return self
-                    .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                    .await;
-            }
-            let (artifact_contents, mut next_workflow, conflict_count) = match context
-                .stage
-                .as_str()
-            {
-                "brief" if context.agent_code == super::BRIEF_AGENT => {
-                    let Some(brief) = output.and_then(parse_structured_output::<StructuredBrief>)
-                    else {
-                        return self
-                            .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                            .await;
-                    };
-                    let mut workflow = current_workflow.clone();
-                    super::advance_workflow(
-                        &mut workflow,
-                        WorkflowCommand::SubmitClarification,
-                        context.input_version,
-                    )?;
-                    (
-                        vec![ArtifactContent::StructuredBrief(brief)],
-                        Some(workflow),
-                        None,
-                    )
-                }
-                "review" if super::review_agent_codes().contains(&context.agent_code.as_str()) => {
-                    let Some(review) = output.and_then(parse_structured_output::<ReviewReport>)
-                    else {
-                        return self
-                            .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                            .await;
-                    };
-                    if review.agent_code != context.agent_code
-                        || current_workflow.state != WorkflowState::Reviewing
-                    {
-                        return self
-                            .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                            .await;
-                    }
-                    (vec![ArtifactContent::ReviewReport(review)], None, None)
-                }
-                "synthesis" if context.agent_code == super::SYNTHESIS_AGENT => {
-                    let Some(result) = output.and_then(parse_structured_output::<SynthesisResult>)
-                    else {
-                        return self
-                            .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                            .await;
-                    };
-                    if current_workflow.state != WorkflowState::Merging {
-                        return self
-                            .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                            .await;
-                    }
-                    let high_impact_conflicts = result
-                        .conflicts
-                        .conflicts
+            let (assistant_message_id, allowed_handoffs) = {
+                let projects = self
+                    .projects
+                    .lock()
+                    .map_err(|_| GameServiceError::StateUnavailable)?;
+                let session = projects
+                    .values()
+                    .find(|session| session.conversations.contains_key(&context.conversation_id))
+                    .ok_or_else(|| {
+                        GameServiceError::ConversationNotFound(context.conversation_id.clone())
+                    })?;
+                let snapshot = &session.conversations[&context.conversation_id];
+                let assistant = snapshot
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.role == "assistant"
+                            && message.agent_code == context.agent_code
+                            && message.status == MessageStatus::Thinking
+                    })
+                    .ok_or_else(|| {
+                        GameServiceError::InvalidAction("找不到本轮待完成的 Agent 消息".to_string())
+                    })?;
+                let handoff_count = snapshot
+                    .handoffs
+                    .iter()
+                    .filter(|handoff| handoff.turn == snapshot.conversation.turn)
+                    .count();
+                let stage_agents = codex_game_domain::agents_for_stage(
+                    snapshot.conversation.target_kind.as_str(),
+                    &context.stage,
+                );
+                let allowed = if handoff_count >= MAX_HANDOFFS {
+                    Vec::new()
+                } else {
+                    stage_agents
                         .iter()
-                        .filter(|conflict| conflict.high_impact)
-                        .count() as u64;
-                    let mut workflow = current_workflow.clone();
-                    super::advance_workflow(
-                        &mut workflow,
-                        WorkflowCommand::CompleteMerge,
-                        context.input_version,
+                        .copied()
+                        .filter(|agent| *agent != context.agent_code)
+                        .collect()
+                };
+                (assistant.id.clone(), allowed)
+            };
+            let parsed = output
+                .ok_or_else(|| "Agent 未返回输出".to_string())
+                .and_then(|value| {
+                    super::parse_agent_turn(value, &context.agent_code, &allowed_handoffs)
+                        .map_err(|error| error.to_string())
+                });
+            let parsed = match parsed {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let message = format!("Action 协议校验失败：{error}");
+                    let completion = store
+                        .fail_action_turn(
+                            codex_turn_id,
+                            &assistant_message_id,
+                            &message,
+                            MessageStatus::Failed,
+                            now(),
+                        )
+                        .await?;
+                    self.apply_failed_message(
+                        &context.conversation_id,
+                        &assistant_message_id,
+                        message,
                     )?;
-                    (
-                        vec![
-                            ArtifactContent::ArtBibleDraft(result.draft),
-                            ArtifactContent::ConflictSet(result.conflicts),
-                        ],
-                        Some(workflow),
-                        Some(high_impact_conflicts),
-                    )
-                }
-                _ => {
-                    return self
-                        .complete_turn(codex_turn_id, TaskAttemptStatus::Succeeded)
-                        .await;
+                    return Ok(completion.map(|completion| CompletedTaskAttempt {
+                        attempt_id: completion.attempt_id,
+                        task_id: completion.task_id,
+                        conversation_id: completion.conversation_id,
+                        status: TaskAttemptStatus::Failed,
+                        agent_code: Some(context.agent_code),
+                        action: None,
+                    }));
                 }
             };
-            let artifacts = artifact_contents
-                .into_iter()
-                .map(|content| Artifact {
-                    id: ArtifactId::new(Uuid::now_v7().to_string()),
-                    input_version: context.input_version,
-                    workflow_version: context.workflow_version,
-                    content,
-                    created_at: now(),
-                })
-                .collect::<Vec<_>>();
+            let (generations, updated_character) = match self
+                .prepare_action_generations(&context, &parsed.action, &store)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = format!("Action 产物校验失败：{error}");
+                    let completion = store
+                        .fail_action_turn(
+                            codex_turn_id,
+                            &assistant_message_id,
+                            &message,
+                            MessageStatus::Failed,
+                            now(),
+                        )
+                        .await?;
+                    self.apply_failed_message(
+                        &context.conversation_id,
+                        &assistant_message_id,
+                        message,
+                    )?;
+                    return Ok(completion.map(|completion| CompletedTaskAttempt {
+                        attempt_id: completion.attempt_id,
+                        task_id: completion.task_id,
+                        conversation_id: completion.conversation_id,
+                        status: TaskAttemptStatus::Failed,
+                        agent_code: Some(context.agent_code),
+                        action: None,
+                    }));
+                }
+            };
+            let meta_backup = if let Some(character) = updated_character.as_ref() {
+                let project = self.read_project(&character.project_id)?;
+                let path = Path::new(&project.root)
+                    .join(&character.dir_name)
+                    .join(".model.json");
+                let previous = fs::read_to_string(&path).ok();
+                if let Err(error) = write_character_meta(&project, character) {
+                    let message = format!("Action 产物元数据写入失败：{error}");
+                    let completion = store
+                        .fail_action_turn(
+                            codex_turn_id,
+                            &assistant_message_id,
+                            &message,
+                            MessageStatus::Failed,
+                            now(),
+                        )
+                        .await?;
+                    self.apply_failed_message(
+                        &context.conversation_id,
+                        &assistant_message_id,
+                        message,
+                    )?;
+                    return Ok(completion.map(|completion| CompletedTaskAttempt {
+                        attempt_id: completion.attempt_id,
+                        task_id: completion.task_id,
+                        conversation_id: completion.conversation_id,
+                        status: TaskAttemptStatus::Failed,
+                        agent_code: Some(context.agent_code),
+                        action: None,
+                    }));
+                }
+                Some((path, previous))
+            } else {
+                None
+            };
             let completion = match store
-                .commit_turn_artifacts(
+                .commit_action_turn(
                     codex_turn_id,
-                    &context.workflow_id,
-                    &artifacts,
-                    next_workflow.as_ref(),
+                    &assistant_message_id,
+                    &parsed.text,
+                    &parsed.action,
+                    &generations,
+                    updated_character.as_ref(),
+                    now(),
                 )
                 .await
             {
                 Ok(completion) => completion,
-                Err(StoreError::NotFound(_)) => {
-                    return self
-                        .complete_turn(codex_turn_id, TaskAttemptStatus::Failed)
-                        .await;
+                Err(error) => {
+                    if let Some((path, previous)) = meta_backup {
+                        restore_file(&path, previous.as_deref());
+                    }
+                    return Err(error.into());
                 }
-                Err(error) => return Err(error.into()),
             };
-            if context.stage == "review"
-                && store
-                    .count_committed_artifacts(&context.workflow_id, "review", "reviewReport")
-                    .await?
-                    == super::review_agent_codes().len() as u64
+            let drafts = store.list_drafts(&context.conversation_id).await?;
+            let memories = store
+                .list_conversation_memories(&context.conversation_id)
+                .await?;
+            let handoffs = store.list_handoffs(&context.conversation_id).await?;
             {
-                let expected_workflow_version = current_workflow.workflow_version;
-                let mut workflow = current_workflow;
-                super::advance_workflow(
-                    &mut workflow,
-                    WorkflowCommand::CompleteReviews,
-                    context.input_version,
-                )?;
-                store
-                    .update_workflow(&workflow, expected_workflow_version)
-                    .await?;
-                next_workflow = Some(workflow);
-            }
-            if let Some(workflow) = &next_workflow {
                 let mut projects = self
                     .projects
                     .lock()
                     .map_err(|_| GameServiceError::StateUnavailable)?;
                 let session =
                     find_conversation_session_mut(&mut projects, &context.conversation_id)?;
-                session
-                    .workflows
-                    .insert(context.conversation_id.clone(), workflow.clone());
+                let snapshot = session
+                    .conversations
+                    .get_mut(&context.conversation_id)
+                    .ok_or_else(|| {
+                        GameServiceError::ConversationNotFound(context.conversation_id.clone())
+                    })?;
+                let message = snapshot
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.id == assistant_message_id)
+                    .ok_or_else(|| {
+                        GameServiceError::InvalidAction("找不到本轮 Agent 消息".to_string())
+                    })?;
+                message.content = parsed.text;
+                message.action = Some(parsed.action.clone());
+                message.status = MessageStatus::Completed;
+                snapshot.conversation.focus_agent_code =
+                    parsed.action.target_agent.clone().or_else(|| {
+                        if parsed.action.action == AgentActionKind::Handoff {
+                            None
+                        } else {
+                            Some(context.agent_code.clone())
+                        }
+                    });
+                snapshot.conversation.status = ConversationStatus::Active;
+                snapshot.conversation.updated_at = now();
+                snapshot.drafts = drafts;
+                snapshot.memories = memories;
+                snapshot.handoffs = handoffs;
             }
             return Ok(Some(CompletedTaskAttempt {
                 attempt_id: completion.attempt_id,
                 task_id: completion.task_id,
                 conversation_id: completion.conversation_id,
                 status: TaskAttemptStatus::Succeeded,
-                artifacts,
-                workflow: next_workflow,
-                conflict_count,
+                agent_code: Some(context.agent_code),
+                action: Some(parsed.action),
             }));
         }
         Ok(None)
+    }
+
+    async fn prepare_action_generations(
+        &self,
+        context: &codex_game_store::TurnAttemptContext,
+        action: &AgentAction,
+        store: &ProjectStore,
+    ) -> Result<(Vec<Generation>, Option<Character>), GameServiceError> {
+        if !matches!(context.agent_code.as_str(), "image_t2i" | "image_i2i") {
+            return Ok((Vec::new(), None));
+        }
+        let result = action.payload.result.as_ref().ok_or_else(|| {
+            GameServiceError::InvalidAction("图片执行 Agent 必须返回 payload.result".to_string())
+        })?;
+        if action.action == AgentActionKind::Blocked {
+            return Ok((Vec::new(), None));
+        }
+        if result.artifacts.is_empty() {
+            return Err(GameServiceError::InvalidAction(
+                "图片执行成功时必须返回至少一个产物".to_string(),
+            ));
+        }
+        if !matches!(context.stage.as_str(), "render" | "views") {
+            return Err(GameServiceError::InvalidAction(
+                "图片产物只能登记到 render 或 views 阶段".to_string(),
+            ));
+        }
+        let (project, target_kind) = {
+            let projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .values()
+                .find(|session| session.conversations.contains_key(&context.conversation_id))
+                .ok_or_else(|| {
+                    GameServiceError::ConversationNotFound(context.conversation_id.clone())
+                })?;
+            let target_kind = session.conversations[&context.conversation_id]
+                .conversation
+                .target_kind;
+            (session.project.clone(), target_kind)
+        };
+        if target_kind != ConversationTargetKind::Character {
+            return Err(GameServiceError::InvalidAction(
+                "图片执行 Agent 只能为角色会话登记产物".to_string(),
+            ));
+        }
+        let mut character = store
+            .read_character(project.id.as_str(), &context.target_id)
+            .await?
+            .ok_or_else(|| GameServiceError::CharacterNotFound(context.target_id.clone()))?;
+        let next_state = match (context.stage.as_str(), character.state) {
+            ("render", CharacterState::S1SpecConfirmed) => Some(CharacterState::S2RenderGenerated),
+            ("render", CharacterState::S2RenderGenerated) => None,
+            ("views", CharacterState::S3RenderConfirmed) => Some(CharacterState::S4ViewsGenerated),
+            ("views", CharacterState::S4ViewsGenerated) => None,
+            _ => {
+                return Err(GameServiceError::InvalidCharacterOperation(format!(
+                    "当前角色状态不允许登记 {} 产物",
+                    context.stage
+                )));
+            }
+        };
+        if result.artifacts.len() != 1 {
+            return Err(GameServiceError::InvalidAction(
+                "角色图片 Agent 每次必须且只能返回一张 2048x2048 图片".to_string(),
+            ));
+        }
+        let mut paths = HashSet::new();
+        let mut generations = Vec::with_capacity(result.artifacts.len());
+        for artifact in &result.artifacts {
+            let file_path = artifact
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| GameServiceError::InvalidAction("图片产物缺少 path".to_string()))?
+                .to_string();
+            if !Path::new(&file_path).starts_with("tmp") {
+                return Err(GameServiceError::InvalidAction(
+                    "图片执行产物必须写入项目 tmp/ 临时目录".to_string(),
+                ));
+            }
+            if !paths.insert(file_path.clone()) {
+                return Err(GameServiceError::InvalidAction(
+                    "图片产物路径不能重复".to_string(),
+                ));
+            }
+            let size = artifact
+                .get("size")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if size != "2048x2048" {
+                return Err(GameServiceError::InvalidAction(
+                    "角色图片产物尺寸必须为 2048x2048".to_string(),
+                ));
+            }
+            let path = safe_project_path(&project.root, &file_path)?;
+            if !path.is_file() {
+                return Err(GameServiceError::InvalidCharacterOperation(format!(
+                    "生成文件不存在：{file_path}"
+                )));
+            }
+            let variant = artifact
+                .get("variant")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| (context.stage == "views").then(|| "quad".to_string()));
+            if context.stage == "views" && variant.as_deref() != Some("quad") {
+                return Err(GameServiceError::InvalidAction(
+                    "四视图产物必须是单张 2×2 四宫格（variant=quad）".to_string(),
+                ));
+            }
+            generations.push(Generation {
+                id: Uuid::now_v7().to_string(),
+                project_id: project.id.as_str().to_string(),
+                target_kind: "character".to_string(),
+                target_ref: context.target_id.clone(),
+                stage: context.stage.clone(),
+                variant,
+                file_path,
+                file_hash: Some(bytes_hash(&fs::read(&path)?)),
+                is_final: false,
+                source: context.agent_code.clone(),
+                task_id: Some(context.task_id.clone()),
+                asset_spec: serde_json::to_value(artifact)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                created_at: now(),
+            });
+        }
+        if let Some(next_state) = next_state {
+            character.state = codex_game_domain::advance_character(character.state, next_state)
+                .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+            character.updated_at = now();
+        }
+        Ok((generations, Some(character)))
+    }
+
+    fn apply_failed_message(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        content: String,
+    ) -> Result<(), GameServiceError> {
+        let mut projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = find_conversation_session_mut(&mut projects, conversation_id)?;
+        let snapshot = session
+            .conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| GameServiceError::ConversationNotFound(conversation_id.to_string()))?;
+        let message = snapshot
+            .messages
+            .iter_mut()
+            .find(|message| message.id == assistant_message_id)
+            .ok_or_else(|| GameServiceError::InvalidAction("找不到本轮 Agent 消息".to_string()))?;
+        message.content = content;
+        message.status = MessageStatus::Failed;
+        snapshot.conversation.status = ConversationStatus::Active;
+        snapshot.conversation.updated_at = now();
+        Ok(())
+    }
+
+    fn apply_latest_running_message(
+        &self,
+        conversation_id: &str,
+        status: MessageStatus,
+        fallback_content: String,
+    ) -> Result<(), GameServiceError> {
+        let mut projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = find_conversation_session_mut(&mut projects, conversation_id)?;
+        let snapshot = session
+            .conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| GameServiceError::ConversationNotFound(conversation_id.to_string()))?;
+        if let Some(message) = snapshot
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.status == MessageStatus::Thinking)
+        {
+            if message.content.is_empty() {
+                message.content = fallback_content;
+            }
+            message.status = status;
+        }
+        snapshot.conversation.status = ConversationStatus::Active;
+        snapshot.conversation.updated_at = now();
+        Ok(())
     }
 
     fn writable_stores(&self) -> Result<Vec<Arc<ProjectStore>>, GameServiceError> {
@@ -530,7 +862,10 @@ impl GameService {
     pub async fn ensure_conversation(
         &self,
         project_id: &str,
-        target_id: Option<String>,
+        target_kind: ConversationTargetKind,
+        target_ref: Option<String>,
+        title: String,
+        director_agent_code: String,
     ) -> Result<Conversation, GameServiceError> {
         let (conversation, store) = {
             let mut projects = self
@@ -540,25 +875,42 @@ impl GameService {
             let session = projects
                 .get_mut(project_id)
                 .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
-            if let Some(snapshot) = session
-                .conversations
-                .values()
-                .find(|snapshot| snapshot.conversation.target_id == target_id)
+            if target_kind == ConversationTargetKind::Character
+                && session.project.state != ProjectState::Ready
             {
+                return Err(GameServiceError::ProjectGate(
+                    "Art Bible 与立项尚未确认".to_string(),
+                ));
+            }
+            if let Some(snapshot) = session.conversations.values().find(|snapshot| {
+                snapshot.conversation.target_kind == target_kind
+                    && snapshot.conversation.target_ref == target_ref
+            }) {
                 return Ok(snapshot.conversation.clone());
             }
             require_writable(session)?;
+            let timestamp = now();
             let conversation = Conversation {
                 id: ConversationId::new(Uuid::now_v7().to_string()),
                 project_id: ProjectId::new(project_id),
-                target_id,
-                created_at: now(),
+                target_kind,
+                target_ref,
+                title,
+                director_agent_code,
+                focus_agent_code: None,
+                status: ConversationStatus::Active,
+                turn: 0,
+                created_at: timestamp,
+                updated_at: timestamp,
             };
             session.conversations.insert(
                 conversation.id.as_str().to_string(),
                 ConversationSnapshot {
                     conversation: conversation.clone(),
                     messages: Vec::new(),
+                    drafts: Vec::new(),
+                    memories: Vec::new(),
+                    handoffs: Vec::new(),
                 },
             );
             (conversation, Arc::clone(&session.store))
@@ -572,229 +924,266 @@ impl GameService {
         conversation_id: &str,
         content: String,
     ) -> Result<ConversationMessage, GameServiceError> {
-        let (message, store) = {
+        self.prepare_conversation_turn(conversation_id, content, None)
+            .await
+            .map(|prepared| prepared.user_message)
+    }
+
+    pub async fn prepare_conversation_turn(
+        &self,
+        conversation_id: &str,
+        content: String,
+        recipient_agent_code: Option<String>,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        if content.trim().is_empty() {
+            return Err(GameServiceError::InvalidAction("消息不能为空".to_string()));
+        }
+        let (project, store, target_kind, target_ref, current_focus, director, status) = {
+            let projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .values()
+                .find(|session| session.conversations.contains_key(conversation_id))
+                .ok_or_else(|| {
+                    GameServiceError::ConversationNotFound(conversation_id.to_string())
+                })?;
+            require_writable(session)?;
+            let conversation = &session.conversations[conversation_id].conversation;
+            (
+                session.project.clone(),
+                Arc::clone(&session.store),
+                conversation.target_kind,
+                conversation.target_ref.clone(),
+                conversation.focus_agent_code.clone(),
+                conversation.director_agent_code.clone(),
+                conversation.status,
+            )
+        };
+        if status == ConversationStatus::Running {
+            return Err(GameServiceError::InvalidAction(
+                "该会话已有一轮正在运行".to_string(),
+            ));
+        }
+        let stage = match target_kind {
+            ConversationTargetKind::Project => "project".to_string(),
+            ConversationTargetKind::Character => {
+                let character_id = target_ref.as_deref().ok_or_else(|| {
+                    GameServiceError::InvalidCharacterOperation(
+                        "角色会话缺少 targetRef".to_string(),
+                    )
+                })?;
+                store
+                    .read_character(project.id.as_str(), character_id)
+                    .await?
+                    .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?
+                    .state
+                    .stage()
+                    .to_string()
+            }
+        };
+        let agent_code = recipient_agent_code
+            .clone()
+            .or(current_focus)
+            .unwrap_or(director);
+        let allowed = codex_game_domain::agents_for_stage(target_kind.as_str(), &stage);
+        if !allowed.contains(&agent_code.as_str()) {
+            return Err(GameServiceError::InvalidAction(format!(
+                "Agent {agent_code} 不允许处理 {stage} 阶段"
+            )));
+        }
+        let timestamp = now();
+        let (conversation, user_message, assistant_message) = {
             let mut projects = self
                 .projects
                 .lock()
                 .map_err(|_| GameServiceError::StateUnavailable)?;
             let session = find_conversation_session_mut(&mut projects, conversation_id)?;
-            require_writable(session)?;
-            let message = ConversationMessage {
-                id: Uuid::now_v7().to_string(),
-                conversation_id: ConversationId::new(conversation_id),
-                role: "user".to_string(),
-                content,
-                created_at: now(),
-            };
-            session
+            let snapshot = session
                 .conversations
                 .get_mut(conversation_id)
-                .ok_or_else(|| GameServiceError::ConversationNotFound(conversation_id.to_string()))?
-                .messages
-                .push(message.clone());
-            (message, Arc::clone(&session.store))
+                .ok_or_else(|| {
+                    GameServiceError::ConversationNotFound(conversation_id.to_string())
+                })?;
+            snapshot.conversation.turn += 1;
+            snapshot.conversation.status = ConversationStatus::Running;
+            snapshot.conversation.updated_at = timestamp;
+            let turn = snapshot.conversation.turn;
+            let user_message = ConversationMessage {
+                id: Uuid::now_v7().to_string(),
+                conversation_id: ConversationId::new(conversation_id),
+                turn,
+                role: "user".to_string(),
+                content,
+                agent_code: "user".to_string(),
+                recipient_agent_code,
+                status: MessageStatus::Completed,
+                token_count: 0,
+                folded: false,
+                attachments: Vec::new(),
+                action: None,
+                created_at: timestamp,
+            };
+            let assistant_message = ConversationMessage {
+                id: Uuid::now_v7().to_string(),
+                conversation_id: ConversationId::new(conversation_id),
+                turn,
+                role: "assistant".to_string(),
+                content: String::new(),
+                agent_code: agent_code.clone(),
+                recipient_agent_code: None,
+                status: MessageStatus::Thinking,
+                token_count: 0,
+                folded: false,
+                attachments: Vec::new(),
+                action: None,
+                created_at: timestamp,
+            };
+            snapshot.messages.push(user_message.clone());
+            snapshot.messages.push(assistant_message.clone());
+            (
+                snapshot.conversation.clone(),
+                user_message,
+                assistant_message,
+            )
         };
-        store.insert_message(&message).await?;
-        Ok(message)
-    }
-
-    pub fn read_conversation(
-        &self,
-        conversation_id: &str,
-    ) -> Result<ConversationSnapshot, GameServiceError> {
-        let projects = self
-            .projects
-            .lock()
-            .map_err(|_| GameServiceError::StateUnavailable)?;
-        projects
-            .values()
-            .find_map(|session| session.conversations.get(conversation_id).cloned())
-            .ok_or_else(|| GameServiceError::ConversationNotFound(conversation_id.to_string()))
-    }
-
-    pub async fn start_focus(
-        &self,
-        conversation_id: &str,
-    ) -> Result<FocusWorkflow, GameServiceError> {
-        let (workflow, store) = {
+        if let Err(error) = store
+            .begin_conversation_turn(&conversation, &user_message, &assistant_message)
+            .await
+        {
             let mut projects = self
                 .projects
                 .lock()
                 .map_err(|_| GameServiceError::StateUnavailable)?;
             let session = find_conversation_session_mut(&mut projects, conversation_id)?;
-            require_writable(session)?;
-            if let Some(workflow) = session.workflows.get(conversation_id) {
-                return Ok(workflow.clone());
+            if let Some(snapshot) = session.conversations.get_mut(conversation_id) {
+                snapshot.messages.retain(|message| {
+                    message.id != user_message.id && message.id != assistant_message.id
+                });
+                snapshot.conversation.turn = snapshot.conversation.turn.saturating_sub(1);
+                snapshot.conversation.status = ConversationStatus::Active;
             }
-            let mut workflow = FocusWorkflow {
-                id: FocusWorkflowId::new(Uuid::now_v7().to_string()),
-                project_id: session.project.id.clone(),
-                conversation_id: ConversationId::new(conversation_id),
-                state: WorkflowState::Draft,
-                input_version: 1,
-                workflow_version: 1,
-            };
-            super::advance_workflow(&mut workflow, WorkflowCommand::StartFocus, 1)?;
-            session.project.state = ProjectState::FocusInProgress;
-            update_project_json(
-                &Path::new(&session.project.root).join("project.json"),
-                session.project.id.as_str(),
-                &session.project.name,
-                "focusInProgress",
-            )?;
-            session
-                .workflows
-                .insert(conversation_id.to_string(), workflow.clone());
-            (workflow, Arc::clone(&session.store))
-        };
-        store.upsert_workflow(&workflow).await?;
-        Ok(workflow)
-    }
-
-    pub fn read_focus(&self, conversation_id: &str) -> Result<FocusWorkflow, GameServiceError> {
-        let projects = self
-            .projects
-            .lock()
-            .map_err(|_| GameServiceError::StateUnavailable)?;
-        projects
-            .values()
-            .find_map(|session| session.workflows.get(conversation_id).cloned())
-            .ok_or_else(|| GameServiceError::WorkflowNotFound(conversation_id.to_string()))
-    }
-
-    pub async fn read_focus_artifacts(
-        &self,
-        conversation_id: &str,
-    ) -> Result<Vec<Artifact>, GameServiceError> {
-        let (workflow_id, store) = {
-            let projects = self
-                .projects
-                .lock()
-                .map_err(|_| GameServiceError::StateUnavailable)?;
-            let session = projects
-                .values()
-                .find(|session| session.conversations.contains_key(conversation_id))
-                .ok_or_else(|| {
-                    GameServiceError::ConversationNotFound(conversation_id.to_string())
-                })?;
-            let workflow = session
-                .workflows
-                .get(conversation_id)
-                .ok_or_else(|| GameServiceError::WorkflowNotFound(conversation_id.to_string()))?;
-            (workflow.id.as_str().to_string(), Arc::clone(&session.store))
-        };
-        store
-            .artifacts_for_workflow(&workflow_id, "")
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn record_conflict_decision(
-        &self,
-        conversation_id: &str,
-        expected_input_version: u64,
-        decision: UserDecision,
-    ) -> Result<(FocusWorkflow, Artifact), GameServiceError> {
-        let (current_workflow, store) = {
-            let projects = self
-                .projects
-                .lock()
-                .map_err(|_| GameServiceError::StateUnavailable)?;
-            let session = projects
-                .values()
-                .find(|session| session.conversations.contains_key(conversation_id))
-                .ok_or_else(|| {
-                    GameServiceError::ConversationNotFound(conversation_id.to_string())
-                })?;
-            require_writable(session)?;
-            let workflow = session
-                .workflows
-                .get(conversation_id)
-                .cloned()
-                .ok_or_else(|| GameServiceError::WorkflowNotFound(conversation_id.to_string()))?;
-            (workflow, Arc::clone(&session.store))
-        };
-        let conflicts = store
-            .artifacts_for_workflow(current_workflow.id.as_str(), "conflictSet")
-            .await?
-            .into_iter()
-            .rev()
-            .find_map(|artifact| match artifact.content {
-                ArtifactContent::ConflictSet(conflicts) => Some(conflicts),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                GameServiceError::InvalidDesignDecision(
-                    "the workflow has no committed conflict set".to_string(),
-                )
-            })?;
-        let conflict = conflicts
-            .conflicts
-            .iter()
-            .find(|conflict| conflict.key == decision.conflict_key)
-            .ok_or_else(|| {
-                GameServiceError::InvalidDesignDecision(format!(
-                    "unknown conflict key {}",
-                    decision.conflict_key
-                ))
-            })?;
-        if !conflict.options.contains(&decision.selected_option) {
-            return Err(GameServiceError::InvalidDesignDecision(format!(
-                "option is not valid for conflict {}",
-                decision.conflict_key
-            )));
+            return Err(error.into());
         }
-        let duplicate = store
-            .artifacts_for_workflow(current_workflow.id.as_str(), "userDecision")
-            .await?
-            .into_iter()
-            .any(|artifact| {
-                matches!(
-                    artifact.content,
-                    ArtifactContent::UserDecision(existing)
-                        if existing.conflict_key == decision.conflict_key
-                )
-            });
-        if duplicate {
-            return Err(GameServiceError::InvalidDesignDecision(format!(
-                "conflict {} already has a decision",
-                decision.conflict_key
-            )));
-        }
-        let mut workflow = current_workflow.clone();
-        super::advance_workflow(
-            &mut workflow,
-            WorkflowCommand::RecordConflictDecision,
-            expected_input_version,
-        )?;
-        let artifact = Artifact {
-            id: ArtifactId::new(Uuid::now_v7().to_string()),
-            input_version: current_workflow.input_version,
-            workflow_version: current_workflow.workflow_version,
-            content: ArtifactContent::UserDecision(decision),
-            created_at: now(),
+        Ok(PreparedConversationTurn {
+            user_message,
+            assistant_message,
+            conversation,
+            agent_code,
+            stage,
+            project,
+            store,
+        })
+    }
+
+    pub async fn complete_prepared_blocked(
+        &self,
+        prepared: &PreparedConversationTurn,
+        reason: String,
+    ) -> Result<(), GameServiceError> {
+        let action = AgentAction {
+            action: AgentActionKind::Blocked,
+            target_agent: None,
+            reason: reason.clone(),
+            payload: AgentActionPayload::default(),
         };
-        store
-            .commit_workflow_artifact(&workflow, current_workflow.workflow_version, &artifact)
+        let timestamp = now();
+        prepared
+            .store
+            .complete_prepared_action(
+                prepared.conversation.id.as_str(),
+                &prepared.assistant_message.id,
+                &reason,
+                &action,
+                timestamp,
+            )
             .await?;
         let mut projects = self
             .projects
             .lock()
             .map_err(|_| GameServiceError::StateUnavailable)?;
-        find_conversation_session_mut(&mut projects, conversation_id)?
-            .workflows
-            .insert(conversation_id.to_string(), workflow.clone());
-        Ok((workflow, artifact))
+        let session =
+            find_conversation_session_mut(&mut projects, prepared.conversation.id.as_str())?;
+        let snapshot = session
+            .conversations
+            .get_mut(prepared.conversation.id.as_str())
+            .ok_or_else(|| {
+                GameServiceError::ConversationNotFound(
+                    prepared.conversation.id.as_str().to_string(),
+                )
+            })?;
+        let message = snapshot
+            .messages
+            .iter_mut()
+            .find(|message| message.id == prepared.assistant_message.id)
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("找不到待完成的 Agent 消息".to_string())
+            })?;
+        message.content = reason;
+        message.action = Some(action);
+        message.status = MessageStatus::Completed;
+        snapshot.conversation.status = ConversationStatus::Active;
+        snapshot.conversation.updated_at = timestamp;
+        Ok(())
     }
 
-    pub async fn advance_focus(
+    pub async fn read_conversation(
         &self,
         conversation_id: &str,
-        command: WorkflowCommand,
-        expected_input_version: u64,
-        markdown: Option<String>,
-    ) -> Result<(FocusWorkflow, Option<ArtBibleDocument>), GameServiceError> {
-        let (current_workflow, project, store, next_art_bible_version) = {
+    ) -> Result<ConversationSnapshot, GameServiceError> {
+        let (mut snapshot, store) = {
+            let projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .values()
+                .find(|session| session.conversations.contains_key(conversation_id))
+                .ok_or_else(|| {
+                    GameServiceError::ConversationNotFound(conversation_id.to_string())
+                })?;
+            (
+                session.conversations[conversation_id].clone(),
+                Arc::clone(&session.store),
+            )
+        };
+        snapshot.drafts = store.list_drafts(conversation_id).await?;
+        snapshot.memories = store.list_conversation_memories(conversation_id).await?;
+        snapshot.handoffs = store.list_handoffs(conversation_id).await?;
+        Ok(snapshot)
+    }
+
+    pub async fn prepare_handoff_turn(
+        &self,
+        conversation_id: &str,
+        target_agent: &str,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let snapshot = self.read_conversation(conversation_id).await?;
+        let latest_action = snapshot
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.action.as_ref())
+            .ok_or_else(|| GameServiceError::InvalidAction("没有可继续的 handoff".to_string()))?;
+        if latest_action.action != AgentActionKind::Handoff
+            || latest_action.target_agent.as_deref() != Some(target_agent)
+        {
+            return Err(GameServiceError::InvalidAction(
+                "handoff 目标与上一条 Action 不一致".to_string(),
+            ));
+        }
+        let handoff_count = snapshot
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.turn == snapshot.conversation.turn)
+            .count();
+        if handoff_count >= MAX_HANDOFFS {
+            return Err(GameServiceError::InvalidAction(
+                "单轮自动 handoff 不得超过两次".to_string(),
+            ));
+        }
+        let (project, store) = {
             let projects = self
                 .projects
                 .lock()
@@ -806,162 +1195,977 @@ impl GameService {
                     GameServiceError::ConversationNotFound(conversation_id.to_string())
                 })?;
             require_writable(session)?;
-            let workflow = session
-                .workflows
-                .get(conversation_id)
-                .cloned()
-                .ok_or_else(|| GameServiceError::WorkflowNotFound(conversation_id.to_string()))?;
+            (session.project.clone(), Arc::clone(&session.store))
+        };
+        let stage = match snapshot.conversation.target_kind {
+            ConversationTargetKind::Project => "project".to_string(),
+            ConversationTargetKind::Character => {
+                let character_id =
+                    snapshot.conversation.target_ref.as_deref().ok_or_else(|| {
+                        GameServiceError::InvalidCharacterOperation(
+                            "角色会话缺少 targetRef".to_string(),
+                        )
+                    })?;
+                store
+                    .read_character(project.id.as_str(), character_id)
+                    .await?
+                    .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?
+                    .state
+                    .stage()
+                    .to_string()
+            }
+        };
+        let allowed =
+            codex_game_domain::agents_for_stage(snapshot.conversation.target_kind.as_str(), &stage);
+        if !allowed.contains(&target_agent) {
+            return Err(GameServiceError::InvalidAction(format!(
+                "Agent {target_agent} 不允许处理 {stage} 阶段"
+            )));
+        }
+        let timestamp = now();
+        let mut conversation = snapshot.conversation.clone();
+        conversation.focus_agent_code = Some(target_agent.to_string());
+        conversation.status = ConversationStatus::Running;
+        conversation.updated_at = timestamp;
+        let assistant_message = ConversationMessage {
+            id: Uuid::now_v7().to_string(),
+            conversation_id: ConversationId::new(conversation_id),
+            turn: conversation.turn,
+            role: "assistant".to_string(),
+            content: String::new(),
+            agent_code: target_agent.to_string(),
+            recipient_agent_code: None,
+            status: MessageStatus::Thinking,
+            token_count: 0,
+            folded: false,
+            attachments: Vec::new(),
+            action: None,
+            created_at: timestamp,
+        };
+        store
+            .begin_handoff_continuation(&conversation, &assistant_message)
+            .await?;
+        {
+            let mut projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = find_conversation_session_mut(&mut projects, conversation_id)?;
+            let current = session
+                .conversations
+                .get_mut(conversation_id)
+                .ok_or_else(|| {
+                    GameServiceError::ConversationNotFound(conversation_id.to_string())
+                })?;
+            current.conversation = conversation.clone();
+            current.messages.push(assistant_message.clone());
+        }
+        let user_message = snapshot
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user" && message.turn == conversation.turn)
+            .cloned()
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("handoff 缺少原始用户消息".to_string())
+            })?;
+        Ok(PreparedConversationTurn {
+            user_message,
+            assistant_message,
+            conversation,
+            agent_code: target_agent.to_string(),
+            stage,
+            project,
+            store,
+        })
+    }
+
+    pub async fn build_conversation_context(
+        &self,
+        prepared: &PreparedConversationTurn,
+    ) -> Result<ContextPackage, GameServiceError> {
+        let snapshot = self
+            .read_conversation(prepared.conversation.id.as_str())
+            .await?;
+        let art_bible_path = Path::new(&prepared.project.root).join("art-bible.md");
+        let art_bible = fs::read_to_string(art_bible_path).ok();
+        let character_context = if prepared.conversation.target_kind
+            == ConversationTargetKind::Character
+        {
+            let character_id = prepared.conversation.target_ref.as_deref().ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("角色会话缺少 targetRef".to_string())
+            })?;
+            prepared
+                .store
+                .read_character(prepared.project.id.as_str(), character_id)
+                .await?
+                .map(|character| serde_json::to_string(&character))
+                .transpose()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        } else {
+            None
+        };
+        let handoff_count = snapshot
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.turn == prepared.conversation.turn)
+            .count();
+        let allowed_handoffs = if handoff_count >= MAX_HANDOFFS {
+            Vec::new()
+        } else {
+            codex_game_domain::agents_for_stage(
+                prepared.conversation.target_kind.as_str(),
+                &prepared.stage,
+            )
+            .iter()
+            .filter(|agent| **agent != prepared.agent_code.as_str())
+            .map(|agent| (*agent).to_string())
+            .collect::<Vec<_>>()
+        };
+        let conversation_history = snapshot
+            .messages
+            .iter()
+            .rev()
+            .take(12)
+            .rev()
+            .map(|message| {
+                format!(
+                    "{}({}): {}",
+                    message.role, message.agent_code, message.content
+                )
+            })
+            .collect();
+        let memories = prepared
+            .store
+            .list_project_memories(
+                prepared.project.id.as_str(),
+                prepared.conversation.target_ref.as_deref(),
+            )
+            .await?
+            .into_iter()
+            .map(|memory| format!("{}:{}", memory.kind, memory.content))
+            .collect();
+        Ok(ContextPackage {
+            conversation_history,
+            context_version: prepared.conversation.turn,
+            contract_version: 2,
+            agent_definition_version: "2".to_string(),
+            // Agent 输出是面向用户的正文加尾置 Action 块，不能启用整条回复 JSON schema。
+            output_schema: String::new(),
+            target_kind: prepared.conversation.target_kind.as_str().to_string(),
+            target_ref: prepared.conversation.target_ref.clone(),
+            stage: prepared.stage.clone(),
+            art_bible,
+            character_context,
+            memories,
+            allowed_handoffs,
+            action_protocol: action_protocol_instruction(),
+        })
+    }
+
+    pub fn inspect_project_dir(&self, root: &str) -> Result<ProjectDirState, GameServiceError> {
+        let root = absolute_root(root)?;
+        let project_json = root.join("project.json");
+        let occupied = project_json.exists() || root.join(".codex-game/local/project.db").exists();
+        if !project_json.exists() {
+            return Ok(ProjectDirState {
+                root: root.to_string_lossy().into_owned(),
+                occupied,
+                project_id: None,
+                supported: true,
+            });
+        }
+        let value = fs::read_to_string(&project_json)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+        Ok(ProjectDirState {
+            root: root.to_string_lossy().into_owned(),
+            occupied,
+            project_id: value
+                .as_ref()
+                .and_then(|value| value.get("projectId").or_else(|| value.get("id")))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            supported: value
+                .as_ref()
+                .and_then(|value| value.get("schemaVersion"))
+                .and_then(serde_json::Value::as_u64)
+                == Some(2),
+        })
+    }
+
+    pub async fn commit_art_bible_draft(
+        &self,
+        conversation_id: &str,
+        draft_id: &str,
+    ) -> Result<ArtBibleDocument, GameServiceError> {
+        let snapshot = self.read_conversation(conversation_id).await?;
+        if snapshot.conversation.target_kind != ConversationTargetKind::Project {
+            return Err(GameServiceError::ProjectGate(
+                "只有项目会话可以确认 Art Bible".to_string(),
+            ));
+        }
+        let draft = snapshot
+            .drafts
+            .iter()
+            .find(|draft| draft.id == draft_id && draft.status == "pending")
+            .cloned()
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("Art Bible 草稿不存在或已提交".to_string())
+            })?;
+        if draft.target_path != "art-bible.md" {
+            return Err(GameServiceError::InvalidAction(
+                "Art Bible 草稿目标必须是 art-bible.md".to_string(),
+            ));
+        }
+        let (project, store, version_number) = {
+            let projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .get(snapshot.conversation.project_id.as_str())
+                .ok_or_else(|| {
+                    GameServiceError::ProjectNotFound(
+                        snapshot.conversation.project_id.as_str().to_string(),
+                    )
+                })?;
+            require_writable(session)?;
             (
-                workflow,
                 session.project.clone(),
                 Arc::clone(&session.store),
                 session.art_bibles.len() as u64 + 1,
             )
         };
-        let mut workflow = current_workflow.clone();
-        super::advance_workflow(&mut workflow, command, expected_input_version)?;
-        let document = if command == WorkflowCommand::ConfirmArtBible {
-            let draft = store
-                .artifacts_for_workflow(current_workflow.id.as_str(), "artBibleDraft")
-                .await?
-                .into_iter()
-                .rev()
-                .find_map(|artifact| match artifact.content {
-                    ArtifactContent::ArtBibleDraft(draft) => Some(draft),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    GameServiceError::InvalidDesignDecision(
-                        "the workflow has no committed Art Bible draft".to_string(),
-                    )
-                })?;
-            if markdown
-                .as_deref()
-                .is_some_and(|value| value != draft.markdown)
-            {
-                return Err(GameServiceError::InvalidDesignDecision(
-                    "confirmation content does not match the committed Art Bible draft".to_string(),
-                ));
-            }
-            let markdown = draft.markdown;
-            let conflicts = store
-                .artifacts_for_workflow(current_workflow.id.as_str(), "conflictSet")
-                .await?;
-            let decisions = store
-                .artifacts_for_workflow(current_workflow.id.as_str(), "userDecision")
-                .await?;
-            let decided_keys = decisions
-                .iter()
-                .filter_map(|artifact| match &artifact.content {
-                    ArtifactContent::UserDecision(decision) => Some(decision.conflict_key.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if let Some(unresolved) =
-                conflicts
-                    .iter()
-                    .find_map(|artifact| match &artifact.content {
-                        ArtifactContent::ConflictSet(conflicts) => conflicts
-                            .conflicts
-                            .iter()
-                            .find(|conflict| {
-                                conflict.high_impact
-                                    && !decided_keys.contains(&conflict.key.as_str())
-                            })
-                            .map(|conflict| conflict.key.clone()),
-                        _ => None,
-                    })
-            {
-                return Err(GameServiceError::InvalidDesignDecision(format!(
-                    "high-impact conflict {unresolved} has not been resolved"
-                )));
-            }
-            let mut source_artifact_ids = Vec::new();
-            for artifact_type in [
-                "structuredBrief",
-                "reviewReport",
-                "conflictSet",
-                "artBibleDraft",
-                "userDecision",
-            ] {
-                source_artifact_ids.extend(
-                    store
-                        .artifacts_for_workflow(current_workflow.id.as_str(), artifact_type)
-                        .await?
-                        .into_iter()
-                        .map(|artifact| artifact.id),
-                );
-            }
-            let version = ArtBibleVersion {
-                id: ArtBibleVersionId::new(Uuid::now_v7().to_string()),
-                project_id: project.id.clone(),
-                version: next_art_bible_version,
-                content_hash: format!("{:x}", Sha256::digest(markdown.as_bytes())),
-                source_artifact_ids,
-                created_at: now(),
-            };
-            Some(ArtBibleDocument { version, markdown })
-        } else {
-            None
-        };
-        let project_json_path = Path::new(&project.root).join("project.json");
-        if command == WorkflowCommand::VersionArtBible {
-            update_project_json(
-                &project_json_path,
-                project.id.as_str(),
-                &project.name,
-                "versioned",
-            )?;
-        }
-        if let Some(document) = &document {
-            let art_bible_path = Path::new(&project.root).join("art-bible.md");
-            let previous_markdown = fs::read_to_string(&art_bible_path).ok();
-            write_art_bible(&art_bible_path, &document.markdown)?;
-            if let Err(error) = store
-                .commit_art_bible_version(
-                    &workflow,
-                    current_workflow.workflow_version,
-                    &document.version,
-                    &document.markdown,
-                )
-                .await
-            {
-                if let Some(previous_markdown) = previous_markdown {
-                    let _ = write_art_bible(&art_bible_path, &previous_markdown);
-                } else {
-                    let _ = fs::remove_file(&art_bible_path);
-                }
-                return Err(error.into());
-            }
-        } else if let Err(error) = store
-            .update_workflow(&workflow, current_workflow.workflow_version)
-            .await
-        {
-            if command == WorkflowCommand::VersionArtBible {
-                let _ = update_project_json(
-                    &project_json_path,
-                    project.id.as_str(),
-                    &project.name,
-                    project_state_name(project.state),
-                );
-            }
+        let path = Path::new(&project.root).join("art-bible.md");
+        let project_json = Path::new(&project.root).join("project.json");
+        validate_draft_baseline(&path, draft.based_on_hash.as_deref())?;
+        let backups = vec![
+            (path.clone(), fs::read(&path).ok()),
+            (project_json.clone(), fs::read(&project_json).ok()),
+        ];
+        write_art_bible(&path, &draft.content)?;
+        if let Err(error) = update_project_json(
+            &project_json,
+            project.id.as_str(),
+            &project.name,
+            "styleSettled",
+        ) {
+            restore_files(&backups);
             return Err(error.into());
         }
+        let version = ArtBibleVersion {
+            id: ArtBibleVersionId::new(Uuid::now_v7().to_string()),
+            project_id: project.id.clone(),
+            version: version_number,
+            content_hash: content_hash(&draft.content),
+            source_artifact_ids: Vec::new(),
+            created_at: now(),
+        };
+        if let Err(error) = store
+            .commit_art_bible_gate(&version, &draft.content, &draft.id)
+            .await
+        {
+            restore_files(&backups);
+            return Err(error.into());
+        }
+        let document = ArtBibleDocument {
+            version,
+            markdown: draft.content,
+        };
+        let drafts = store.list_drafts(conversation_id).await?;
+        let mut projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = projects
+            .get_mut(project.id.as_str())
+            .ok_or_else(|| GameServiceError::ProjectNotFound(project.id.as_str().to_string()))?;
+        session.project.state = ProjectState::StyleSettled;
+        session.art_bibles.push(document.clone());
+        if let Some(current) = session.conversations.get_mut(conversation_id) {
+            current.drafts = drafts;
+        }
+        Ok(document)
+    }
+
+    pub async fn commit_conversation_drafts(
+        &self,
+        conversation_id: &str,
+        draft_ids: &[String],
+    ) -> Result<(), GameServiceError> {
+        if draft_ids.is_empty() {
+            return Err(GameServiceError::InvalidAction(
+                "至少选择一个草稿".to_string(),
+            ));
+        }
+        let snapshot = self.read_conversation(conversation_id).await?;
+        let project = self.read_project(snapshot.conversation.project_id.as_str())?;
+        let store = self.project_store(project.id.as_str(), true)?;
+        let mut selected = Vec::with_capacity(draft_ids.len());
+        for draft_id in draft_ids {
+            if selected
+                .iter()
+                .any(|draft: &ArtifactDraftRecord| draft.id == *draft_id)
+            {
+                return Err(GameServiceError::InvalidAction(
+                    "草稿列表不能包含重复项".to_string(),
+                ));
+            }
+            let draft = snapshot
+                .drafts
+                .iter()
+                .find(|draft| draft.id == *draft_id && draft.status == "pending")
+                .cloned()
+                .ok_or_else(|| {
+                    GameServiceError::InvalidAction(format!("草稿不存在或已提交：{draft_id}"))
+                })?;
+            if matches!(draft.target_path.as_str(), "project.json" | "art-bible.md")
+                || draft.target_path.starts_with(".codex-game/")
+            {
+                return Err(GameServiceError::InvalidAction(format!(
+                    "该文件必须通过专用人工门禁提交：{}",
+                    draft.target_path
+                )));
+            }
+            let path = safe_project_path(&project.root, &draft.target_path)?;
+            validate_draft_baseline(&path, draft.based_on_hash.as_deref())?;
+            selected.push(draft);
+        }
+        let backups = selected
+            .iter()
+            .map(|draft| {
+                let path = safe_project_path(&project.root, &draft.target_path)?;
+                Ok((path.clone(), fs::read(&path).ok()))
+            })
+            .collect::<Result<Vec<_>, GameServiceError>>()?;
+        for draft in &selected {
+            let path = safe_project_path(&project.root, &draft.target_path)?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Err(error) = write_art_bible(&path, &draft.content) {
+                restore_files(&backups);
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = store.mark_drafts_committed(draft_ids).await {
+            restore_files(&backups);
+            return Err(error.into());
+        }
+        let drafts = store.list_drafts(conversation_id).await?;
         let mut projects = self
             .projects
             .lock()
             .map_err(|_| GameServiceError::StateUnavailable)?;
         let session = find_conversation_session_mut(&mut projects, conversation_id)?;
+        if let Some(current) = session.conversations.get_mut(conversation_id) {
+            current.drafts = drafts;
+        }
+        Ok(())
+    }
+
+    pub async fn finalize_project(
+        &self,
+        project_id: &str,
+        name: String,
+        code: String,
+    ) -> Result<Project, GameServiceError> {
+        if name.trim().is_empty() || !is_valid_code(&code) {
+            return Err(GameServiceError::ProjectGate(
+                "项目名或代号不合法".to_string(),
+            ));
+        }
+        let (mut project, store) = {
+            let projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .get(project_id)
+                .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
+            require_writable(session)?;
+            if session.project.state != ProjectState::StyleSettled {
+                return Err(GameServiceError::ProjectGate(
+                    "必须先确认 Art Bible".to_string(),
+                ));
+            }
+            (session.project.clone(), Arc::clone(&session.store))
+        };
+        let root = Path::new(&project.root);
+        let characters = root.join("characters");
+        let created_characters = !characters.exists();
+        let managed_files = [
+            root.join("project.json"),
+            root.join(".gitignore"),
+            root.join(".gitattributes"),
+        ];
+        let backups = managed_files
+            .iter()
+            .map(|path| (path.clone(), fs::read(path).ok()))
+            .collect::<Vec<_>>();
+        let write_result = (|| -> Result<(), GameServiceError> {
+            fs::create_dir_all(&characters)?;
+            append_line_once(&root.join(".gitignore"), "/.codex-game/local/")?;
+            append_line_once(&root.join(".gitattributes"), "*.png binary")?;
+            project.name = name.trim().to_string();
+            project.code = Some(code.clone());
+            project.state = ProjectState::Ready;
+            finalize_project_json(
+                &root.join("project.json"),
+                project.id.as_str(),
+                &project.name,
+                &code,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            restore_files(&backups);
+            if created_characters {
+                let _ = fs::remove_dir(&characters);
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.register_project(&project, store.access()).await {
+            restore_files(&backups);
+            if created_characters {
+                let _ = fs::remove_dir(&characters);
+            }
+            return Err(error);
+        }
+        {
+            let mut projects = self
+                .projects
+                .lock()
+                .map_err(|_| GameServiceError::StateUnavailable)?;
+            let session = projects
+                .get_mut(project_id)
+                .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
+            session.project = project.clone();
+        }
+        Ok(project)
+    }
+
+    pub async fn list_characters(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<Character>, GameServiceError> {
+        let store = self.project_store(project_id, false)?;
+        store.list_characters(project_id).await.map_err(Into::into)
+    }
+
+    pub async fn read_character(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<Character, GameServiceError> {
+        let store = self.project_store(project_id, false)?;
+        store
+            .read_character(project_id, character_id)
+            .await?
+            .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))
+    }
+
+    pub async fn create_character(
+        &self,
+        project_id: &str,
+        name: String,
+        group: Option<String>,
+        overwrite: bool,
+    ) -> Result<Character, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        if project.state != ProjectState::Ready {
+            return Err(GameServiceError::ProjectGate(
+                "Art Bible 与立项尚未确认".to_string(),
+            ));
+        }
+        let store = self.project_store(project_id, true)?;
+        let dir_name = safe_segment(&name)?;
+        let group = group
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| safe_segment(&value))
+            .transpose()?;
+        let relative_dir = group
+            .as_ref()
+            .map(|group| PathBuf::from("characters").join(group).join(&dir_name))
+            .unwrap_or_else(|| PathBuf::from("characters").join(&dir_name));
+        let character_dir = Path::new(&project.root).join(&relative_dir);
+        if character_dir.exists() && !overwrite {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色目录已存在，请明确选择覆盖".to_string(),
+            ));
+        }
+        if overwrite && character_dir.exists() {
+            fs::remove_dir_all(&character_dir)?;
+        }
+        fs::create_dir_all(character_dir.join("docs"))?;
+        fs::create_dir_all(character_dir.join("images"))?;
+        let timestamp = now();
+        let character = Character {
+            id: Uuid::now_v7().to_string(),
+            project_id: project_id.to_string(),
+            name: name.trim().to_string(),
+            group,
+            dir_name: relative_dir.to_string_lossy().into_owned(),
+            state: CharacterState::S0SpecDrafting,
+            spec_path: None,
+            render_path: None,
+            view_paths: BTreeMap::new(),
+            hard_constraints: Vec::new(),
+            gate_spec_confirmed_at: None,
+            gate_render_confirmed_at: None,
+            gate_views_confirmed_at: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        write_character_meta(&project, &character)?;
+        store.insert_character(&character).await?;
+        Ok(character)
+    }
+
+    pub async fn confirm_character_spec(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        draft_id: &str,
+    ) -> Result<Character, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let store = self.project_store(project_id, true)?;
+        let mut character = self.read_character(project_id, character_id).await?;
+        if character.state != CharacterState::S0SpecDrafting {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色设定已确认或尚未处于 S0".to_string(),
+            ));
+        }
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        let draft = store
+            .list_drafts(conversation.id.as_str())
+            .await?
+            .into_iter()
+            .find(|draft| draft.id == draft_id && draft.status == "pending")
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(
+                    "角色设定草稿不存在或已提交".to_string(),
+                )
+            })?;
+        if draft.target_path != "docs/角色定稿.md" {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色设定草稿目标必须是 docs/角色定稿.md".to_string(),
+            ));
+        }
+        let constraints = self
+            .require_approved_verdict(project_id, character_id, "SPEC-CHECK", draft.created_at)
+            .await?;
+        let relative = PathBuf::from(&character.dir_name).join(&draft.target_path);
+        let path = Path::new(&project.root).join(&relative);
+        let meta_path = Path::new(&project.root)
+            .join(&character.dir_name)
+            .join(".model.json");
+        validate_draft_baseline(&path, draft.based_on_hash.as_deref())?;
+        character.state =
+            codex_game_domain::advance_character(character.state, CharacterState::S1SpecConfirmed)
+                .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+        character.spec_path = Some(relative.to_string_lossy().into_owned());
+        character.hard_constraints = constraints;
+        let timestamp = now();
+        character.gate_spec_confirmed_at = Some(timestamp);
+        character.updated_at = timestamp;
+        let backups = vec![
+            (path.clone(), fs::read(&path).ok()),
+            (meta_path.clone(), fs::read(&meta_path).ok()),
+        ];
+        if let Err(error) = write_art_bible(&path, &draft.content)
+            .map_err(GameServiceError::from)
+            .and_then(|_| write_character_meta(&project, &character))
+        {
+            restore_files(&backups);
+            return Err(error);
+        }
+        if let Err(error) = store
+            .commit_character_spec_gate(&draft.id, &character, timestamp)
+            .await
+        {
+            restore_files(&backups);
+            return Err(error.into());
+        }
+        Ok(character)
+    }
+
+    pub async fn register_generation(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        stage: &str,
+        variant: Option<String>,
+        file_path: String,
+        source: String,
+        asset_spec: serde_json::Value,
+    ) -> Result<Generation, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let store = self.project_store(project_id, true)?;
+        let mut character = self.read_character(project_id, character_id).await?;
+        let next_state = match (stage, character.state) {
+            ("render", CharacterState::S1SpecConfirmed) => Some(CharacterState::S2RenderGenerated),
+            ("render", CharacterState::S2RenderGenerated) => None,
+            ("views", CharacterState::S3RenderConfirmed) => Some(CharacterState::S4ViewsGenerated),
+            ("views", CharacterState::S4ViewsGenerated) => None,
+            ("render" | "views", _) => {
+                return Err(GameServiceError::InvalidCharacterOperation(format!(
+                    "当前角色状态不允许登记 {stage} 产物"
+                )));
+            }
+            _ => {
+                return Err(GameServiceError::InvalidCharacterOperation(
+                    "generation stage 必须为 render 或 views".to_string(),
+                ));
+            }
+        };
+        if stage == "views" && variant.as_deref().is_some_and(|value| value != "quad") {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "四视图候选必须是单张 2×2 四宫格（variant=quad）".to_string(),
+            ));
+        }
+        let variant = if stage == "views" {
+            Some("quad".to_string())
+        } else {
+            variant
+        };
+        let path = safe_project_path(&project.root, &file_path)?;
+        if !path.is_file() {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "生成文件不存在".to_string(),
+            ));
+        }
+        let generation = Generation {
+            id: Uuid::now_v7().to_string(),
+            project_id: project_id.to_string(),
+            target_kind: "character".to_string(),
+            target_ref: character_id.to_string(),
+            stage: stage.to_string(),
+            variant,
+            file_path,
+            file_hash: Some(bytes_hash(&fs::read(&path)?)),
+            is_final: false,
+            source,
+            task_id: None,
+            asset_spec,
+            created_at: now(),
+        };
+        store.insert_generation(&generation).await?;
+        if let Some(next_state) = next_state {
+            character.state = codex_game_domain::advance_character(character.state, next_state)
+                .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+            character.updated_at = now();
+            store.update_character(&character).await?;
+            write_character_meta(&project, &character)?;
+        }
+        Ok(generation)
+    }
+
+    pub async fn list_generations(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        stage: Option<&str>,
+    ) -> Result<Vec<Generation>, GameServiceError> {
+        let store = self.project_store(project_id, false)?;
+        store
+            .list_generations(project_id, "character", character_id, stage)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn confirm_character_render(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        generation_id: &str,
+    ) -> Result<Character, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let store = self.project_store(project_id, true)?;
+        let mut character = self.read_character(project_id, character_id).await?;
+        if character.state != CharacterState::S2RenderGenerated {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "只能在 S2 确认渲染图".to_string(),
+            ));
+        }
+        let generation = store
+            .list_generations(project_id, "character", character_id, Some("render"))
+            .await?
+            .into_iter()
+            .find(|generation| generation.id == generation_id)
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("渲染记录不存在".to_string())
+            })?;
+        self.require_approved_verdict(
+            project_id,
+            character_id,
+            "VIEW-CHECK",
+            generation.created_at,
+        )
+        .await?;
+        let source = safe_project_path(&project.root, &generation.file_path)?;
+        if !source.is_file() {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "渲染文件不存在".to_string(),
+            ));
+        }
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("png");
+        let relative =
+            PathBuf::from(&character.dir_name).join(format!("images/render-final.{extension}"));
+        let target = Path::new(&project.root).join(&relative);
+        let meta_path = Path::new(&project.root)
+            .join(&character.dir_name)
+            .join(".model.json");
+        character.state = codex_game_domain::advance_character(
+            character.state,
+            CharacterState::S3RenderConfirmed,
+        )
+        .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+        character.render_path = Some(relative.to_string_lossy().into_owned());
+        let timestamp = now();
+        character.gate_render_confirmed_at = Some(timestamp);
+        character.updated_at = timestamp;
+        let backups = vec![
+            (target.clone(), fs::read(&target).ok()),
+            (meta_path.clone(), fs::read(&meta_path).ok()),
+        ];
+        if let Err(error) = fs::copy(source, &target)
+            .map(|_| ())
+            .map_err(GameServiceError::from)
+            .and_then(|_| write_character_meta(&project, &character))
+        {
+            restore_files(&backups);
+            return Err(error);
+        }
+        let generation_ids = [generation_id.to_string()];
+        if let Err(error) = store
+            .commit_character_generation_gate("render", &generation_ids, &character, timestamp)
+            .await
+        {
+            restore_files(&backups);
+            return Err(error.into());
+        }
+        Ok(character)
+    }
+
+    pub async fn confirm_character_views(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        generation_ids: &[String],
+    ) -> Result<Character, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let store = self.project_store(project_id, true)?;
+        let mut character = self.read_character(project_id, character_id).await?;
+        if character.state != CharacterState::S4ViewsGenerated {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "只能在 S4 确认四视图".to_string(),
+            ));
+        }
+        if generation_ids.len() != 1 {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "必须选择一张完整的 2×2 四视图候选".to_string(),
+            ));
+        }
+        let available = store
+            .list_generations(project_id, "character", character_id, Some("views"))
+            .await?;
+        let generation = available
+            .iter()
+            .find(|generation| generation.id == generation_ids[0])
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("四视图记录不存在".to_string())
+            })?;
+        if generation.variant.as_deref() != Some("quad") {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "四视图候选必须是完整的 2×2 四宫格".to_string(),
+            ));
+        }
+        self.require_approved_verdict(
+            project_id,
+            character_id,
+            "VIEW-CHECK",
+            generation.created_at,
+        )
+        .await?;
+        let source = safe_project_path(&project.root, &generation.file_path)?;
+        if !source.is_file() {
+            return Err(GameServiceError::InvalidCharacterOperation(format!(
+                "四视图文件不存在：{}",
+                generation.file_path
+            )));
+        }
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("png");
+        let relative =
+            PathBuf::from(&character.dir_name).join(format!("images/views-final.{extension}"));
+        let target = Path::new(&project.root).join(&relative);
+        let meta_path = Path::new(&project.root)
+            .join(&character.dir_name)
+            .join(".model.json");
+        let archived = relative.to_string_lossy().into_owned();
+        let selected = ["front", "right", "back", "left"]
+            .into_iter()
+            .map(|view| (view.to_string(), archived.clone()))
+            .collect::<BTreeMap<_, _>>();
+        character.state =
+            codex_game_domain::advance_character(character.state, CharacterState::S5ViewsConfirmed)
+                .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+        character.view_paths = selected;
+        let timestamp = now();
+        character.gate_views_confirmed_at = Some(timestamp);
+        character.updated_at = timestamp;
+        let backups = vec![
+            (target.clone(), fs::read(&target).ok()),
+            (meta_path.clone(), fs::read(&meta_path).ok()),
+        ];
+        if let Err(error) = fs::copy(source, &target)
+            .map(|_| ())
+            .map_err(GameServiceError::from)
+            .and_then(|_| write_character_meta(&project, &character))
+        {
+            restore_files(&backups);
+            return Err(error);
+        }
+        if let Err(error) = store
+            .commit_character_generation_gate("views", generation_ids, &character, timestamp)
+            .await
+        {
+            restore_files(&backups);
+            return Err(error.into());
+        }
+        Ok(character)
+    }
+
+    pub async fn reject_character_stage(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        stage: &str,
+        reason: String,
+    ) -> Result<Character, GameServiceError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "拒绝当前结果时必须说明原因".to_string(),
+            ));
+        }
+        let character = self.read_character(project_id, character_id).await?;
+        let expected = match stage {
+            "spec" => CharacterState::S0SpecDrafting,
+            "render" => CharacterState::S2RenderGenerated,
+            "views" => CharacterState::S4ViewsGenerated,
+            _ => {
+                return Err(GameServiceError::InvalidCharacterOperation(
+                    "拒绝阶段必须是 spec、render 或 views".to_string(),
+                ));
+            }
+        };
+        if character.state != expected {
+            return Err(GameServiceError::InvalidCharacterOperation(format!(
+                "当前角色状态不允许拒绝 {stage} 结果"
+            )));
+        }
+        let store = self.project_store(project_id, true)?;
+        store
+            .record_character_rejection(&character, stage, reason, now())
+            .await?;
+        Ok(character)
+    }
+
+    async fn require_approved_verdict(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        token: &str,
+        not_before: i64,
+    ) -> Result<Vec<serde_json::Value>, GameServiceError> {
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        let snapshot = self.read_conversation(conversation.id.as_str()).await?;
+        let verdict = snapshot
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.created_at >= not_before)
+            .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
+            .find(|verdict| verdict.token == token)
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(format!(
+                    "缺少针对当前候选的 {token} 审校结论"
+                ))
+            })?;
+        if verdict.decision != "APPROVE" {
+            return Err(GameServiceError::InvalidCharacterOperation(format!(
+                "最新 {token} 结论为 {}，不能通过人工门禁",
+                verdict.decision
+            )));
+        }
+        verdict
+            .constraints
+            .iter()
+            .map(|constraint| {
+                serde_json::to_value(constraint)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error).into())
+            })
+            .collect()
+    }
+
+    fn project_store(
+        &self,
+        project_id: &str,
+        writable: bool,
+    ) -> Result<Arc<ProjectStore>, GameServiceError> {
+        let projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = projects
+            .get(project_id)
+            .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
+        if writable {
+            require_writable(session)?;
+        }
+        Ok(Arc::clone(&session.store))
+    }
+
+    fn find_target_conversation(
+        &self,
+        project_id: &str,
+        target_kind: ConversationTargetKind,
+        target_ref: Option<&str>,
+    ) -> Result<Conversation, GameServiceError> {
+        let projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = projects
+            .get(project_id)
+            .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
         session
-            .workflows
-            .insert(conversation_id.to_string(), workflow.clone());
-        if command == WorkflowCommand::VersionArtBible {
-            session.project.state = ProjectState::Versioned;
-        }
-        if let Some(document) = &document {
-            session.art_bibles.push(document.clone());
-        }
-        Ok((workflow, document))
+            .conversations
+            .values()
+            .find(|snapshot| {
+                snapshot.conversation.target_kind == target_kind
+                    && snapshot.conversation.target_ref.as_deref() == target_ref
+            })
+            .map(|snapshot| snapshot.conversation.clone())
+            .ok_or_else(|| {
+                GameServiceError::ConversationNotFound(target_ref.unwrap_or(project_id).to_string())
+            })
     }
 
     pub fn list_art_bibles(
@@ -1009,7 +2213,6 @@ impl ProjectSession {
             read_only,
             store,
             conversations: HashMap::new(),
-            workflows: HashMap::new(),
             art_bibles: Vec::new(),
         }
     }
@@ -1035,46 +2238,133 @@ fn require_writable(session: &ProjectSession) -> Result<(), GameServiceError> {
     }
 }
 
-fn recovered_project_state(
-    workflows: &[FocusWorkflow],
-    art_bibles: &[(ArtBibleVersion, String)],
-) -> ProjectState {
-    if workflows
-        .iter()
-        .any(|workflow| workflow.state == WorkflowState::Versioned)
-        || (!art_bibles.is_empty()
-            && workflows
-                .iter()
-                .all(|workflow| workflow.state == WorkflowState::Cancelled))
-    {
-        ProjectState::Versioned
-    } else if workflows
-        .iter()
-        .any(|workflow| workflow.state != WorkflowState::Cancelled)
-    {
-        ProjectState::FocusInProgress
-    } else {
-        ProjectState::Unversioned
-    }
-}
-
 fn project_state_name(state: ProjectState) -> &'static str {
     match state {
-        ProjectState::Unversioned => "unversioned",
-        ProjectState::FocusInProgress => "focusInProgress",
-        ProjectState::Versioned => "versioned",
+        ProjectState::Drafting => "drafting",
+        ProjectState::StyleSettled => "styleSettled",
+        ProjectState::Ready => "ready",
     }
 }
 
-fn parse_structured_output<T: serde::de::DeserializeOwned>(output: &str) -> Option<T> {
-    let trimmed = output.trim();
-    let json = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .and_then(|value| value.strip_suffix("```"))
-        .map(str::trim)
-        .unwrap_or(trimmed);
-    serde_json::from_str(json).ok()
+fn validate_draft_baseline(path: &Path, expected: Option<&str>) -> Result<(), GameServiceError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let current = fs::read(path).unwrap_or_default();
+    if bytes_hash(&current) != expected {
+        return Err(GameServiceError::InvalidAction(
+            "草稿基线已变化，请刷新后重新生成".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn content_hash(content: &str) -> String {
+    bytes_hash(content.as_bytes())
+}
+
+fn bytes_hash(content: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(content))
+}
+
+fn restore_file(path: &Path, previous: Option<&str>) {
+    if let Some(previous) = previous {
+        let _ = write_art_bible(path, previous);
+    } else {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn restore_files(backups: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, previous) in backups {
+        if let Some(previous) = previous {
+            let _ = fs::write(path, previous);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn is_valid_code(code: &str) -> bool {
+    let mut chars = code.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    code.len() <= 64
+        && (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
+}
+
+fn safe_segment(value: &str) -> Result<String, GameServiceError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains(['/', '\\'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(GameServiceError::InvalidCharacterOperation(
+            "名称不能用于目录".to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn safe_project_path(root: &str, relative: &str) -> Result<PathBuf, GameServiceError> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(GameServiceError::InvalidCharacterOperation(
+            "文件路径必须位于项目内".to_string(),
+        ));
+    }
+    Ok(Path::new(root).join(relative))
+}
+
+fn write_character_meta(project: &Project, character: &Character) -> Result<(), GameServiceError> {
+    let path = Path::new(&project.root)
+        .join(&character.dir_name)
+        .join(".model.json");
+    let content = serde_json::to_string_pretty(&serde_json::json!({
+        "schemaVersion": 2,
+        "character": character,
+    }))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_art_bible(&path, &format!("{content}\n"))?;
+    Ok(())
+}
+
+fn append_line_once(path: &Path, line: &str) -> Result<(), io::Error> {
+    let mut content = fs::read_to_string(path).unwrap_or_default();
+    if content.lines().any(|existing| existing == line) {
+        return Ok(());
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(line);
+    content.push('\n');
+    fs::write(path, content)
+}
+
+fn action_protocol_instruction() -> String {
+    format!(
+        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。",
+        start = codex_game_domain::ACTION_START,
+        end = codex_game_domain::ACTION_END,
+    )
 }
 
 fn absolute_root(root: &str) -> Result<PathBuf, GameServiceError> {
@@ -1096,614 +2386,26 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Capability;
-    use crate::CodexExecutionPort;
-    use crate::ExecuteTaskRequest;
-    use crate::ExecutionError;
-    use crate::StartThreadRequest;
-    use crate::StartTurnRequest;
-    use crate::StartedThread;
-    use crate::StartedTurn;
-    use crate::SteerTurnRequest;
-    use crate::TaskOrchestrator;
-    use codex_game_domain::ArtBibleDraft;
-    use codex_game_domain::Conflict;
-    use codex_game_domain::ConflictSet;
-    use codex_game_domain::ContextPackage;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
-    struct FakeExecution;
-
-    impl CodexExecutionPort for FakeExecution {
-        async fn start_thread(
-            &self,
-            _request: StartThreadRequest,
-        ) -> Result<StartedThread, ExecutionError> {
-            Ok(StartedThread {
-                thread_id: "thread-1".to_string(),
-                session_id: "session-1".to_string(),
-            })
-        }
-
-        async fn thread_available(&self, _thread_id: &str) -> bool {
-            true
-        }
-
-        async fn start_turn(
-            &self,
-            _request: StartTurnRequest,
-        ) -> Result<StartedTurn, ExecutionError> {
-            Ok(StartedTurn {
-                turn_id: "turn-1".to_string(),
-            })
-        }
-
-        async fn steer_turn(&self, _request: SteerTurnRequest) -> Result<(), ExecutionError> {
-            Ok(())
-        }
-
-        async fn interrupt_turn(
-            &self,
-            _thread_id: String,
-            _turn_id: String,
-        ) -> Result<(), ExecutionError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct CountingExecution {
-        threads: AtomicUsize,
-        turns: AtomicUsize,
-    }
-
-    impl CodexExecutionPort for CountingExecution {
-        async fn start_thread(
-            &self,
-            _request: StartThreadRequest,
-        ) -> Result<StartedThread, ExecutionError> {
-            let number = self.threads.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(StartedThread {
-                thread_id: format!("thread-{number}"),
-                session_id: format!("session-{number}"),
-            })
-        }
-
-        async fn thread_available(&self, _thread_id: &str) -> bool {
-            true
-        }
-
-        async fn start_turn(
-            &self,
-            _request: StartTurnRequest,
-        ) -> Result<StartedTurn, ExecutionError> {
-            let number = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(StartedTurn {
-                turn_id: format!("turn-{number}"),
-            })
-        }
-
-        async fn steer_turn(&self, _request: SteerTurnRequest) -> Result<(), ExecutionError> {
-            Ok(())
-        }
-
-        async fn interrupt_turn(
-            &self,
-            _thread_id: String,
-            _turn_id: String,
-        ) -> Result<(), ExecutionError> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
-    async fn commits_valid_brief_only_after_turn_completion() {
+    async fn project_gate_blocks_character_creation_before_finalize() {
         let directory = tempdir().expect("tempdir");
         let root = directory.path().join("game");
         let service = GameService::new(directory.path().join("app"));
         let project = service
             .create_project(
                 Uuid::now_v7().to_string(),
-                "Test Game".to_string(),
+                "Untitled".to_string(),
                 root.to_string_lossy().into_owned(),
             )
             .await
             .expect("create project");
-        let conversation = service
-            .ensure_conversation(project.id.as_str(), None)
-            .await
-            .expect("ensure conversation");
-        let workflow = service
-            .start_focus(conversation.id.as_str())
-            .await
-            .expect("start focus");
-        let (_, store) = service
-            .execution_context(conversation.id.as_str())
-            .expect("execution context");
-        TaskOrchestrator::default()
-            .execute(
-                &FakeExecution,
-                store.as_ref(),
-                ExecuteTaskRequest {
-                    project_root: root.to_string_lossy().into_owned(),
-                    conversation_id: conversation.id.as_str().to_string(),
-                    target_id: workflow.id.as_str().to_string(),
-                    stage: "brief".to_string(),
-                    agent_code: super::super::BRIEF_AGENT.to_string(),
-                    idempotency_key: "message-1".to_string(),
-                    prompt: "design a game".to_string(),
-                    context: ContextPackage {
-                        brief_artifact_id: ArtifactId::new("pending-brief"),
-                        confirmed_decisions: Vec::new(),
-                        artifact_summaries: Vec::new(),
-                        context_version: workflow.input_version,
-                        workflow_version: workflow.workflow_version,
-                        agent_definition_version: "1".to_string(),
-                        output_schema: "{}".to_string(),
-                    },
-                    capability: Capability::TextStructuredOutput,
-                },
-            )
-            .await
-            .expect("execute task");
-        let completion = service
-            .complete_turn_output(
-                "turn-1",
-                Some(
-                    r#"{"coreExperience":"explore","themeAndMood":"quiet","targetPlayers":"solo","playerPerspective":"top-down","gameplayPillars":["discover"],"openQuestions":[]}"#,
-                ),
-            )
-            .await
-            .expect("complete turn")
-            .expect("known turn");
-        assert_eq!(completion.status, TaskAttemptStatus::Succeeded);
-        assert!(matches!(
-            completion
-                .artifacts
-                .first()
-                .map(|artifact| &artifact.content),
-            Some(ArtifactContent::StructuredBrief(_))
-        ));
-        assert_eq!(
-            service
-                .read_focus(conversation.id.as_str())
-                .expect("workflow")
-                .state,
-            WorkflowState::BriefReady
-        );
-    }
 
-    #[tokio::test]
-    async fn completes_a_confirmed_versioned_art_bible() {
-        let directory = tempdir().expect("tempdir");
-        let root = directory.path().join("game");
-        let service = GameService::new(directory.path().join("app"));
-        let project = service
-            .create_project(
-                Uuid::now_v7().to_string(),
-                "Test Game".to_string(),
-                root.to_string_lossy().into_owned(),
-            )
-            .await
-            .expect("create project");
-        assert_eq!(
-            service.list_projects().await.expect("list projects"),
-            vec![project.clone()]
-        );
-        let conversation = service
-            .ensure_conversation(project.id.as_str(), None)
-            .await
-            .expect("ensure conversation");
-        service
-            .submit_message(
-                conversation.id.as_str(),
-                "A quiet strategy game".to_string(),
-            )
-            .await
-            .expect("submit");
-        let mut workflow = service
-            .start_focus(conversation.id.as_str())
-            .await
-            .expect("start focus");
-        for command in [
-            WorkflowCommand::SubmitClarification,
-            WorkflowCommand::AcceptBrief,
-            WorkflowCommand::CompleteReviews,
-            WorkflowCommand::CompleteMerge,
-        ] {
-            (workflow, _) = service
-                .advance_focus(conversation.id.as_str(), command, 1, None)
-                .await
-                .expect("advance");
-        }
-        let (_, store) = service
-            .execution_context(conversation.id.as_str())
-            .expect("execution context");
-        let draft = Artifact {
-            id: ArtifactId::new("draft-1"),
-            input_version: workflow.input_version,
-            workflow_version: workflow.workflow_version,
-            content: ArtifactContent::ArtBibleDraft(ArtBibleDraft {
-                markdown: "# Art Bible\n".to_string(),
-                unresolved_assumptions: Vec::new(),
-            }),
-            created_at: now(),
-        };
-        store
-            .commit_workflow_artifact(&workflow, workflow.workflow_version, &draft)
-            .await
-            .expect("commit draft");
-        let conflicts = Artifact {
-            id: ArtifactId::new("conflicts-1"),
-            input_version: workflow.input_version,
-            workflow_version: workflow.workflow_version,
-            content: ArtifactContent::ConflictSet(ConflictSet {
-                conflicts: vec![Conflict {
-                    key: "camera".to_string(),
-                    description: "Choose a camera".to_string(),
-                    options: vec!["top-down".to_string(), "side-view".to_string()],
-                    high_impact: true,
-                }],
-            }),
-            created_at: now(),
-        };
-        store
-            .commit_workflow_artifact(&workflow, workflow.workflow_version, &conflicts)
-            .await
-            .expect("commit conflicts");
-        let unresolved = service
-            .advance_focus(
-                conversation.id.as_str(),
-                WorkflowCommand::ConfirmArtBible,
-                1,
-                Some("# Art Bible\n".to_string()),
-            )
+        let result = service
+            .create_character(project.id.as_str(), "Hero".to_string(), None, false)
             .await;
-        assert!(matches!(
-            unresolved,
-            Err(GameServiceError::InvalidDesignDecision(_))
-        ));
-        (workflow, _) = service
-            .record_conflict_decision(
-                conversation.id.as_str(),
-                1,
-                UserDecision {
-                    conflict_key: "camera".to_string(),
-                    selected_option: "top-down".to_string(),
-                    note: None,
-                },
-            )
-            .await
-            .expect("record conflict decision");
-        assert_eq!(workflow.state, WorkflowState::UserReview);
-        let mismatch = service
-            .advance_focus(
-                conversation.id.as_str(),
-                WorkflowCommand::ConfirmArtBible,
-                1,
-                Some("# Replaced by client\n".to_string()),
-            )
-            .await;
-        assert!(matches!(
-            mismatch,
-            Err(GameServiceError::InvalidDesignDecision(_))
-        ));
-        let (_, document) = service
-            .advance_focus(
-                conversation.id.as_str(),
-                WorkflowCommand::ConfirmArtBible,
-                1,
-                None,
-            )
-            .await
-            .expect("confirm");
-        let document = document.expect("version");
-        assert_eq!(document.version.version, 1);
-        assert_eq!(document.version.source_artifact_ids.len(), 3);
-        service
-            .advance_focus(
-                conversation.id.as_str(),
-                WorkflowCommand::VersionArtBible,
-                1,
-                None,
-            )
-            .await
-            .expect("version");
-        assert_eq!(
-            fs::read_to_string(root.join("art-bible.md")).expect("read art bible"),
-            "# Art Bible\n"
-        );
-        assert_eq!(workflow.state, WorkflowState::UserReview);
-        assert_eq!(
-            service
-                .read_project(project.id.as_str())
-                .expect("project")
-                .state,
-            ProjectState::Versioned
-        );
 
-        update_project_json(
-            &root.join("project.json"),
-            project.id.as_str(),
-            &project.name,
-            "focusInProgress",
-        )
-        .expect("make project metadata stale");
-        write_art_bible(&root.join("art-bible.md"), "stale\n").expect("make art bible stale");
-        drop(store);
-        drop(service);
-
-        let reopened = GameService::new(directory.path().join("app"));
-        let reopened_project = reopened
-            .open_project(root.to_string_lossy().into_owned(), false)
-            .await
-            .expect("reopen project");
-        assert_eq!(reopened_project.state, ProjectState::Versioned);
-        assert_eq!(
-            fs::read_to_string(root.join("art-bible.md")).expect("read repaired art bible"),
-            "# Art Bible\n"
-        );
-        let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(root.join("project.json")).expect("read repaired metadata"),
-        )
-        .expect("parse repaired metadata");
-        assert_eq!(metadata["state"], "versioned");
-    }
-
-    #[tokio::test]
-    async fn drives_reviews_and_synthesis_through_turn_completion() {
-        fn task_request(
-            root: &str,
-            conversation_id: &str,
-            workflow: &FocusWorkflow,
-            stage: &str,
-            agent_code: &str,
-            key: &str,
-        ) -> ExecuteTaskRequest {
-            ExecuteTaskRequest {
-                project_root: root.to_string(),
-                conversation_id: conversation_id.to_string(),
-                target_id: workflow.id.as_str().to_string(),
-                stage: stage.to_string(),
-                agent_code: agent_code.to_string(),
-                idempotency_key: key.to_string(),
-                prompt: "drive focus".to_string(),
-                context: ContextPackage {
-                    brief_artifact_id: ArtifactId::new(Uuid::now_v7().to_string()),
-                    confirmed_decisions: Vec::new(),
-                    artifact_summaries: Vec::new(),
-                    context_version: workflow.input_version,
-                    workflow_version: workflow.workflow_version,
-                    agent_definition_version: "1".to_string(),
-                    output_schema: "{}".to_string(),
-                },
-                capability: Capability::TextStructuredOutput,
-            }
-        }
-
-        let directory = tempdir().expect("tempdir");
-        let root = directory.path().join("game");
-        let root_string = root.to_string_lossy().into_owned();
-        let service = GameService::new(directory.path().join("app"));
-        let project = service
-            .create_project(
-                Uuid::now_v7().to_string(),
-                "Test Game".to_string(),
-                root_string.clone(),
-            )
-            .await
-            .expect("create project");
-        let conversation = service
-            .ensure_conversation(project.id.as_str(), None)
-            .await
-            .expect("ensure conversation");
-        let conversation_id = conversation.id.as_str().to_string();
-        service
-            .submit_message(&conversation_id, "A quiet exploration game".to_string())
-            .await
-            .expect("submit");
-        let workflow = service
-            .start_focus(&conversation_id)
-            .await
-            .expect("start focus");
-        let input_version = workflow.input_version;
-        let (_, store) = service
-            .execution_context(&conversation_id)
-            .expect("execution context");
-        let orchestrator = TaskOrchestrator::default();
-        let execution = CountingExecution::default();
-
-        // Brief turn completion advances Clarifying -> BriefReady.
-        let brief = orchestrator
-            .execute(
-                &execution,
-                store.as_ref(),
-                task_request(
-                    &root_string,
-                    &conversation_id,
-                    &workflow,
-                    "brief",
-                    super::super::BRIEF_AGENT,
-                    "brief-1",
-                ),
-            )
-            .await
-            .expect("brief task");
-        service
-            .complete_turn_output(
-                brief.attempt.codex_turn_id.as_deref().expect("brief turn"),
-                Some(
-                    r#"{"coreExperience":"explore","themeAndMood":"quiet","targetPlayers":"solo","playerPerspective":"topDown","gameplayPillars":["discover"],"openQuestions":[]}"#,
-                ),
-            )
-            .await
-            .expect("complete brief")
-            .expect("known brief turn");
-        assert_eq!(
-            service.read_focus(&conversation_id).expect("focus").state,
-            WorkflowState::BriefReady
-        );
-
-        service
-            .advance_focus(
-                &conversation_id,
-                WorkflowCommand::AcceptBrief,
-                input_version,
-                None,
-            )
-            .await
-            .expect("accept brief");
-        assert_eq!(
-            service.read_focus(&conversation_id).expect("focus").state,
-            WorkflowState::Reviewing
-        );
-
-        // Completing all three review turns auto-advances Reviewing -> Merging.
-        for (index, agent_code) in super::super::review_agent_codes().into_iter().enumerate() {
-            let reviewing = service.read_focus(&conversation_id).expect("focus");
-            let review = orchestrator
-                .execute(
-                    &execution,
-                    store.as_ref(),
-                    task_request(
-                        &root_string,
-                        &conversation_id,
-                        &reviewing,
-                        "review",
-                        agent_code,
-                        &format!("review-{index}"),
-                    ),
-                )
-                .await
-                .expect("review task");
-            let output = format!(
-                r#"{{"agentCode":"{agent_code}","findings":["ok"],"risks":[],"recommendations":[]}}"#
-            );
-            service
-                .complete_turn_output(
-                    review
-                        .attempt
-                        .codex_turn_id
-                        .as_deref()
-                        .expect("review turn"),
-                    Some(&output),
-                )
-                .await
-                .expect("complete review")
-                .expect("known review turn");
-        }
-        assert_eq!(
-            service.read_focus(&conversation_id).expect("focus").state,
-            WorkflowState::Merging
-        );
-
-        // Synthesis turn completion produces the draft plus conflict set.
-        let merging = service.read_focus(&conversation_id).expect("focus");
-        let synthesis = orchestrator
-            .execute(
-                &execution,
-                store.as_ref(),
-                task_request(
-                    &root_string,
-                    &conversation_id,
-                    &merging,
-                    "synthesis",
-                    super::super::SYNTHESIS_AGENT,
-                    "synthesis-1",
-                ),
-            )
-            .await
-            .expect("synthesis task");
-        let completion = service
-            .complete_turn_output(
-                synthesis
-                    .attempt
-                    .codex_turn_id
-                    .as_deref()
-                    .expect("synthesis turn"),
-                Some(
-                    r##"{"draft":{"markdown":"# Synth Art Bible\n","unresolvedAssumptions":[]},"conflicts":{"conflicts":[{"key":"camera","description":"Choose a camera","options":["topDown","sideView"],"highImpact":true}]}}"##,
-                ),
-            )
-            .await
-            .expect("complete synthesis")
-            .expect("known synthesis turn");
-        assert_eq!(completion.conflict_count, Some(1));
-        assert_eq!(
-            service.read_focus(&conversation_id).expect("focus").state,
-            WorkflowState::UserReview
-        );
-
-        // The high-impact conflict must be resolved before confirmation.
-        let unresolved = service
-            .advance_focus(
-                &conversation_id,
-                WorkflowCommand::ConfirmArtBible,
-                input_version,
-                None,
-            )
-            .await;
-        assert!(matches!(
-            unresolved,
-            Err(GameServiceError::InvalidDesignDecision(_))
-        ));
-
-        service
-            .record_conflict_decision(
-                &conversation_id,
-                input_version,
-                UserDecision {
-                    conflict_key: "camera".to_string(),
-                    selected_option: "topDown".to_string(),
-                    note: None,
-                },
-            )
-            .await
-            .expect("record conflict decision");
-        let (_, document) = service
-            .advance_focus(
-                &conversation_id,
-                WorkflowCommand::ConfirmArtBible,
-                input_version,
-                None,
-            )
-            .await
-            .expect("confirm");
-        assert_eq!(document.expect("art bible version").version.version, 1);
-        service
-            .advance_focus(
-                &conversation_id,
-                WorkflowCommand::VersionArtBible,
-                input_version,
-                None,
-            )
-            .await
-            .expect("version");
-
-        // The confirmed art bible is versioned and readable end-to-end.
-        assert_eq!(
-            service
-                .list_art_bibles(project.id.as_str())
-                .expect("versions")
-                .len(),
-            1
-        );
-        let stored = service
-            .read_art_bible(project.id.as_str(), 1)
-            .expect("read art bible");
-        assert_eq!(stored.markdown, "# Synth Art Bible\n");
-        assert_eq!(
-            service
-                .read_project(project.id.as_str())
-                .expect("project")
-                .state,
-            ProjectState::Versioned
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("art-bible.md")).expect("read art bible file"),
-            "# Synth Art Bible\n"
-        );
+        assert!(matches!(result, Err(GameServiceError::ProjectGate(_))));
     }
 }

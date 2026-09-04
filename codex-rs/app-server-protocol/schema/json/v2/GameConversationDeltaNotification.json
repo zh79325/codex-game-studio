@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "agentCode": {
+      "type": "string"
+    },
+    "conversationId": {
+      "type": "string"
+    },
+    "delta": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "agentCode",
+    "conversationId",
+    "delta",
+    "turnId"
+  ],
+  "title": "GameConversationDeltaNotification",
+  "type": "object"
+}

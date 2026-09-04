@@ -3,35 +3,42 @@
     reason = "game stores own their isolated SQLite configuration"
 )]
 
+use codex_game_domain::AgentAction;
+use codex_game_domain::AgentHandoff;
 use codex_game_domain::ArtBibleVersion;
 use codex_game_domain::ArtBibleVersionId;
-use codex_game_domain::Artifact;
-use codex_game_domain::ArtifactContent;
+use codex_game_domain::ArtifactDraftRecord;
+use codex_game_domain::Character;
+use codex_game_domain::CharacterState;
 use codex_game_domain::ContextPackage;
 use codex_game_domain::Conversation;
 use codex_game_domain::ConversationCodexThread;
 use codex_game_domain::ConversationCodexThreadId;
 use codex_game_domain::ConversationId;
+use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
-use codex_game_domain::FocusWorkflow;
-use codex_game_domain::FocusWorkflowId;
+use codex_game_domain::ConversationStatus;
+use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::Generation;
 use codex_game_domain::Interaction;
 use codex_game_domain::InteractionId;
+use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
+use codex_game_domain::ProjectMemory;
 use codex_game_domain::Task;
 use codex_game_domain::TaskAttempt;
 use codex_game_domain::TaskAttemptStatus;
 use codex_game_domain::TaskId;
 use codex_game_domain::TaskStatus;
 use codex_game_domain::ThreadBindingStatus;
-use codex_game_domain::WorkflowState;
 use sqlx::ConnectOptions;
 use sqlx::Row;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqliteJournalMode;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::SqliteRow;
 use sqlx::sqlite::SqliteSynchronous;
 use std::fs;
 use std::fs::File;
@@ -47,14 +54,29 @@ const PROJECT_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    target_id TEXT,
-    created_at INTEGER NOT NULL
+    target_kind TEXT NOT NULL DEFAULT 'project',
+    target_ref TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    director_agent_code TEXT NOT NULL DEFAULT 'studio_director',
+    focus_agent_code TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    turn INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
+    turn INTEGER NOT NULL DEFAULT 0,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    agent_code TEXT NOT NULL DEFAULT '',
+    recipient_agent_code TEXT,
+    status TEXT NOT NULL DEFAULT 'completed',
+    token_count INTEGER NOT NULL DEFAULT 0,
+    folded INTEGER NOT NULL DEFAULT 0,
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    action_json TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS interactions (
@@ -63,14 +85,6 @@ CREATE TABLE IF NOT EXISTS interactions (
     idempotency_key TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS focus_workflows (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    checkpoint_state TEXT NOT NULL,
-    input_version INTEGER NOT NULL,
-    workflow_version INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     interaction_id TEXT NOT NULL,
@@ -78,7 +92,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     stage TEXT NOT NULL,
     agent_code TEXT NOT NULL,
     input_version INTEGER NOT NULL DEFAULT 1,
-    workflow_version INTEGER NOT NULL DEFAULT 1,
+    contract_version INTEGER NOT NULL DEFAULT 1,
     prompt TEXT NOT NULL DEFAULT '',
     context_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL,
@@ -93,15 +107,6 @@ CREATE TABLE IF NOT EXISTS task_attempts (
     output_artifact_id TEXT,
     status TEXT NOT NULL,
     UNIQUE(task_id, attempt_no)
-);
-CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    artifact_type TEXT NOT NULL,
-    input_version INTEGER NOT NULL,
-    workflow_version INTEGER NOT NULL,
-    content_json TEXT NOT NULL,
-    created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS art_bible_versions (
     id TEXT PRIMARY KEY,
@@ -141,6 +146,93 @@ CREATE TABLE IF NOT EXISTS event_log (
     event_type TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_handoffs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    turn INTEGER NOT NULL,
+    from_agent_code TEXT NOT NULL,
+    to_agent_code TEXT NOT NULL,
+    source TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_handoffs_by_conversation
+ON agent_handoffs(conversation_id, turn, id);
+CREATE TABLE IF NOT EXISTS artifact_drafts (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    based_on_hash TEXT,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifact_drafts_by_conversation
+ON artifact_drafts(conversation_id, status, created_at);
+CREATE TABLE IF NOT EXISTS conversation_memory (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_memories (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    character_ref TEXT,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS characters (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    group_name TEXT,
+    dir_name TEXT NOT NULL,
+    state TEXT NOT NULL,
+    spec_path TEXT,
+    render_path TEXT,
+    view_paths_json TEXT NOT NULL DEFAULT '{}',
+    hard_constraints_json TEXT NOT NULL DEFAULT '[]',
+    gate_spec_confirmed_at INTEGER,
+    gate_render_confirmed_at INTEGER,
+    gate_views_confirmed_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(project_id, dir_name)
+);
+CREATE TABLE IF NOT EXISTS generations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_ref TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    variant TEXT,
+    file_path TEXT NOT NULL,
+    file_hash TEXT,
+    is_final INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    task_id TEXT,
+    asset_spec_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS generations_by_target
+ON generations(project_id, target_kind, target_ref, stage, created_at);
+CREATE TABLE IF NOT EXISTS task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    event TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
 );
 "#;
 
@@ -199,20 +291,11 @@ pub struct TurnAttemptContext {
     pub attempt_id: String,
     pub task_id: String,
     pub conversation_id: String,
-    pub workflow_id: String,
+    pub target_id: String,
     pub stage: String,
     pub agent_code: String,
     pub input_version: u64,
-    pub workflow_version: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetryableTask {
-    pub task: Task,
-    pub conversation_id: String,
-    pub prompt: String,
-    pub context: ContextPackage,
-    pub next_attempt_no: u32,
+    pub contract_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,12 +420,35 @@ impl ProjectStore {
     pub async fn insert_conversation(&self, conversation: &Conversation) -> Result<(), StoreError> {
         self.require_writable()?;
         sqlx::query(
-            "INSERT OR IGNORE INTO conversations(id, project_id, target_id, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO conversations(id, project_id, target_kind, target_ref, title, director_agent_code, focus_agent_code, status, turn, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(conversation.id.as_str())
         .bind(conversation.project_id.as_str())
-        .bind(&conversation.target_id)
+        .bind(conversation.target_kind.as_str())
+        .bind(&conversation.target_ref)
+        .bind(&conversation.title)
+        .bind(&conversation.director_agent_code)
+        .bind(&conversation.focus_agent_code)
+        .bind(conversation_status_name(conversation.status))
+        .bind(conversation.turn as i64)
         .bind(conversation.created_at)
+        .bind(conversation.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_conversation(&self, conversation: &Conversation) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query(
+            "UPDATE conversations SET focus_agent_code = ?, status = ?, turn = ?, title = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&conversation.focus_agent_code)
+        .bind(conversation_status_name(conversation.status))
+        .bind(conversation.turn as i64)
+        .bind(&conversation.title)
+        .bind(conversation.updated_at)
+        .bind(conversation.id.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -350,16 +456,114 @@ impl ProjectStore {
 
     pub async fn insert_message(&self, message: &ConversationMessage) -> Result<(), StoreError> {
         self.require_writable()?;
-        sqlx::query(
-            "INSERT INTO messages(id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        insert_message_query(message).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn begin_conversation_turn(
+        &self,
+        conversation: &Conversation,
+        user_message: &ConversationMessage,
+        assistant_message: &ConversationMessage,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE conversations SET focus_agent_code = ?, status = ?, turn = ?, title = ?, updated_at = ? WHERE id = ? AND status = 'active'",
         )
-        .bind(&message.id)
-        .bind(message.conversation_id.as_str())
-        .bind(&message.role)
+        .bind(&conversation.focus_agent_code)
+        .bind(conversation_status_name(conversation.status))
+        .bind(conversation.turn as i64)
+        .bind(&conversation.title)
+        .bind(conversation.updated_at)
+        .bind(conversation.id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict("该会话已有一轮正在运行".to_string()));
+        }
+        insert_message_query(user_message)
+            .execute(&mut *transaction)
+            .await?;
+        insert_message_query(assistant_message)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn begin_handoff_continuation(
+        &self,
+        conversation: &Conversation,
+        assistant_message: &ConversationMessage,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE conversations SET focus_agent_code = ?, status = 'running', updated_at = ? WHERE id = ? AND status = 'active'",
+        )
+        .bind(&conversation.focus_agent_code)
+        .bind(conversation.updated_at)
+        .bind(conversation.id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict("该会话无法继续交接".to_string()));
+        }
+        insert_message_query(assistant_message)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn update_message(&self, message: &ConversationMessage) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query(
+            "UPDATE messages SET content = ?, agent_code = ?, status = ?, token_count = ?, attachments_json = ?, action_json = ? WHERE id = ?",
+        )
         .bind(&message.content)
-        .bind(message.created_at)
+        .bind(&message.agent_code)
+        .bind(message_status_name(message.status))
+        .bind(message.token_count as i64)
+        .bind(serde_json::to_string(&message.attachments)?)
+        .bind(message.action.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(&message.id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn complete_prepared_action(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        content: &str,
+        action: &AgentAction,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE messages SET content = ?, status = 'completed', action_json = ? WHERE id = ? AND conversation_id = ? AND status = 'thinking'",
+        )
+        .bind(content)
+        .bind(serde_json::to_string(action)?)
+        .bind(assistant_message_id)
+        .bind(conversation_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::NotFound(format!(
+                "thinking message {assistant_message_id}"
+            )));
+        }
+        sqlx::query("UPDATE conversations SET status = 'active', updated_at = ? WHERE id = ?")
+            .bind(created_at)
+            .bind(conversation_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -368,7 +572,7 @@ impl ProjectStore {
         project_id: &str,
     ) -> Result<Vec<(Conversation, Vec<ConversationMessage>)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, target_id, created_at FROM conversations WHERE project_id = ? ORDER BY created_at, id",
+            "SELECT id, target_kind, target_ref, title, director_agent_code, focus_agent_code, status, turn, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY created_at, id",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -377,29 +581,30 @@ impl ProjectStore {
         for row in rows {
             let conversation_id: String = row.try_get("id")?;
             let message_rows = sqlx::query(
-                "SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at, id",
+                "SELECT id, turn, role, content, agent_code, recipient_agent_code, status, token_count, folded, attachments_json, action_json, created_at FROM messages WHERE conversation_id = ? ORDER BY turn, created_at, id",
             )
             .bind(&conversation_id)
             .fetch_all(&self.pool)
             .await?;
             let messages = message_rows
                 .into_iter()
-                .map(|message| {
-                    Ok(ConversationMessage {
-                        id: message.try_get("id")?,
-                        conversation_id: ConversationId::new(conversation_id.clone()),
-                        role: message.try_get("role")?,
-                        content: message.try_get("content")?,
-                        created_at: message.try_get("created_at")?,
-                    })
-                })
-                .collect::<Result<Vec<_>, sqlx::Error>>()?;
+                .map(|message| decode_message(&conversation_id, message))
+                .collect::<Result<Vec<_>, StoreError>>()?;
             result.push((
                 Conversation {
                     id: ConversationId::new(conversation_id),
                     project_id: ProjectId::new(project_id),
-                    target_id: row.try_get("target_id")?,
+                    target_kind: parse_conversation_target_kind(
+                        &row.try_get::<String, _>("target_kind")?,
+                    )?,
+                    target_ref: row.try_get("target_ref")?,
+                    title: row.try_get("title")?,
+                    director_agent_code: row.try_get("director_agent_code")?,
+                    focus_agent_code: row.try_get("focus_agent_code")?,
+                    status: parse_conversation_status(&row.try_get::<String, _>("status")?)?,
+                    turn: row.try_get::<i64, _>("turn")? as u64,
                     created_at: row.try_get("created_at")?,
+                    updated_at: row.try_get("updated_at")?,
                 },
                 messages,
             ));
@@ -407,68 +612,636 @@ impl ProjectStore {
         Ok(result)
     }
 
-    pub async fn upsert_workflow(&self, workflow: &FocusWorkflow) -> Result<(), StoreError> {
-        self.require_writable()?;
-        sqlx::query(
-            "INSERT INTO focus_workflows(id, project_id, conversation_id, checkpoint_state, input_version, workflow_version) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checkpoint_state = excluded.checkpoint_state, input_version = excluded.input_version, workflow_version = excluded.workflow_version",
-        )
-        .bind(workflow.id.as_str())
-        .bind(workflow.project_id.as_str())
-        .bind(workflow.conversation_id.as_str())
-        .bind(workflow_state_name(workflow.state))
-        .bind(workflow.input_version as i64)
-        .bind(workflow.workflow_version as i64)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn update_workflow(
+    pub async fn commit_action_turn(
         &self,
-        workflow: &FocusWorkflow,
-        expected_workflow_version: u64,
-    ) -> Result<(), StoreError> {
+        codex_turn_id: &str,
+        assistant_message_id: &str,
+        content: &str,
+        action: &AgentAction,
+        generations: &[Generation],
+        character: Option<&Character>,
+        created_at: i64,
+    ) -> Result<TurnAttemptCompletion, StoreError> {
         self.require_writable()?;
-        let updated = sqlx::query(
-            "UPDATE focus_workflows SET checkpoint_state = ?, workflow_version = ? WHERE id = ? AND conversation_id = ? AND input_version = ? AND workflow_version = ?",
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, t.agent_code FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
         )
-        .bind(workflow_state_name(workflow.state))
-        .bind(workflow.workflow_version as i64)
-        .bind(workflow.id.as_str())
-        .bind(workflow.conversation_id.as_str())
-        .bind(workflow.input_version as i64)
-        .bind(expected_workflow_version as i64)
-        .execute(&self.pool)
+        .bind(codex_turn_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| StoreError::NotFound(format!("active task attempt for turn {codex_turn_id}")))?;
+        let completion = TurnAttemptCompletion {
+            attempt_id: row.try_get("attempt_id")?,
+            task_id: row.try_get("task_id")?,
+            conversation_id: row.try_get("conversation_id")?,
+        };
+        let agent_code: String = row.try_get("agent_code")?;
+        let action_json = serde_json::to_string(action)?;
+        let updated = sqlx::query(
+            "UPDATE messages SET content = ?, agent_code = ?, status = 'completed', action_json = ? WHERE id = ? AND conversation_id = ? AND status = 'thinking'",
+        )
+        .bind(content)
+        .bind(&agent_code)
+        .bind(action_json)
+        .bind(assistant_message_id)
+        .bind(&completion.conversation_id)
+        .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(StoreError::NotFound(format!(
-                "workflow version changed for {}",
-                workflow.id.as_str()
+                "thinking message {assistant_message_id}"
             )));
         }
+        for draft in action.payload.drafts.as_deref().unwrap_or_default() {
+            sqlx::query("INSERT INTO artifact_drafts(id, conversation_id, target_path, content, based_on_hash, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(&completion.conversation_id)
+                .bind(&draft.target_path)
+                .bind(&draft.content)
+                .bind(&draft.based_on_hash)
+                .bind(created_at)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let memory_scope = if action
+            .payload
+            .memories
+            .as_ref()
+            .is_some_and(|memories| !memories.is_empty())
+        {
+            let row = sqlx::query("SELECT project_id, target_ref FROM conversations WHERE id = ?")
+                .bind(&completion.conversation_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+            Some((
+                row.try_get::<String, _>("project_id")?,
+                row.try_get::<Option<String>, _>("target_ref")?,
+            ))
+        } else {
+            None
+        };
+        for memory in action.payload.memories.as_deref().unwrap_or_default() {
+            let memory_id = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO conversation_memory(id, conversation_id, scope, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+                .bind(&memory_id)
+                .bind(&completion.conversation_id)
+                .bind(&memory.scope)
+                .bind(&memory.kind)
+                .bind(&memory.content)
+                .bind(created_at)
+                .execute(&mut *transaction)
+                .await?;
+            let (project_id, target_ref) = memory_scope.as_ref().ok_or_else(|| {
+                StoreError::InvalidData("memory scope is unavailable".to_string())
+            })?;
+            let character_ref = (memory.scope == "character")
+                .then(|| target_ref.clone())
+                .flatten();
+            sqlx::query("INSERT INTO project_memories(id, project_id, character_ref, kind, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(project_id)
+                .bind(character_ref)
+                .bind(&memory.kind)
+                .bind(&memory.content)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        for generation in generations {
+            sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                .bind(&generation.id)
+                .bind(&generation.project_id)
+                .bind(&generation.target_kind)
+                .bind(&generation.target_ref)
+                .bind(&generation.stage)
+                .bind(&generation.variant)
+                .bind(&generation.file_path)
+                .bind(&generation.file_hash)
+                .bind(generation.is_final)
+                .bind(&generation.source)
+                .bind(&generation.task_id)
+                .bind(serde_json::to_string(&generation.asset_spec)?)
+                .bind(generation.created_at)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        if let Some(character) = character {
+            let updated = sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
+                .bind(character_state_name(character.state))
+                .bind(&character.spec_path)
+                .bind(&character.render_path)
+                .bind(serde_json::to_string(&character.view_paths)?)
+                .bind(serde_json::to_string(&character.hard_constraints)?)
+                .bind(character.gate_spec_confirmed_at)
+                .bind(character.gate_render_confirmed_at)
+                .bind(character.gate_views_confirmed_at)
+                .bind(character.updated_at)
+                .bind(&character.id)
+                .bind(&character.project_id)
+                .execute(&mut *transaction)
+                .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::NotFound(format!("character {}", character.id)));
+            }
+        }
+        if let Some(target) = &action.target_agent {
+            let turn: i64 = sqlx::query_scalar("SELECT turn FROM conversations WHERE id = ?")
+                .bind(&completion.conversation_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+            sqlx::query("INSERT INTO agent_handoffs(conversation_id, turn, from_agent_code, to_agent_code, source, reason, status, created_at) VALUES (?, ?, ?, ?, 'agent', ?, 'delegated', ?)")
+                .bind(&completion.conversation_id)
+                .bind(turn)
+                .bind(&agent_code)
+                .bind(target)
+                .bind(&action.reason)
+                .bind(created_at)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("UPDATE conversations SET focus_agent_code = ?, status = 'active', updated_at = ? WHERE id = ?")
+                .bind(target)
+                .bind(created_at)
+                .bind(&completion.conversation_id)
+                .execute(&mut *transaction)
+                .await?;
+        } else {
+            sqlx::query("UPDATE conversations SET status = 'active', updated_at = ? WHERE id = ?")
+                .bind(created_at)
+                .bind(&completion.conversation_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query("UPDATE task_attempts SET status = 'succeeded' WHERE id = ?")
+            .bind(&completion.attempt_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE tasks SET status = 'succeeded' WHERE id = ?")
+            .bind(&completion.task_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(completion)
+    }
+
+    pub async fn fail_action_turn(
+        &self,
+        codex_turn_id: &str,
+        assistant_message_id: &str,
+        error: &str,
+        status: MessageStatus,
+        created_at: i64,
+    ) -> Result<Option<TurnAttemptCompletion>, StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
+        )
+        .bind(codex_turn_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let completion = TurnAttemptCompletion {
+            attempt_id: row.try_get("attempt_id")?,
+            task_id: row.try_get("task_id")?,
+            conversation_id: row.try_get("conversation_id")?,
+        };
+        sqlx::query("UPDATE messages SET content = ?, status = ? WHERE id = ? AND conversation_id = ? AND status = 'thinking'")
+            .bind(error)
+            .bind(message_status_name(status))
+            .bind(assistant_message_id)
+            .bind(&completion.conversation_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE conversations SET status = 'active', updated_at = ? WHERE id = ?")
+            .bind(created_at)
+            .bind(&completion.conversation_id)
+            .execute(&mut *transaction)
+            .await?;
+        let attempt_status = if status == MessageStatus::Interrupted {
+            TaskAttemptStatus::Interrupted
+        } else {
+            TaskAttemptStatus::Failed
+        };
+        sqlx::query("UPDATE task_attempts SET status = ? WHERE id = ?")
+            .bind(attempt_status_name(attempt_status))
+            .bind(&completion.attempt_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE tasks SET status = 'failed' WHERE id = ?")
+            .bind(&completion.task_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(completion))
+    }
+
+    pub async fn list_drafts(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ArtifactDraftRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, target_path, content, based_on_hash, status, created_at FROM artifact_drafts WHERE conversation_id = ? ORDER BY created_at, id")
+            .bind(conversation_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ArtifactDraftRecord {
+                    id: row.try_get("id")?,
+                    conversation_id: conversation_id.to_string(),
+                    target_path: row.try_get("target_path")?,
+                    content: row.try_get("content")?,
+                    based_on_hash: row.try_get("based_on_hash")?,
+                    status: row.try_get("status")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn list_handoffs(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<AgentHandoff>, StoreError> {
+        let rows = sqlx::query("SELECT id, turn, from_agent_code, to_agent_code, source, reason, status, created_at FROM agent_handoffs WHERE conversation_id = ? ORDER BY turn, id")
+            .bind(conversation_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AgentHandoff {
+                    id: row.try_get("id")?,
+                    conversation_id: conversation_id.to_string(),
+                    turn: row.try_get::<i64, _>("turn")? as u64,
+                    from_agent_code: row.try_get("from_agent_code")?,
+                    to_agent_code: row.try_get("to_agent_code")?,
+                    source: row.try_get("source")?,
+                    reason: row.try_get("reason")?,
+                    status: row.try_get("status")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn list_conversation_memories(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationMemory>, StoreError> {
+        let rows = sqlx::query("SELECT id, scope, kind, content, created_at FROM conversation_memory WHERE conversation_id = ? ORDER BY created_at, id")
+            .bind(conversation_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ConversationMemory {
+                    id: row.try_get("id")?,
+                    conversation_id: conversation_id.to_string(),
+                    scope: row.try_get("scope")?,
+                    kind: row.try_get("kind")?,
+                    content: row.try_get("content")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn list_project_memories(
+        &self,
+        project_id: &str,
+        character_ref: Option<&str>,
+    ) -> Result<Vec<ProjectMemory>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, character_ref, kind, content, enabled, created_at, updated_at FROM project_memories WHERE project_id = ? AND enabled = 1 AND (character_ref IS NULL OR character_ref = ?) ORDER BY updated_at DESC, id DESC LIMIT 20",
+        )
+        .bind(project_id)
+        .bind(character_ref)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProjectMemory {
+                    id: row.try_get("id")?,
+                    project_id: project_id.to_string(),
+                    character_ref: row.try_get("character_ref")?,
+                    kind: row.try_get("kind")?,
+                    content: row.try_get("content")?,
+                    enabled: row.try_get("enabled")?,
+                    created_at: row.try_get("created_at")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn mark_drafts_committed(&self, draft_ids: &[String]) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        for draft_id in draft_ids {
+            let updated = sqlx::query("UPDATE artifact_drafts SET status = 'committed' WHERE id = ? AND status = 'pending'")
+                .bind(draft_id)
+                .execute(&mut *transaction)
+                .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::Conflict(format!(
+                    "draft is not pending: {draft_id}"
+                )));
+            }
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
-    pub async fn load_workflows(&self, project_id: &str) -> Result<Vec<FocusWorkflow>, StoreError> {
-        sqlx::query(
-            "SELECT id, conversation_id, checkpoint_state, input_version, workflow_version FROM focus_workflows WHERE project_id = ?",
+    pub async fn commit_character_spec_gate(
+        &self,
+        draft_id: &str,
+        character: &Character,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE artifact_drafts SET status = 'committed' WHERE id = ? AND status = 'pending'",
         )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|row| {
-            let state: String = row.try_get("checkpoint_state")?;
-            Ok(FocusWorkflow {
-                id: FocusWorkflowId::new(row.try_get::<String, _>("id")?),
-                project_id: ProjectId::new(project_id),
-                conversation_id: ConversationId::new(row.try_get::<String, _>("conversation_id")?),
-                state: parse_workflow_state(&state)?,
-                input_version: row.try_get::<i64, _>("input_version")? as u64,
-                workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
+        .bind(draft_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "draft is not pending: {draft_id}"
+            )));
+        }
+        let updated = sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
+            .bind(character_state_name(character.state))
+            .bind(&character.spec_path)
+            .bind(&character.render_path)
+            .bind(serde_json::to_string(&character.view_paths)?)
+            .bind(serde_json::to_string(&character.hard_constraints)?)
+            .bind(character.gate_spec_confirmed_at)
+            .bind(character.gate_render_confirmed_at)
+            .bind(character.gate_views_confirmed_at)
+            .bind(character.updated_at)
+            .bind(&character.id)
+            .bind(&character.project_id)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::NotFound(format!("character {}", character.id)));
+        }
+        insert_character_event(
+            &mut transaction,
+            character,
+            "spec_confirmed",
+            "角色设定已通过人工门禁",
+            serde_json::json!({ "draftId": draft_id }),
+            created_at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn insert_character(&self, character: &Character) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query("INSERT INTO characters(id, project_id, name, group_name, dir_name, state, spec_path, render_path, view_paths_json, hard_constraints_json, gate_spec_confirmed_at, gate_render_confirmed_at, gate_views_confirmed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&character.id)
+            .bind(&character.project_id)
+            .bind(&character.name)
+            .bind(&character.group)
+            .bind(&character.dir_name)
+            .bind(character_state_name(character.state))
+            .bind(&character.spec_path)
+            .bind(&character.render_path)
+            .bind(serde_json::to_string(&character.view_paths)?)
+            .bind(serde_json::to_string(&character.hard_constraints)?)
+            .bind(character.gate_spec_confirmed_at)
+            .bind(character.gate_render_confirmed_at)
+            .bind(character.gate_views_confirmed_at)
+            .bind(character.created_at)
+            .bind(character.updated_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_character(&self, character: &Character) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
+            .bind(character_state_name(character.state))
+            .bind(&character.spec_path)
+            .bind(&character.render_path)
+            .bind(serde_json::to_string(&character.view_paths)?)
+            .bind(serde_json::to_string(&character.hard_constraints)?)
+            .bind(character.gate_spec_confirmed_at)
+            .bind(character.gate_render_confirmed_at)
+            .bind(character.gate_views_confirmed_at)
+            .bind(character.updated_at)
+            .bind(&character.id)
+            .bind(&character.project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_characters(&self, project_id: &str) -> Result<Vec<Character>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, group_name, dir_name, state, spec_path, render_path, view_paths_json, hard_constraints_json, gate_spec_confirmed_at, gate_render_confirmed_at, gate_views_confirmed_at, created_at, updated_at FROM characters WHERE project_id = ? ORDER BY name, id")
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| decode_character(project_id, row))
+            .collect()
+    }
+
+    pub async fn read_character(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<Option<Character>, StoreError> {
+        let row = sqlx::query("SELECT id, name, group_name, dir_name, state, spec_path, render_path, view_paths_json, hard_constraints_json, gate_spec_confirmed_at, gate_render_confirmed_at, gate_views_confirmed_at, created_at, updated_at FROM characters WHERE project_id = ? AND id = ?")
+            .bind(project_id)
+            .bind(character_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| decode_character(project_id, row)).transpose()
+    }
+
+    pub async fn insert_generation(&self, generation: &Generation) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&generation.id)
+            .bind(&generation.project_id)
+            .bind(&generation.target_kind)
+            .bind(&generation.target_ref)
+            .bind(&generation.stage)
+            .bind(&generation.variant)
+            .bind(&generation.file_path)
+            .bind(&generation.file_hash)
+            .bind(generation.is_final)
+            .bind(&generation.source)
+            .bind(&generation.task_id)
+            .bind(serde_json::to_string(&generation.asset_spec)?)
+            .bind(generation.created_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_generations(
+        &self,
+        project_id: &str,
+        target_kind: &str,
+        target_ref: &str,
+        stage: Option<&str>,
+    ) -> Result<Vec<Generation>, StoreError> {
+        let rows = sqlx::query("SELECT id, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at FROM generations WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND (? IS NULL OR stage = ?) ORDER BY created_at DESC, id DESC")
+            .bind(project_id)
+            .bind(target_kind)
+            .bind(target_ref)
+            .bind(stage)
+            .bind(stage)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let asset_spec: String = row.try_get("asset_spec_json")?;
+                Ok(Generation {
+                    id: row.try_get("id")?,
+                    project_id: project_id.to_string(),
+                    target_kind: target_kind.to_string(),
+                    target_ref: target_ref.to_string(),
+                    stage: row.try_get("stage")?,
+                    variant: row.try_get("variant")?,
+                    file_path: row.try_get("file_path")?,
+                    file_hash: row.try_get("file_hash")?,
+                    is_final: row.try_get("is_final")?,
+                    source: row.try_get("source")?,
+                    task_id: row.try_get("task_id")?,
+                    asset_spec: serde_json::from_str(&asset_spec)?,
+                    created_at: row.try_get("created_at")?,
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
+
+    pub async fn mark_generation_final(
+        &self,
+        project_id: &str,
+        target_ref: &str,
+        generation_ids: &[String],
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE generations SET is_final = 0 WHERE project_id = ? AND target_kind = 'character' AND target_ref = ?")
+            .bind(project_id)
+            .bind(target_ref)
+            .execute(&mut *transaction)
+            .await?;
+        for generation_id in generation_ids {
+            let updated = sqlx::query("UPDATE generations SET is_final = 1 WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ?")
+                .bind(generation_id)
+                .bind(project_id)
+                .bind(target_ref)
+                .execute(&mut *transaction)
+                .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::NotFound(format!("generation {generation_id}")));
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn commit_character_generation_gate(
+        &self,
+        stage: &str,
+        generation_ids: &[String],
+        character: &Character,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE generations SET is_final = 0 WHERE project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ?")
+            .bind(&character.project_id)
+            .bind(&character.id)
+            .bind(stage)
+            .execute(&mut *transaction)
+            .await?;
+        for generation_id in generation_ids {
+            let updated = sqlx::query("UPDATE generations SET is_final = 1 WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ?")
+                .bind(generation_id)
+                .bind(&character.project_id)
+                .bind(&character.id)
+                .bind(stage)
+                .execute(&mut *transaction)
+                .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::NotFound(format!("generation {generation_id}")));
+            }
+        }
+        let updated = sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
+            .bind(character_state_name(character.state))
+            .bind(&character.spec_path)
+            .bind(&character.render_path)
+            .bind(serde_json::to_string(&character.view_paths)?)
+            .bind(serde_json::to_string(&character.hard_constraints)?)
+            .bind(character.gate_spec_confirmed_at)
+            .bind(character.gate_render_confirmed_at)
+            .bind(character.gate_views_confirmed_at)
+            .bind(character.updated_at)
+            .bind(&character.id)
+            .bind(&character.project_id)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::NotFound(format!("character {}", character.id)));
+        }
+        insert_character_event(
+            &mut transaction,
+            character,
+            &format!("{stage}_confirmed"),
+            &format!("角色 {stage} 产物已通过人工门禁"),
+            serde_json::json!({ "generationIds": generation_ids }),
+            created_at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn record_character_rejection(
+        &self,
+        character: &Character,
+        stage: &str,
+        reason: &str,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("INSERT INTO project_memories(id, project_id, character_ref, kind, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&character.project_id)
+            .bind(&character.id)
+            .bind(format!("{stage}_rejection"))
+            .bind(reason)
+            .bind(created_at)
+            .bind(created_at)
+            .execute(&mut *transaction)
+            .await?;
+        insert_character_event(
+            &mut transaction,
+            character,
+            &format!("{stage}_rejected"),
+            reason,
+            serde_json::json!({ "stage": stage, "reason": reason }),
+            created_at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn insert_art_bible_version(
@@ -492,32 +1265,14 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub async fn commit_art_bible_version(
+    pub async fn commit_art_bible_gate(
         &self,
-        workflow: &FocusWorkflow,
-        expected_workflow_version: u64,
         version: &ArtBibleVersion,
         markdown: &str,
+        draft_id: &str,
     ) -> Result<(), StoreError> {
         self.require_writable()?;
         let mut transaction = self.pool.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE focus_workflows SET checkpoint_state = ?, workflow_version = ? WHERE id = ? AND conversation_id = ? AND input_version = ? AND workflow_version = ?",
-        )
-        .bind(workflow_state_name(workflow.state))
-        .bind(workflow.workflow_version as i64)
-        .bind(workflow.id.as_str())
-        .bind(workflow.conversation_id.as_str())
-        .bind(workflow.input_version as i64)
-        .bind(expected_workflow_version as i64)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(StoreError::NotFound(format!(
-                "workflow version changed for {}",
-                workflow.id.as_str()
-            )));
-        }
         sqlx::query(
             "INSERT INTO art_bible_versions(id, project_id, version, content_hash, source_artifact_ids_json, markdown, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
@@ -530,6 +1285,17 @@ impl ProjectStore {
         .bind(version.created_at)
         .execute(&mut *transaction)
         .await?;
+        let updated = sqlx::query(
+            "UPDATE artifact_drafts SET status = 'committed' WHERE id = ? AND status = 'pending'",
+        )
+        .bind(draft_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "draft is not pending: {draft_id}"
+            )));
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -558,75 +1324,6 @@ impl ProjectStore {
                     },
                     row.try_get("markdown")?,
                 ))
-            })
-            .collect()
-    }
-
-    pub async fn latest_artifact(
-        &self,
-        conversation_id: &str,
-        artifact_type: &str,
-    ) -> Result<Option<Artifact>, StoreError> {
-        let row = sqlx::query(
-            "SELECT a.id, a.input_version, a.workflow_version, a.content_json, a.created_at FROM artifacts a JOIN focus_workflows fw ON fw.id = a.workflow_id WHERE fw.conversation_id = ? AND a.artifact_type = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 1",
-        )
-        .bind(conversation_id)
-        .bind(artifact_type)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            let content_json: String = row.try_get("content_json")?;
-            Ok(Artifact {
-                id: codex_game_domain::ArtifactId::new(row.try_get::<String, _>("id")?),
-                input_version: row.try_get::<i64, _>("input_version")? as u64,
-                workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
-                content: serde_json::from_str(&content_json)?,
-                created_at: row.try_get("created_at")?,
-            })
-        })
-        .transpose()
-    }
-
-    pub async fn count_committed_artifacts(
-        &self,
-        workflow_id: &str,
-        stage: &str,
-        artifact_type: &str,
-    ) -> Result<u64, StoreError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM artifacts a JOIN task_attempts ta ON ta.output_artifact_id = a.id JOIN tasks t ON t.id = ta.task_id WHERE t.target_id = ? AND t.stage = ? AND a.artifact_type = ? AND ta.status = 'succeeded'",
-        )
-        .bind(workflow_id)
-        .bind(stage)
-        .bind(artifact_type)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(count as u64)
-    }
-
-    pub async fn artifacts_for_workflow(
-        &self,
-        workflow_id: &str,
-        artifact_type: &str,
-    ) -> Result<Vec<Artifact>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT id, input_version, workflow_version, content_json, created_at FROM artifacts WHERE workflow_id = ? AND (? = '' OR artifact_type = ?) ORDER BY created_at, id",
-        )
-        .bind(workflow_id)
-        .bind(artifact_type)
-        .bind(artifact_type)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let content_json: String = row.try_get("content_json")?;
-                Ok(Artifact {
-                    id: codex_game_domain::ArtifactId::new(row.try_get::<String, _>("id")?),
-                    input_version: row.try_get::<i64, _>("input_version")? as u64,
-                    workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
-                    content: serde_json::from_str(&content_json)?,
-                    created_at: row.try_get("created_at")?,
-                })
             })
             .collect()
     }
@@ -738,14 +1435,14 @@ impl ProjectStore {
             .bind(interaction.created_at)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("INSERT INTO tasks(id, interaction_id, target_id, stage, agent_code, input_version, workflow_version, prompt, context_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')")
+        sqlx::query("INSERT INTO tasks(id, interaction_id, target_id, stage, agent_code, input_version, contract_version, prompt, context_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')")
             .bind(task.id.as_str())
             .bind(task.interaction_id.as_str())
             .bind(&task.target_id)
             .bind(&task.stage)
             .bind(&task.agent_code)
             .bind(task.input_version as i64)
-            .bind(task.workflow_version as i64)
+            .bind(task.contract_version as i64)
             .bind(prompt)
             .bind(serde_json::to_string(context)?)
             .execute(&mut *transaction)
@@ -763,7 +1460,7 @@ impl ProjectStore {
 
     pub async fn list_tasks(&self, conversation_id: &str) -> Result<Vec<Task>, StoreError> {
         let rows = sqlx::query(
-            "SELECT t.id, t.interaction_id, t.target_id, t.stage, t.agent_code, t.input_version, t.workflow_version, t.status FROM tasks t JOIN interactions i ON i.id = t.interaction_id WHERE i.conversation_id = ? ORDER BY i.created_at, t.id",
+            "SELECT t.id, t.interaction_id, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version, t.status FROM tasks t JOIN interactions i ON i.id = t.interaction_id WHERE i.conversation_id = ? ORDER BY i.created_at, t.id",
         )
         .bind(conversation_id)
         .fetch_all(&self.pool)
@@ -779,78 +1476,11 @@ impl ProjectStore {
                     agent_code: row.try_get("agent_code")?,
                     input_artifact_ids: Vec::new(),
                     input_version: row.try_get::<i64, _>("input_version")? as u64,
-                    workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
+                    contract_version: row.try_get::<i64, _>("contract_version")? as u64,
                     status: parse_task_status(&status)?,
                 })
             })
             .collect()
-    }
-
-    pub async fn latest_retryable_task(
-        &self,
-        conversation_id: &str,
-    ) -> Result<Option<RetryableTask>, StoreError> {
-        let row = sqlx::query(
-            "SELECT t.id, t.interaction_id, t.target_id, t.stage, t.agent_code, t.input_version, t.workflow_version, t.prompt, t.context_json, i.conversation_id, COALESCE(MAX(ta.attempt_no), 0) + 1 AS next_attempt_no FROM tasks t JOIN interactions i ON i.id = t.interaction_id LEFT JOIN task_attempts ta ON ta.task_id = t.id WHERE i.conversation_id = ? AND t.status IN ('failed', 'cancelled') GROUP BY t.id ORDER BY i.created_at DESC, t.id DESC LIMIT 1",
-        )
-        .bind(conversation_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            let context_json: String = row.try_get("context_json")?;
-            Ok(RetryableTask {
-                task: Task {
-                    id: TaskId::new(row.try_get::<String, _>("id")?),
-                    interaction_id: InteractionId::new(row.try_get::<String, _>("interaction_id")?),
-                    target_id: row.try_get("target_id")?,
-                    stage: row.try_get("stage")?,
-                    agent_code: row.try_get("agent_code")?,
-                    input_artifact_ids: Vec::new(),
-                    input_version: row.try_get::<i64, _>("input_version")? as u64,
-                    workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
-                    status: TaskStatus::Failed,
-                },
-                conversation_id: row.try_get("conversation_id")?,
-                prompt: row.try_get("prompt")?,
-                context: serde_json::from_str(&context_json)?,
-                next_attempt_no: row.try_get::<i64, _>("next_attempt_no")? as u32,
-            })
-        })
-        .transpose()
-    }
-
-    pub async fn create_retry_attempt(
-        &self,
-        task: &Task,
-        attempt: &TaskAttempt,
-        context: &ContextPackage,
-    ) -> Result<(), StoreError> {
-        self.require_writable()?;
-        let mut transaction = self.pool.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE tasks SET input_version = ?, workflow_version = ?, context_json = ?, status = 'pending' WHERE id = ? AND status IN ('failed', 'cancelled')",
-        )
-        .bind(task.input_version as i64)
-        .bind(task.workflow_version as i64)
-        .bind(serde_json::to_string(context)?)
-        .bind(task.id.as_str())
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(StoreError::NotFound(format!(
-                "retryable task {}",
-                task.id.as_str()
-            )));
-        }
-        sqlx::query("INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, status) VALUES (?, ?, ?, ?, 'pending')")
-            .bind(attempt.id.as_str())
-            .bind(task.id.as_str())
-            .bind(attempt.attempt_no as i64)
-            .bind(attempt.conversation_codex_thread_id.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
     }
 
     pub async fn running_attempts(
@@ -945,7 +1575,7 @@ impl ProjectStore {
         codex_turn_id: &str,
     ) -> Result<Option<TurnAttemptContext>, StoreError> {
         let row = sqlx::query(
-            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, t.target_id, t.stage, t.agent_code, t.input_version, t.workflow_version FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
+            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
         )
         .bind(codex_turn_id)
         .fetch_optional(&self.pool)
@@ -955,134 +1585,14 @@ impl ProjectStore {
                 attempt_id: row.try_get("attempt_id")?,
                 task_id: row.try_get("task_id")?,
                 conversation_id: row.try_get("conversation_id")?,
-                workflow_id: row.try_get("target_id")?,
+                target_id: row.try_get("target_id")?,
                 stage: row.try_get("stage")?,
                 agent_code: row.try_get("agent_code")?,
                 input_version: row.try_get::<i64, _>("input_version")? as u64,
-                workflow_version: row.try_get::<i64, _>("workflow_version")? as u64,
+                contract_version: row.try_get::<i64, _>("contract_version")? as u64,
             })
         })
         .transpose()
-    }
-
-    pub async fn commit_turn_artifacts(
-        &self,
-        codex_turn_id: &str,
-        workflow_id: &str,
-        artifacts: &[Artifact],
-        workflow: Option<&FocusWorkflow>,
-    ) -> Result<TurnAttemptCompletion, StoreError> {
-        let Some(output_artifact) = artifacts.first() else {
-            return Err(StoreError::NotFound("turn output artifact".to_string()));
-        };
-        self.require_writable()?;
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running') AND t.target_id = ? AND t.input_version = ? AND t.workflow_version = ?",
-        )
-        .bind(codex_turn_id)
-        .bind(workflow_id)
-        .bind(output_artifact.input_version as i64)
-        .bind(output_artifact.workflow_version as i64)
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some(row) = row else {
-            return Err(StoreError::NotFound(format!(
-                "active task attempt for turn {codex_turn_id}"
-            )));
-        };
-        let completion = TurnAttemptCompletion {
-            attempt_id: row.try_get("attempt_id")?,
-            task_id: row.try_get("task_id")?,
-            conversation_id: row.try_get("conversation_id")?,
-        };
-        for artifact in artifacts {
-            sqlx::query(
-                "INSERT INTO artifacts(id, workflow_id, artifact_type, input_version, workflow_version, content_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(artifact.id.as_str())
-            .bind(workflow_id)
-            .bind(artifact_type_name(&artifact.content))
-            .bind(artifact.input_version as i64)
-            .bind(artifact.workflow_version as i64)
-            .bind(serde_json::to_string(&artifact.content)?)
-            .bind(artifact.created_at)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        if let Some(workflow) = workflow {
-            let workflow_updated = sqlx::query(
-                "UPDATE focus_workflows SET checkpoint_state = ?, workflow_version = ? WHERE id = ? AND conversation_id = ? AND input_version = ? AND workflow_version = ?",
-            )
-            .bind(workflow_state_name(workflow.state))
-            .bind(workflow.workflow_version as i64)
-            .bind(workflow.id.as_str())
-            .bind(&completion.conversation_id)
-            .bind(output_artifact.input_version as i64)
-            .bind(output_artifact.workflow_version as i64)
-            .execute(&mut *transaction)
-            .await?;
-            if workflow_updated.rows_affected() != 1 {
-                return Err(StoreError::NotFound(format!(
-                    "workflow version changed for {}",
-                    workflow.id.as_str()
-                )));
-            }
-        }
-        sqlx::query(
-            "UPDATE task_attempts SET status = 'succeeded', output_artifact_id = ? WHERE id = ?",
-        )
-        .bind(output_artifact.id.as_str())
-        .bind(&completion.attempt_id)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query("UPDATE tasks SET status = 'succeeded' WHERE id = ?")
-            .bind(&completion.task_id)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(completion)
-    }
-
-    pub async fn commit_workflow_artifact(
-        &self,
-        workflow: &FocusWorkflow,
-        expected_workflow_version: u64,
-        artifact: &Artifact,
-    ) -> Result<(), StoreError> {
-        self.require_writable()?;
-        let mut transaction = self.pool.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE focus_workflows SET checkpoint_state = ?, workflow_version = ? WHERE id = ? AND conversation_id = ? AND input_version = ? AND workflow_version = ?",
-        )
-        .bind(workflow_state_name(workflow.state))
-        .bind(workflow.workflow_version as i64)
-        .bind(workflow.id.as_str())
-        .bind(workflow.conversation_id.as_str())
-        .bind(workflow.input_version as i64)
-        .bind(expected_workflow_version as i64)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(StoreError::NotFound(format!(
-                "workflow version changed for {}",
-                workflow.id.as_str()
-            )));
-        }
-        sqlx::query(
-            "INSERT INTO artifacts(id, workflow_id, artifact_type, input_version, workflow_version, content_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(artifact.id.as_str())
-        .bind(workflow.id.as_str())
-        .bind(artifact_type_name(&artifact.content))
-        .bind(artifact.input_version as i64)
-        .bind(artifact.workflow_version as i64)
-        .bind(serde_json::to_string(&artifact.content)?)
-        .bind(artifact.created_at)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(())
     }
 
     pub async fn complete_turn(
@@ -1116,6 +1626,24 @@ impl ProjectStore {
             .bind(&completion.task_id)
             .execute(&mut *transaction)
             .await?;
+        let message_status = match attempt_status {
+            TaskAttemptStatus::Cancelled | TaskAttemptStatus::Interrupted => "interrupted",
+            TaskAttemptStatus::Failed | TaskAttemptStatus::Unknown => "failed",
+            _ => "completed",
+        };
+        sqlx::query(
+            "UPDATE messages SET status = ?, content = CASE WHEN content = '' AND ? = 'failed' THEN 'Agent 执行失败，可重试本轮。' WHEN content = '' AND ? = 'interrupted' THEN '运行已中断' ELSE content END WHERE id = (SELECT id FROM messages WHERE conversation_id = ? AND status = 'thinking' ORDER BY turn DESC, created_at DESC LIMIT 1)",
+        )
+        .bind(message_status)
+        .bind(message_status)
+        .bind(message_status)
+        .bind(&completion.conversation_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE conversations SET status = 'active' WHERE id = ?")
+            .bind(&completion.conversation_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(Some(completion))
     }
@@ -1133,49 +1661,154 @@ impl ProjectStore {
         )
         .execute(&mut *transaction)
         .await?;
+        sqlx::query("UPDATE messages SET status = 'interrupted', content = CASE WHEN content = '' THEN '运行在应用退出后中断，可重新发送。' ELSE content END WHERE status = 'thinking'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE conversations SET status = 'active' WHERE status = 'running'")
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(result.rows_affected())
     }
 }
 
-fn artifact_type_name(content: &ArtifactContent) -> &'static str {
-    match content {
-        ArtifactContent::StructuredBrief(_) => "structuredBrief",
-        ArtifactContent::ReviewReport(_) => "reviewReport",
-        ArtifactContent::ConflictSet(_) => "conflictSet",
-        ArtifactContent::ArtBibleDraft(_) => "artBibleDraft",
-        ArtifactContent::UserDecision(_) => "userDecision",
-        ArtifactContent::Other(_) => "other",
+fn insert_message_query(
+    message: &ConversationMessage,
+) -> sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    sqlx::query(
+        "INSERT INTO messages(id, conversation_id, turn, role, content, agent_code, recipient_agent_code, status, token_count, folded, attachments_json, action_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&message.id)
+    .bind(message.conversation_id.as_str())
+    .bind(message.turn as i64)
+    .bind(&message.role)
+    .bind(&message.content)
+    .bind(&message.agent_code)
+    .bind(&message.recipient_agent_code)
+    .bind(message_status_name(message.status))
+    .bind(message.token_count as i64)
+    .bind(message.folded)
+    .bind(serde_json::to_string(&message.attachments).unwrap_or_else(|_| "[]".to_string()))
+    .bind(message.action.as_ref().and_then(|action| serde_json::to_string(action).ok()))
+    .bind(message.created_at)
+}
+
+fn decode_message(
+    conversation_id: &str,
+    row: SqliteRow,
+) -> Result<ConversationMessage, StoreError> {
+    let attachments: String = row.try_get("attachments_json")?;
+    let action: Option<String> = row.try_get("action_json")?;
+    Ok(ConversationMessage {
+        id: row.try_get("id")?,
+        conversation_id: ConversationId::new(conversation_id),
+        turn: row.try_get::<i64, _>("turn")? as u64,
+        role: row.try_get("role")?,
+        content: row.try_get("content")?,
+        agent_code: row.try_get("agent_code")?,
+        recipient_agent_code: row.try_get("recipient_agent_code")?,
+        status: parse_message_status(&row.try_get::<String, _>("status")?)?,
+        token_count: row.try_get::<i64, _>("token_count")? as u64,
+        folded: row.try_get("folded")?,
+        attachments: serde_json::from_str(&attachments)?,
+        action: action
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn decode_character(project_id: &str, row: SqliteRow) -> Result<Character, StoreError> {
+    let views: String = row.try_get("view_paths_json")?;
+    let constraints: String = row.try_get("hard_constraints_json")?;
+    Ok(Character {
+        id: row.try_get("id")?,
+        project_id: project_id.to_string(),
+        name: row.try_get("name")?,
+        group: row.try_get("group_name")?,
+        dir_name: row.try_get("dir_name")?,
+        state: parse_character_state(&row.try_get::<String, _>("state")?)?,
+        spec_path: row.try_get("spec_path")?,
+        render_path: row.try_get("render_path")?,
+        view_paths: serde_json::from_str(&views)?,
+        hard_constraints: serde_json::from_str(&constraints)?,
+        gate_spec_confirmed_at: row.try_get("gate_spec_confirmed_at")?,
+        gate_render_confirmed_at: row.try_get("gate_render_confirmed_at")?,
+        gate_views_confirmed_at: row.try_get("gate_views_confirmed_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn conversation_status_name(status: ConversationStatus) -> &'static str {
+    match status {
+        ConversationStatus::Active => "active",
+        ConversationStatus::Running => "running",
     }
 }
 
-fn workflow_state_name(state: WorkflowState) -> &'static str {
-    match state {
-        WorkflowState::Draft => "DRAFT",
-        WorkflowState::Clarifying => "CLARIFYING",
-        WorkflowState::BriefReady => "BRIEF_READY",
-        WorkflowState::Reviewing => "REVIEWING",
-        WorkflowState::Merging => "MERGING",
-        WorkflowState::UserReview => "USER_REVIEW",
-        WorkflowState::Confirmed => "CONFIRMED",
-        WorkflowState::Versioned => "VERSIONED",
-        WorkflowState::Cancelled => "CANCELLED",
-    }
-}
-
-fn parse_workflow_state(value: &str) -> Result<WorkflowState, sqlx::Error> {
+fn parse_conversation_status(value: &str) -> Result<ConversationStatus, sqlx::Error> {
     match value {
-        "DRAFT" => Ok(WorkflowState::Draft),
-        "CLARIFYING" => Ok(WorkflowState::Clarifying),
-        "BRIEF_READY" => Ok(WorkflowState::BriefReady),
-        "REVIEWING" => Ok(WorkflowState::Reviewing),
-        "MERGING" => Ok(WorkflowState::Merging),
-        "USER_REVIEW" => Ok(WorkflowState::UserReview),
-        "CONFIRMED" => Ok(WorkflowState::Confirmed),
-        "VERSIONED" => Ok(WorkflowState::Versioned),
-        "CANCELLED" => Ok(WorkflowState::Cancelled),
+        "active" => Ok(ConversationStatus::Active),
+        "running" => Ok(ConversationStatus::Running),
         other => Err(sqlx::Error::Decode(
-            format!("unknown workflow state: {other}").into(),
+            format!("unknown conversation status: {other}").into(),
+        )),
+    }
+}
+
+fn parse_conversation_target_kind(value: &str) -> Result<ConversationTargetKind, sqlx::Error> {
+    match value {
+        "project" => Ok(ConversationTargetKind::Project),
+        "character" => Ok(ConversationTargetKind::Character),
+        other => Err(sqlx::Error::Decode(
+            format!("unknown conversation target kind: {other}").into(),
+        )),
+    }
+}
+
+fn message_status_name(status: MessageStatus) -> &'static str {
+    match status {
+        MessageStatus::Thinking => "thinking",
+        MessageStatus::Completed => "completed",
+        MessageStatus::Failed => "failed",
+        MessageStatus::Interrupted => "interrupted",
+    }
+}
+
+fn parse_message_status(value: &str) -> Result<MessageStatus, sqlx::Error> {
+    match value {
+        "thinking" => Ok(MessageStatus::Thinking),
+        "completed" | "done" => Ok(MessageStatus::Completed),
+        "failed" => Ok(MessageStatus::Failed),
+        "interrupted" | "cancelled" => Ok(MessageStatus::Interrupted),
+        other => Err(sqlx::Error::Decode(
+            format!("unknown message status: {other}").into(),
+        )),
+    }
+}
+
+fn character_state_name(state: CharacterState) -> &'static str {
+    match state {
+        CharacterState::S0SpecDrafting => "S0_spec_drafting",
+        CharacterState::S1SpecConfirmed => "S1_spec_confirmed",
+        CharacterState::S2RenderGenerated => "S2_render_generated",
+        CharacterState::S3RenderConfirmed => "S3_render_confirmed",
+        CharacterState::S4ViewsGenerated => "S4_views_generated",
+        CharacterState::S5ViewsConfirmed => "S5_views_confirmed",
+    }
+}
+
+fn parse_character_state(value: &str) -> Result<CharacterState, sqlx::Error> {
+    match value {
+        "S0_spec_drafting" => Ok(CharacterState::S0SpecDrafting),
+        "S1_spec_confirmed" => Ok(CharacterState::S1SpecConfirmed),
+        "S2_render_generated" => Ok(CharacterState::S2RenderGenerated),
+        "S3_render_confirmed" => Ok(CharacterState::S3RenderConfirmed),
+        "S4_views_generated" => Ok(CharacterState::S4ViewsGenerated),
+        "S5_views_confirmed" => Ok(CharacterState::S5ViewsConfirmed),
+        other => Err(sqlx::Error::Decode(
+            format!("unknown character state: {other}").into(),
         )),
     }
 }
@@ -1203,6 +1836,33 @@ fn attempt_status_name(status: TaskAttemptStatus) -> &'static str {
         TaskAttemptStatus::Interrupted => "interrupted",
         TaskAttemptStatus::Unknown => "unknown",
     }
+}
+
+async fn insert_character_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    character: &Character,
+    event: &str,
+    message: &str,
+    payload: serde_json::Value,
+    created_at: i64,
+) -> Result<(), StoreError> {
+    let task_id = format!("character-gate:{}", character.id);
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE task_id = ?",
+    )
+    .bind(&task_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    sqlx::query("INSERT INTO task_events(task_id, sequence, timestamp, level, event, message, payload_json) VALUES (?, ?, ?, 'info', ?, ?, ?)")
+        .bind(task_id)
+        .bind(sequence)
+        .bind(created_at)
+        .bind(event)
+        .bind(message)
+        .bind(serde_json::to_string(&payload)?)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 fn task_status_for_attempt(status: TaskAttemptStatus) -> &'static str {
@@ -1259,12 +1919,45 @@ pub async fn list_registered_projects(
                     )));
                 }
             };
+            let id = row.try_get::<String, _>("id")?;
+            let registered_name = row.try_get::<String, _>("name")?;
+            let root = row.try_get::<String, _>("root")?;
+            let metadata = fs::read_to_string(Path::new(&root).join("project.json"))
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .filter(|value| {
+                    value
+                        .get("schemaVersion")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(2)
+                });
+            let name = metadata
+                .as_ref()
+                .and_then(|value| value.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&registered_name)
+                .to_string();
+            let code = metadata
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let state = match metadata
+                .as_ref()
+                .and_then(|value| value.get("state"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("styleSettled") => codex_game_domain::ProjectState::StyleSettled,
+                Some("ready") => codex_game_domain::ProjectState::Ready,
+                _ => codex_game_domain::ProjectState::Drafting,
+            };
             Ok((
                 Project {
-                    id: ProjectId::new(row.try_get::<String, _>("id")?),
-                    name: row.try_get("name")?,
-                    root: row.try_get("root")?,
-                    state: codex_game_domain::ProjectState::Unversioned,
+                    id: ProjectId::new(id),
+                    name,
+                    code,
+                    root,
+                    state,
                 },
                 access,
             ))
@@ -1352,6 +2045,102 @@ async fn run_schema(pool: &SqlitePool, schema: &'static str) -> Result<(), sqlx:
 async fn migrate_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     ensure_column(
         pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'target_kind'",
+        "ALTER TABLE conversations ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'project'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'target_ref'",
+        "ALTER TABLE conversations ADD COLUMN target_ref TEXT",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'title'",
+        "ALTER TABLE conversations ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'director_agent_code'",
+        "ALTER TABLE conversations ADD COLUMN director_agent_code TEXT NOT NULL DEFAULT 'studio_director'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'focus_agent_code'",
+        "ALTER TABLE conversations ADD COLUMN focus_agent_code TEXT",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'status'",
+        "ALTER TABLE conversations ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'turn'",
+        "ALTER TABLE conversations ADD COLUMN turn INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'updated_at'",
+        "ALTER TABLE conversations ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'turn'",
+        "ALTER TABLE messages ADD COLUMN turn INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'agent_code'",
+        "ALTER TABLE messages ADD COLUMN agent_code TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'recipient_agent_code'",
+        "ALTER TABLE messages ADD COLUMN recipient_agent_code TEXT",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'status'",
+        "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'token_count'",
+        "ALTER TABLE messages ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'folded'",
+        "ALTER TABLE messages ADD COLUMN folded INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'attachments_json'",
+        "ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'action_json'",
+        "ALTER TABLE messages ADD COLUMN action_json TEXT",
+    )
+    .await?;
+    ensure_column(
+        pool,
         "SELECT COUNT(*) FROM pragma_table_info('art_bible_versions') WHERE name = 'markdown'",
         "ALTER TABLE art_bible_versions ADD COLUMN markdown TEXT NOT NULL DEFAULT ''",
     )
@@ -1376,8 +2165,8 @@ async fn migrate_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
     ensure_column(
         pool,
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'workflow_version'",
-        "ALTER TABLE tasks ADD COLUMN workflow_version INTEGER NOT NULL DEFAULT 1",
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'contract_version'",
+        "ALTER TABLE tasks ADD COLUMN contract_version INTEGER NOT NULL DEFAULT 1",
     )
     .await?;
     ensure_column(
@@ -1392,19 +2181,18 @@ async fn migrate_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "ALTER TABLE tasks ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
     )
     .await?;
-    ensure_column(
-        pool,
-        "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name = 'workflow_id'",
-        "ALTER TABLE artifacts ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''",
-    )
-    .await?;
     sqlx::query(
-        "UPDATE artifacts SET workflow_id = COALESCE((SELECT t.target_id FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id WHERE ta.output_artifact_id = artifacts.id), '') WHERE workflow_id = ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS unique_interaction_stage_agent ON tasks(interaction_id, stage, agent_code)",
     )
     .execute(pool)
     .await?;
     sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS unique_interaction_stage_agent ON tasks(interaction_id, stage, agent_code)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS unique_conversation_target ON conversations(project_id, target_kind, COALESCE(target_ref, ''))",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS messages_by_conversation_turn ON messages(conversation_id, turn, created_at)",
     )
     .execute(pool)
     .await?;

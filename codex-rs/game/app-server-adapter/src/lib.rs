@@ -1,33 +1,36 @@
 use codex_game_app_server_protocol::*;
+use codex_game_domain::AgentActionKind;
+use codex_game_domain::AgentCapability;
+use codex_game_domain::AgentHandoff;
 use codex_game_domain::ArtBibleVersion;
-use codex_game_domain::ArtifactContent;
-use codex_game_domain::ArtifactId;
-use codex_game_domain::ContextPackage;
+use codex_game_domain::ArtifactDraftRecord;
+use codex_game_domain::Character;
+use codex_game_domain::CharacterState;
 use codex_game_domain::Conversation;
-use codex_game_domain::FocusWorkflow;
+use codex_game_domain::ConversationMemory;
+use codex_game_domain::ConversationMessage;
+use codex_game_domain::ConversationStatus;
+use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::Generation;
+use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectState;
 use codex_game_domain::TaskAttemptStatus;
-use codex_game_domain::UserDecision;
-use codex_game_domain::WorkflowCommand;
-use codex_game_domain::WorkflowState;
-use codex_game_import::LegacyProjectImporter;
 use codex_game_runtime::Capability;
 use codex_game_runtime::CodexExecutionPort;
 use codex_game_runtime::ExecuteTaskRequest;
 use codex_game_runtime::GAME_PROTOCOL_VERSION;
 use codex_game_runtime::GameRuntime;
 use codex_game_runtime::GameServiceError;
+use codex_game_runtime::PreparedConversationTurn;
 use codex_game_runtime::RouteCandidate;
 use codex_game_runtime::RouteFailureKind;
 use codex_game_runtime::RouteOutcome;
 use codex_game_runtime::TaskExecution;
-use codex_game_runtime::review_agent_codes;
-use futures::future::try_join_all;
+use codex_game_runtime::bundled_agent_definitions;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 mod ai_config;
 
@@ -37,9 +40,17 @@ pub struct GameTurnProjection {
     pub task_id: String,
     pub conversation_id: String,
     pub status: String,
-    pub artifacts: Vec<(String, String)>,
-    pub workflow: Option<GameFocusWorkflow>,
-    pub conflict_count: Option<u64>,
+    pub agent_code: Option<String>,
+    pub handoff_target: Option<String>,
+    pub handoff_reason: Option<String>,
+    pub character: Option<GameCharacter>,
+    pub generations: Vec<GameGeneration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameTurnEventContext {
+    pub conversation_id: String,
+    pub agent_code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +90,22 @@ impl GameAppServerAdapter {
         }
     }
 
+    pub async fn turn_event_context(
+        &self,
+        turn_id: &str,
+    ) -> Result<Option<GameTurnEventContext>, GameServiceError> {
+        self.runtime
+            .service()
+            .turn_attempt_context(turn_id)
+            .await
+            .map(|context| {
+                context.map(|context| GameTurnEventContext {
+                    conversation_id: context.conversation_id,
+                    agent_code: context.agent_code,
+                })
+            })
+    }
+
     pub async fn observe_turn_completed(
         &self,
         turn_id: &str,
@@ -112,7 +139,38 @@ impl GameAppServerAdapter {
                 .await
                 .map_err(|_| GameServiceError::StateUnavailable)?;
         }
-        Ok(completion.map(turn_projection))
+        let Some(completion) = completion else {
+            return Ok(None);
+        };
+        let mut projection = turn_projection(completion);
+        if projection.status == "succeeded" {
+            let snapshot = self
+                .runtime
+                .service()
+                .read_conversation(&projection.conversation_id)
+                .await?;
+            if snapshot.conversation.target_kind == ConversationTargetKind::Character
+                && let Some(character_id) = snapshot.conversation.target_ref
+            {
+                let project_id = snapshot.conversation.project_id.as_str();
+                projection.character = Some(character_dto(
+                    self.runtime
+                        .service()
+                        .read_character(project_id, &character_id)
+                        .await?,
+                ));
+                projection.generations = self
+                    .runtime
+                    .service()
+                    .list_generations(project_id, &character_id, None)
+                    .await?
+                    .into_iter()
+                    .filter(|generation| generation.task_id.as_deref() == Some(&projection.task_id))
+                    .map(generation_dto)
+                    .collect();
+            }
+        }
+        Ok(Some(projection))
     }
 
     pub async fn observe_turn_aborted(
@@ -126,13 +184,41 @@ impl GameAppServerAdapter {
             .map(|completion| completion.map(turn_projection))
     }
 
+    pub fn project_inspect(
+        &self,
+        params: GameProjectInspectParams,
+    ) -> Result<GameProjectInspectResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .inspect_project_dir(&params.root)
+            .map(|state| GameProjectInspectResponse {
+                root: state.root,
+                occupied: state.occupied,
+                project_id: state.project_id,
+                supported: state.supported,
+            })
+    }
+
     pub async fn project_create(
         &self,
         project_id: String,
         params: GameProjectCreateParams,
     ) -> Result<GameProjectCreateResponse, GameServiceError> {
+        let state = self.runtime.service().inspect_project_dir(&params.root)?;
+        if state.occupied && !params.overwrite.unwrap_or(false) {
+            return Err(GameServiceError::InvalidProjectPath(
+                "目录已包含项目数据，请明确选择覆盖".to_string(),
+            ));
+        }
+        if state.occupied {
+            clear_managed_project_state(Path::new(&state.root))?;
+        }
         self.runtime
-            .create_project(project_id, params.name, params.root)
+            .create_project(
+                project_id,
+                params.name.unwrap_or_else(|| "未命名素材项目".to_string()),
+                state.root,
+            )
             .await
             .map(|project| GameProjectCreateResponse {
                 project: project_dto(project),
@@ -176,37 +262,53 @@ impl GameAppServerAdapter {
             })
     }
 
-    pub async fn project_import(
+    pub async fn project_commit_art_bible(
         &self,
-        params: GameProjectImportParams,
-    ) -> Result<GameProjectImportResponse, String> {
-        let destination = PathBuf::from(&params.destination);
-        let report = LegacyProjectImporter::import(Path::new(&params.source), &destination)
+        params: GameProjectCommitArtBibleParams,
+    ) -> Result<GameProjectCommitArtBibleResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .commit_art_bible_draft(&params.conversation_id, &params.draft_id)
             .await
-            .map_err(|error| error.to_string())?;
-        let project = match self.runtime.open_project(params.destination, false).await {
-            Ok(project) => project,
-            Err(error) => {
-                let rollback = fs::remove_dir_all(&destination)
-                    .err()
-                    .map(|rollback| format!("; rollback failed: {rollback}"))
-                    .unwrap_or_default();
-                return Err(format!("{error}{rollback}"));
-            }
-        };
-        Ok(GameProjectImportResponse {
-            project: project_dto(project),
-            warnings: report.warnings,
-        })
+            .map(|document| GameProjectCommitArtBibleResponse {
+                version: art_bible_dto(document.version),
+                markdown: document.markdown,
+            })
+    }
+
+    pub async fn project_finalize(
+        &self,
+        params: GameProjectFinalizeParams,
+    ) -> Result<GameProjectFinalizeResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .finalize_project(&params.project_id, params.name, params.code)
+            .await
+            .map(|project| GameProjectFinalizeResponse {
+                project: project_dto(project),
+            })
     }
 
     pub async fn conversation_ensure(
         &self,
         params: GameConversationEnsureParams,
     ) -> Result<GameConversationEnsureResponse, GameServiceError> {
+        let target_kind = parse_target_kind(&params.target_kind)?;
+        let title = params.title.unwrap_or_else(|| match target_kind {
+            ConversationTargetKind::Project => "项目美术基调".to_string(),
+            ConversationTargetKind::Character => "角色素材".to_string(),
+        });
         self.runtime
             .service()
-            .ensure_conversation(&params.project_id, params.target_id)
+            .ensure_conversation(
+                &params.project_id,
+                target_kind,
+                params.target_ref,
+                title,
+                params
+                    .director_agent_code
+                    .unwrap_or_else(|| "studio_director".to_string()),
+            )
             .await
             .map(|conversation| GameConversationEnsureResponse {
                 conversation: conversation_dto(conversation),
@@ -217,434 +319,146 @@ impl GameAppServerAdapter {
         &self,
         execution: &E,
         params: GameConversationSubmitParams,
-    ) -> Result<
-        (
-            GameConversationSubmitResponse,
-            codex_game_runtime::TaskExecution,
-        ),
-        String,
-    > {
-        let content = params.content;
-        let message = self
+    ) -> Result<(GameConversationSubmitResponse, Option<TaskExecution>), String> {
+        let conversation_id = params.conversation_id;
+        let prepared = self
             .runtime
             .service()
-            .submit_message(&params.conversation_id, content.clone())
+            .prepare_conversation_turn(
+                &conversation_id,
+                params.content,
+                params.recipient_agent_code,
+            )
             .await
             .map_err(|error| error.to_string())?;
-        let workflow = self
-            .runtime
-            .service()
-            .read_focus(&params.conversation_id)
+        let task = self.execute_prepared(execution, &prepared).await?;
+        let snapshot = self
+            .conversation_snapshot(&conversation_id)
+            .await
             .map_err(|error| error.to_string())?;
-        let (project, store) = self
-            .runtime
-            .service()
-            .execution_context(&params.conversation_id)
-            .map_err(|error| error.to_string())?;
-        let context = ContextPackage {
-            brief_artifact_id: ArtifactId::new(Uuid::now_v7().to_string()),
-            confirmed_decisions: Vec::new(),
-            artifact_summaries: Vec::new(),
-            context_version: workflow.input_version,
-            workflow_version: workflow.workflow_version,
-            agent_definition_version: "1".to_string(),
-            output_schema: structured_brief_schema(),
+        let response = GameConversationSubmitResponse {
+            conversation: snapshot.conversation,
+            messages: snapshot.messages,
+            drafts: snapshot.drafts,
+            memories: snapshot.memories,
+            handoffs: snapshot.handoffs,
         };
-        let capability = Capability::TextStructuredOutput;
-        let task_execution = self
+        Ok((response, task))
+    }
+
+    pub async fn continue_handoff<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        conversation_id: &str,
+        target_agent: &str,
+    ) -> Result<Option<TaskExecution>, String> {
+        let prepared = self
+            .runtime
+            .service()
+            .prepare_handoff_turn(conversation_id, target_agent)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.execute_prepared(execution, &prepared).await
+    }
+
+    async fn execute_prepared<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        prepared: &PreparedConversationTurn,
+    ) -> Result<Option<TaskExecution>, String> {
+        let context = match self
+            .runtime
+            .service()
+            .build_conversation_context(prepared)
+            .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                self.runtime
+                    .service()
+                    .complete_prepared_blocked(
+                        prepared,
+                        format!("{} 无法构建执行上下文：{error}", prepared.agent_code),
+                    )
+                    .await
+                    .map_err(|persist_error| persist_error.to_string())?;
+                return Ok(None);
+            }
+        };
+        let capability = match capability_for_agent(&prepared.agent_code) {
+            Ok(capability) => capability,
+            Err(error) => {
+                self.runtime
+                    .service()
+                    .complete_prepared_blocked(prepared, error)
+                    .await
+                    .map_err(|persist_error| persist_error.to_string())?;
+                return Ok(None);
+            }
+        };
+        match self
             .runtime
             .orchestrator()
             .execute(
                 execution,
-                store.as_ref(),
+                prepared.store.as_ref(),
                 ExecuteTaskRequest {
-                    project_root: project.root,
-                    conversation_id: params.conversation_id,
-                    target_id: workflow.id.as_str().to_string(),
-                    stage: "brief".to_string(),
-                    agent_code: "brief".to_string(),
-                    idempotency_key: message.id.clone(),
-                    prompt: content,
+                    project_root: prepared.project.root.clone(),
+                    conversation_id: prepared.conversation.id.as_str().to_string(),
+                    target_id: prepared
+                        .conversation
+                        .target_ref
+                        .clone()
+                        .unwrap_or_else(|| prepared.project.id.as_str().to_string()),
+                    stage: prepared.stage.clone(),
+                    agent_code: prepared.agent_code.clone(),
+                    idempotency_key: prepared.assistant_message.id.clone(),
+                    prompt: prepared.user_message.content.clone(),
                     context,
                     capability,
                 },
             )
             .await
-            .map_err(|error| error.to_string())?;
-        Ok((
-            GameConversationSubmitResponse {
-                message: GameMessage {
-                    id: message.id,
-                    role: message.role,
-                    content: message.content,
-                    created_at: message.created_at,
-                },
-            },
-            task_execution,
-        ))
+        {
+            Ok(execution) => Ok(Some(execution)),
+            Err(error) => {
+                let reason = format!(
+                    "{} 当前无法执行：{}。请配置兼容且可用的 Provider 模型后重试。",
+                    prepared.agent_code, error
+                );
+                self.runtime
+                    .service()
+                    .complete_prepared_blocked(prepared, reason)
+                    .await
+                    .map_err(|persist_error| persist_error.to_string())?;
+                Ok(None)
+            }
+        }
     }
 
-    pub fn conversation_read(
+    pub async fn conversation_read(
         &self,
         params: GameConversationReadParams,
     ) -> Result<GameConversationReadResponse, GameServiceError> {
-        self.runtime
-            .service()
-            .read_conversation(&params.conversation_id)
-            .map(|snapshot| GameConversationReadResponse {
-                conversation: conversation_dto(snapshot.conversation),
-                messages: snapshot
-                    .messages
-                    .into_iter()
-                    .map(|message| GameMessage {
-                        id: message.id,
-                        role: message.role,
-                        content: message.content,
-                        created_at: message.created_at,
-                    })
-                    .collect(),
-            })
+        self.conversation_snapshot(&params.conversation_id).await
     }
 
-    pub async fn focus_start(
+    async fn conversation_snapshot(
         &self,
-        params: GameFocusStartParams,
-    ) -> Result<GameFocusStartResponse, GameServiceError> {
-        self.runtime
-            .service()
-            .start_focus(&params.conversation_id)
-            .await
-            .map(|workflow| GameFocusStartResponse {
-                workflow: workflow_dto(workflow),
-            })
-    }
-
-    pub async fn focus_read(
-        &self,
-        params: GameFocusReadParams,
-    ) -> Result<GameFocusReadResponse, GameServiceError> {
-        let workflow = self.runtime.service().read_focus(&params.conversation_id)?;
-        let artifacts = self
-            .runtime
-            .service()
-            .read_focus_artifacts(&params.conversation_id)
-            .await?;
-        let mut reviews = Vec::new();
-        let mut conflicts = Vec::new();
-        let mut art_bible_draft = None;
-        let mut decisions = Vec::new();
-        for artifact in artifacts {
-            match artifact.content {
-                ArtifactContent::ReviewReport(report) => reviews.push(GameReviewReport {
-                    agent_code: report.agent_code,
-                    findings: report.findings,
-                    risks: report.risks,
-                    recommendations: report.recommendations,
-                }),
-                ArtifactContent::ConflictSet(set) => {
-                    conflicts = set
-                        .conflicts
-                        .into_iter()
-                        .map(|conflict| GameConflict {
-                            key: conflict.key,
-                            description: conflict.description,
-                            options: conflict.options,
-                            high_impact: conflict.high_impact,
-                        })
-                        .collect();
-                }
-                ArtifactContent::ArtBibleDraft(draft) => {
-                    art_bible_draft = Some(draft.markdown);
-                }
-                ArtifactContent::UserDecision(decision) => decisions.push(GameUserDecision {
-                    conflict_key: decision.conflict_key,
-                    selected_option: decision.selected_option,
-                    note: decision.note,
-                }),
-                ArtifactContent::StructuredBrief(_) | ArtifactContent::Other(_) => {}
-            }
-        }
-        Ok(GameFocusReadResponse {
-            workflow: workflow_dto(workflow),
-            reviews,
-            conflicts,
-            art_bible_draft,
-            decisions,
-        })
-    }
-
-    pub async fn focus_decide<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
-        params: GameFocusDecideParams,
-    ) -> Result<
-        (
-            GameFocusDecideResponse,
-            Vec<TaskExecution>,
-            Vec<(String, String)>,
-        ),
-        String,
-    > {
-        let action = params.action;
-        let conversation_id = params.conversation_id.clone();
-        if action == GameFocusAction::RecordConflictDecision {
-            let decision = params
-                .user_decision
-                .ok_or_else(|| "recordConflictDecision requires userDecision".to_string())?;
-            let (workflow, artifact) = self
-                .runtime
-                .service()
-                .record_conflict_decision(
-                    &conversation_id,
-                    params.expected_input_version,
-                    UserDecision {
-                        conflict_key: decision.conflict_key,
-                        selected_option: decision.selected_option,
-                        note: decision.note,
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            return Ok((
-                GameFocusDecideResponse {
-                    workflow: workflow_dto(workflow),
-                    art_bible: None,
-                },
-                Vec::new(),
-                vec![(artifact.id.as_str().to_string(), "userDecision".to_string())],
-            ));
-        }
-        if params.user_decision.is_some() {
-            return Err("userDecision is only valid for recordConflictDecision".to_string());
-        }
-        let command = match action {
-            GameFocusAction::SubmitClarification => WorkflowCommand::SubmitClarification,
-            GameFocusAction::AcceptBrief => WorkflowCommand::AcceptBrief,
-            GameFocusAction::CompleteReviews => WorkflowCommand::CompleteReviews,
-            GameFocusAction::CompleteMerge => WorkflowCommand::CompleteMerge,
-            GameFocusAction::RecordConflictDecision => unreachable!("handled above"),
-            GameFocusAction::ConfirmArtBible => WorkflowCommand::ConfirmArtBible,
-            GameFocusAction::VersionArtBible => WorkflowCommand::VersionArtBible,
-        };
-        let (workflow, art_bible) = self
-            .runtime
-            .service()
-            .advance_focus(
-                &conversation_id,
-                command,
-                params.expected_input_version,
-                params.art_bible_markdown,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let tasks = if action == GameFocusAction::AcceptBrief {
-            self.start_reviews(execution, &conversation_id, &workflow)
-                .await?
-        } else {
-            Vec::new()
-        };
-        Ok((
-            GameFocusDecideResponse {
-                workflow: workflow_dto(workflow),
-                art_bible: art_bible.map(|document| art_bible_dto(document.version)),
-            },
-            tasks,
-            Vec::new(),
-        ))
-    }
-
-    async fn start_reviews<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
         conversation_id: &str,
-        workflow: &FocusWorkflow,
-    ) -> Result<Vec<TaskExecution>, String> {
-        let (project, store) = self
-            .runtime
-            .service()
-            .execution_context(conversation_id)
-            .map_err(|error| error.to_string())?;
-        let brief = store
-            .latest_artifact(conversation_id, "structuredBrief")
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "accepted focus workflow has no committed brief".to_string())?;
-        if !matches!(&brief.content, ArtifactContent::StructuredBrief(_)) {
-            return Err("latest brief artifact has an invalid type".to_string());
-        }
-        let summary = serde_json::to_string(&brief.content).map_err(|error| error.to_string())?;
-        try_join_all(review_agent_codes().into_iter().map(|agent_code| {
-            self.runtime.orchestrator().execute(
-                execution,
-                store.as_ref(),
-                ExecuteTaskRequest {
-                    project_root: project.root.clone(),
-                    conversation_id: conversation_id.to_string(),
-                    target_id: workflow.id.as_str().to_string(),
-                    stage: "review".to_string(),
-                    agent_code: agent_code.to_string(),
-                    idempotency_key: format!(
-                        "focus-review:{}:{}:{}",
-                        workflow.id.as_str(),
-                        agent_code,
-                        workflow.workflow_version
-                    ),
-                    prompt: format!(
-                        "评审当前 StructuredBrief。输出中的 agentCode 必须为 {agent_code}。"
-                    ),
-                    context: ContextPackage {
-                        brief_artifact_id: brief.id.clone(),
-                        confirmed_decisions: Vec::new(),
-                        artifact_summaries: vec![summary.clone()],
-                        context_version: workflow.input_version,
-                        workflow_version: workflow.workflow_version,
-                        agent_definition_version: "1".to_string(),
-                        output_schema: review_report_schema(),
-                    },
-                    capability: Capability::TextStructuredOutput,
-                },
-            )
-        }))
-        .await
-        .map_err(|error| error.to_string())
-    }
-
-    pub async fn start_synthesis<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
-        conversation_id: &str,
-    ) -> Result<TaskExecution, String> {
-        let workflow = self
-            .runtime
-            .service()
-            .read_focus(conversation_id)
-            .map_err(|error| error.to_string())?;
-        if workflow.state != WorkflowState::Merging {
-            return Err("synthesis requires a merging workflow".to_string());
-        }
-        let (project, store) = self
-            .runtime
-            .service()
-            .execution_context(conversation_id)
-            .map_err(|error| error.to_string())?;
-        let brief = store
-            .latest_artifact(conversation_id, "structuredBrief")
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "synthesis requires a committed brief".to_string())?;
-        let reviews = store
-            .artifacts_for_workflow(workflow.id.as_str(), "reviewReport")
-            .await
-            .map_err(|error| error.to_string())?;
-        if reviews.len() != review_agent_codes().len() {
-            return Err("synthesis requires all review artifacts".to_string());
-        }
-        let artifact_summaries = std::iter::once(&brief)
-            .chain(reviews.iter())
-            .map(|artifact| serde_json::to_string(&artifact.content))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
+    ) -> Result<GameConversationReadResponse, GameServiceError> {
         self.runtime
-            .orchestrator()
-            .execute(
-                execution,
-                store.as_ref(),
-                ExecuteTaskRequest {
-                    project_root: project.root,
-                    conversation_id: conversation_id.to_string(),
-                    target_id: workflow.id.as_str().to_string(),
-                    stage: "synthesis".to_string(),
-                    agent_code: "synthesis".to_string(),
-                    idempotency_key: format!(
-                        "focus-synthesis:{}:{}",
-                        workflow.id.as_str(),
-                        workflow.workflow_version
-                    ),
-                    prompt: "综合 Brief 与三份评审，生成 Art Bible 草案和冲突集合。".to_string(),
-                    context: ContextPackage {
-                        brief_artifact_id: brief.id,
-                        confirmed_decisions: Vec::new(),
-                        artifact_summaries,
-                        context_version: workflow.input_version,
-                        workflow_version: workflow.workflow_version,
-                        agent_definition_version: "1".to_string(),
-                        output_schema: synthesis_result_schema(),
-                    },
-                    capability: Capability::TextStructuredOutput,
-                },
-            )
+            .service()
+            .read_conversation(conversation_id)
             .await
-            .map_err(|error| error.to_string())
+            .map(conversation_snapshot_dto)
     }
 
-    pub async fn focus_retry<E: CodexExecutionPort>(
+    pub async fn conversation_interrupt<E: CodexExecutionPort>(
         &self,
         execution: &E,
-        params: GameFocusRetryParams,
-    ) -> Result<(GameFocusRetryResponse, TaskExecution), String> {
-        let (project, store) = self
-            .runtime
-            .service()
-            .execution_context(&params.conversation_id)
-            .map_err(|error| error.to_string())?;
-        if store
-            .latest_retryable_task(&params.conversation_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .is_none()
-        {
-            return Err("focus workflow has no failed or cancelled task to retry".to_string());
-        }
-        let (workflow, _) = self
-            .runtime
-            .service()
-            .advance_focus(
-                &params.conversation_id,
-                WorkflowCommand::Retry,
-                params.expected_input_version,
-                None,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let task = self
-            .runtime
-            .orchestrator()
-            .retry(
-                execution,
-                store.as_ref(),
-                project.root,
-                &params.conversation_id,
-                &workflow,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok((
-            GameFocusRetryResponse {
-                workflow: workflow_dto(workflow),
-            },
-            task,
-        ))
-    }
-
-    pub async fn focus_cancel<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
-        params: GameFocusCancelParams,
-    ) -> Result<(GameFocusCancelResponse, Vec<CancelledTaskAttempt>), String> {
-        let current = self
-            .runtime
-            .service()
-            .read_focus(&params.conversation_id)
-            .map_err(|error| error.to_string())?;
-        codex_game_domain::validate_input_version(
-            params.expected_input_version,
-            current.input_version,
-        )
-        .map_err(|error| error.to_string())?;
-        current
-            .state
-            .apply(WorkflowCommand::Cancel)
-            .map_err(|error| error.to_string())?;
+        params: GameConversationInterruptParams,
+    ) -> Result<(GameConversationInterruptResponse, Vec<CancelledTaskAttempt>), String> {
         let (_, store) = self
             .runtime
             .service()
@@ -675,23 +489,208 @@ impl GameAppServerAdapter {
                 turn_id: attempt.turn_id,
             });
         }
-        let (workflow, _) = self
-            .runtime
+        Ok((GameConversationInterruptResponse {}, cancelled))
+    }
+
+    pub async fn conversation_commit_drafts(
+        &self,
+        params: GameConversationCommitDraftsParams,
+    ) -> Result<GameConversationCommitDraftsResponse, GameServiceError> {
+        self.runtime
             .service()
-            .advance_focus(
-                &params.conversation_id,
-                WorkflowCommand::Cancel,
-                params.expected_input_version,
-                None,
+            .commit_conversation_drafts(&params.conversation_id, &params.draft_ids)
+            .await?;
+        Ok(GameConversationCommitDraftsResponse {})
+    }
+
+    pub async fn character_create(
+        &self,
+        params: GameCharacterCreateParams,
+    ) -> Result<GameCharacterCreateResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .create_character(
+                &params.project_id,
+                params.name,
+                params.group,
+                params.overwrite,
             )
             .await
-            .map_err(|error| error.to_string())?;
-        Ok((
-            GameFocusCancelResponse {
-                workflow: workflow_dto(workflow),
-            },
-            cancelled,
-        ))
+            .map(|character| GameCharacterCreateResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn character_list(
+        &self,
+        params: GameCharacterListParams,
+    ) -> Result<GameCharacterListResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .list_characters(&params.project_id)
+            .await
+            .map(|characters| GameCharacterListResponse {
+                characters: characters.into_iter().map(character_dto).collect(),
+            })
+    }
+
+    pub async fn character_read(
+        &self,
+        params: GameCharacterReadParams,
+    ) -> Result<GameCharacterReadResponse, GameServiceError> {
+        let character = self
+            .runtime
+            .service()
+            .read_character(&params.project_id, &params.character_id)
+            .await?;
+        let generations = self
+            .runtime
+            .service()
+            .list_generations(&params.project_id, &params.character_id, None)
+            .await?;
+        Ok(GameCharacterReadResponse {
+            character: character_dto(character),
+            generations: generations.into_iter().map(generation_dto).collect(),
+        })
+    }
+
+    pub async fn character_confirm_spec(
+        &self,
+        params: GameCharacterConfirmSpecParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .confirm_character_spec(&params.project_id, &params.character_id, &params.draft_id)
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn generation_register(
+        &self,
+        params: GameGenerationRegisterParams,
+    ) -> Result<GameGenerationRegisterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .register_generation(
+                &params.project_id,
+                &params.character_id,
+                &params.stage,
+                params.variant,
+                params.file_path,
+                params.source,
+                params.asset_spec,
+            )
+            .await
+            .map(|generation| GameGenerationRegisterResponse {
+                generation: generation_dto(generation),
+            })
+    }
+
+    pub async fn generation_list(
+        &self,
+        params: GameGenerationListParams,
+    ) -> Result<GameGenerationListResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .list_generations(
+                &params.project_id,
+                &params.character_id,
+                params.stage.as_deref(),
+            )
+            .await
+            .map(|generations| GameGenerationListResponse {
+                generations: generations.into_iter().map(generation_dto).collect(),
+            })
+    }
+
+    pub async fn character_reject_spec(
+        &self,
+        params: GameCharacterRejectSpecParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .reject_character_stage(
+                &params.project_id,
+                &params.character_id,
+                "spec",
+                params.reason,
+            )
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn character_confirm_render(
+        &self,
+        params: GameCharacterConfirmRenderParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .confirm_character_render(
+                &params.project_id,
+                &params.character_id,
+                &params.generation_id,
+            )
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn character_reject_render(
+        &self,
+        params: GameCharacterRejectRenderParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .reject_character_stage(
+                &params.project_id,
+                &params.character_id,
+                "render",
+                params.reason,
+            )
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn character_confirm_views(
+        &self,
+        params: GameCharacterConfirmViewsParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .confirm_character_views(
+                &params.project_id,
+                &params.character_id,
+                &params.generation_ids,
+            )
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
+    }
+
+    pub async fn character_reject_views(
+        &self,
+        params: GameCharacterRejectViewsParams,
+    ) -> Result<GameCharacterResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .reject_character_stage(
+                &params.project_id,
+                &params.character_id,
+                "views",
+                params.reason,
+            )
+            .await
+            .map(|character| GameCharacterResponse {
+                character: character_dto(character),
+            })
     }
 
     pub async fn task_list(
@@ -747,124 +746,74 @@ impl GameAppServerAdapter {
 }
 
 fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> GameTurnProjection {
-    let artifacts = completion
-        .artifacts
-        .iter()
-        .map(|artifact| {
-            (
-                artifact.id.as_str().to_string(),
-                match &artifact.content {
-                    ArtifactContent::StructuredBrief(_) => "structuredBrief",
-                    ArtifactContent::ReviewReport(_) => "reviewReport",
-                    ArtifactContent::ConflictSet(_) => "conflictSet",
-                    ArtifactContent::ArtBibleDraft(_) => "artBibleDraft",
-                    ArtifactContent::UserDecision(_) => "userDecision",
-                    ArtifactContent::Other(_) => "other",
-                }
-                .to_string(),
-            )
-        })
-        .collect();
+    let (handoff_target, handoff_reason) = completion
+        .action
+        .as_ref()
+        .filter(|action| action.action == AgentActionKind::Handoff)
+        .map(|action| (action.target_agent.clone(), Some(action.reason.clone())))
+        .unwrap_or((None, None));
     GameTurnProjection {
         attempt_id: completion.attempt_id,
         task_id: completion.task_id,
         conversation_id: completion.conversation_id,
         status: format!("{:?}", completion.status).to_lowercase(),
-        artifacts,
-        workflow: completion.workflow.map(workflow_dto),
-        conflict_count: completion.conflict_count,
+        agent_code: completion.agent_code,
+        handoff_target,
+        handoff_reason,
+        character: None,
+        generations: Vec::new(),
     }
 }
 
-fn synthesis_result_schema() -> String {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["draft", "conflicts"],
-        "properties": {
-            "draft": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["markdown", "unresolvedAssumptions"],
-                "properties": {
-                    "markdown": { "type": "string" },
-                    "unresolvedAssumptions": { "type": "array", "items": { "type": "string" } }
-                }
-            },
-            "conflicts": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["conflicts"],
-                "properties": {
-                    "conflicts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["key", "description", "options", "highImpact"],
-                            "properties": {
-                                "key": { "type": "string" },
-                                "description": { "type": "string" },
-                                "options": { "type": "array", "items": { "type": "string" } },
-                                "highImpact": { "type": "boolean" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    })
-    .to_string()
+fn parse_target_kind(value: &str) -> Result<ConversationTargetKind, GameServiceError> {
+    match value {
+        "project" => Ok(ConversationTargetKind::Project),
+        "character" => Ok(ConversationTargetKind::Character),
+        _ => Err(GameServiceError::InvalidAction(format!(
+            "未知会话目标类型：{value}"
+        ))),
+    }
 }
 
-fn review_report_schema() -> String {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["agentCode", "findings", "risks", "recommendations"],
-        "properties": {
-            "agentCode": { "type": "string" },
-            "findings": { "type": "array", "items": { "type": "string" } },
-            "risks": { "type": "array", "items": { "type": "string" } },
-            "recommendations": { "type": "array", "items": { "type": "string" } }
-        }
+fn capability_for_agent(agent_code: &str) -> Result<Capability, String> {
+    let definition = bundled_agent_definitions()?
+        .into_iter()
+        .find(|definition| definition.agent_code == agent_code)
+        .ok_or_else(|| format!("未知 Agent：{agent_code}"))?;
+    Ok(match definition.capability {
+        AgentCapability::Text => Capability::TextStructuredOutput,
+        AgentCapability::T2i => Capability::ImageTextToImage,
+        AgentCapability::I2i => Capability::ImageImageToImage,
+        AgentCapability::Vision => Capability::VisionAnalysis,
+        AgentCapability::Model3d => Capability::Model3d,
+        AgentCapability::T2v => Capability::VideoTextToVideo,
+        AgentCapability::I2v => Capability::VideoImageToVideo,
     })
-    .to_string()
 }
 
-fn structured_brief_schema() -> String {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-            "coreExperience",
-            "themeAndMood",
-            "targetPlayers",
-            "playerPerspective",
-            "gameplayPillars",
-            "openQuestions"
-        ],
-        "properties": {
-            "coreExperience": { "type": "string" },
-            "themeAndMood": { "type": "string" },
-            "targetPlayers": { "type": "string" },
-            "playerPerspective": { "type": "string" },
-            "gameplayPillars": { "type": "array", "items": { "type": "string" } },
-            "openQuestions": { "type": "array", "items": { "type": "string" } }
+fn clear_managed_project_state(root: &Path) -> Result<(), GameServiceError> {
+    for path in [root.join("project.json"), root.join("art-bible.md")] {
+        if path.exists() {
+            fs::remove_file(path)?;
         }
-    })
-    .to_string()
+    }
+    let local = root.join(".codex-game/local");
+    if local.exists() {
+        fs::remove_dir_all(local)?;
+    }
+    Ok(())
 }
 
 fn project_dto(project: Project) -> GameProject {
     GameProject {
         id: project.id.as_str().to_string(),
         name: project.name,
+        code: project.code,
         root: project.root,
         state: match project.state {
-            ProjectState::Unversioned => "unversioned",
-            ProjectState::FocusInProgress => "focusInProgress",
-            ProjectState::Versioned => "versioned",
+            ProjectState::Drafting => "drafting",
+            ProjectState::StyleSettled => "styleSettled",
+            ProjectState::Ready => "ready",
         }
         .to_string(),
     }
@@ -874,33 +823,139 @@ fn conversation_dto(conversation: Conversation) -> GameConversation {
     GameConversation {
         id: conversation.id.as_str().to_string(),
         project_id: conversation.project_id.as_str().to_string(),
-        target_id: conversation.target_id,
+        target_kind: conversation.target_kind.as_str().to_string(),
+        target_ref: conversation.target_ref,
+        title: conversation.title,
+        director_agent_code: conversation.director_agent_code,
+        focus_agent_code: conversation.focus_agent_code,
+        status: match conversation.status {
+            ConversationStatus::Active => "active",
+            ConversationStatus::Running => "running",
+        }
+        .to_string(),
+        turn: conversation.turn,
         created_at: conversation.created_at,
+        updated_at: conversation.updated_at,
     }
 }
 
-fn workflow_dto(workflow: FocusWorkflow) -> GameFocusWorkflow {
-    GameFocusWorkflow {
-        id: workflow.id.as_str().to_string(),
-        project_id: workflow.project_id.as_str().to_string(),
-        conversation_id: workflow.conversation_id.as_str().to_string(),
-        state: workflow_state_name(workflow.state).to_string(),
-        input_version: workflow.input_version,
-        workflow_version: workflow.workflow_version,
+fn message_dto(message: ConversationMessage) -> GameMessage {
+    GameMessage {
+        id: message.id,
+        turn: message.turn,
+        role: message.role,
+        content: message.content,
+        agent_code: message.agent_code,
+        recipient_agent_code: message.recipient_agent_code,
+        status: match message.status {
+            MessageStatus::Thinking => "thinking",
+            MessageStatus::Completed => "completed",
+            MessageStatus::Failed => "failed",
+            MessageStatus::Interrupted => "interrupted",
+        }
+        .to_string(),
+        token_count: message.token_count,
+        folded: message.folded,
+        attachments: message.attachments,
+        action: message
+            .action
+            .and_then(|action| serde_json::to_value(action).ok()),
+        created_at: message.created_at,
     }
 }
 
-fn workflow_state_name(state: WorkflowState) -> &'static str {
-    match state {
-        WorkflowState::Draft => "DRAFT",
-        WorkflowState::Clarifying => "CLARIFYING",
-        WorkflowState::BriefReady => "BRIEF_READY",
-        WorkflowState::Reviewing => "REVIEWING",
-        WorkflowState::Merging => "MERGING",
-        WorkflowState::UserReview => "USER_REVIEW",
-        WorkflowState::Confirmed => "CONFIRMED",
-        WorkflowState::Versioned => "VERSIONED",
-        WorkflowState::Cancelled => "CANCELLED",
+fn conversation_snapshot_dto(
+    snapshot: codex_game_runtime::ConversationSnapshot,
+) -> GameConversationReadResponse {
+    GameConversationReadResponse {
+        conversation: conversation_dto(snapshot.conversation),
+        messages: snapshot.messages.into_iter().map(message_dto).collect(),
+        drafts: snapshot.drafts.into_iter().map(draft_dto).collect(),
+        memories: snapshot.memories.into_iter().map(memory_dto).collect(),
+        handoffs: snapshot.handoffs.into_iter().map(handoff_dto).collect(),
+    }
+}
+
+fn draft_dto(draft: ArtifactDraftRecord) -> GameArtifactDraft {
+    GameArtifactDraft {
+        id: draft.id,
+        conversation_id: draft.conversation_id,
+        target_path: draft.target_path,
+        content: draft.content,
+        based_on_hash: draft.based_on_hash,
+        status: draft.status,
+        created_at: draft.created_at,
+    }
+}
+
+fn memory_dto(memory: ConversationMemory) -> GameConversationMemory {
+    GameConversationMemory {
+        id: memory.id,
+        conversation_id: memory.conversation_id,
+        scope: memory.scope,
+        kind: memory.kind,
+        content: memory.content,
+        created_at: memory.created_at,
+    }
+}
+
+fn handoff_dto(handoff: AgentHandoff) -> GameAgentHandoff {
+    GameAgentHandoff {
+        id: handoff.id,
+        conversation_id: handoff.conversation_id,
+        turn: handoff.turn,
+        from_agent_code: handoff.from_agent_code,
+        to_agent_code: handoff.to_agent_code,
+        source: handoff.source,
+        reason: handoff.reason,
+        status: handoff.status,
+        created_at: handoff.created_at,
+    }
+}
+
+fn character_dto(character: Character) -> GameCharacter {
+    GameCharacter {
+        id: character.id,
+        project_id: character.project_id,
+        name: character.name,
+        group: character.group,
+        dir_name: character.dir_name,
+        state: match character.state {
+            CharacterState::S0SpecDrafting => "S0_spec_drafting",
+            CharacterState::S1SpecConfirmed => "S1_spec_confirmed",
+            CharacterState::S2RenderGenerated => "S2_render_generated",
+            CharacterState::S3RenderConfirmed => "S3_render_confirmed",
+            CharacterState::S4ViewsGenerated => "S4_views_generated",
+            CharacterState::S5ViewsConfirmed => "S5_views_confirmed",
+        }
+        .to_string(),
+        spec_path: character.spec_path,
+        render_path: character.render_path,
+        view_paths: serde_json::to_value(character.view_paths).unwrap_or_default(),
+        hard_constraints: character.hard_constraints,
+        gate_spec_confirmed_at: character.gate_spec_confirmed_at,
+        gate_render_confirmed_at: character.gate_render_confirmed_at,
+        gate_views_confirmed_at: character.gate_views_confirmed_at,
+        created_at: character.created_at,
+        updated_at: character.updated_at,
+    }
+}
+
+fn generation_dto(generation: Generation) -> GameGeneration {
+    GameGeneration {
+        id: generation.id,
+        project_id: generation.project_id,
+        target_kind: generation.target_kind,
+        target_ref: generation.target_ref,
+        stage: generation.stage,
+        variant: generation.variant,
+        file_path: generation.file_path,
+        file_hash: generation.file_hash,
+        is_final: generation.is_final,
+        source: generation.source,
+        task_id: generation.task_id,
+        asset_spec: generation.asset_spec,
+        created_at: generation.created_at,
     }
 }
 
@@ -911,5 +966,229 @@ fn art_bible_dto(version: ArtBibleVersion) -> GameArtBibleVersion {
         version: version.version,
         content_hash: version.content_hash,
         created_at: version.created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_game_runtime::ExecutionError;
+    use codex_game_runtime::StartThreadRequest;
+    use codex_game_runtime::StartTurnRequest;
+    use codex_game_runtime::StartedThread;
+    use codex_game_runtime::StartedTurn;
+    use codex_game_runtime::SteerTurnRequest;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct FakeExecution {
+        threads: AtomicUsize,
+        turns: AtomicUsize,
+    }
+
+    impl CodexExecutionPort for FakeExecution {
+        async fn start_thread(
+            &self,
+            _request: StartThreadRequest,
+        ) -> Result<StartedThread, ExecutionError> {
+            let number = self.threads.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(StartedThread {
+                thread_id: format!("thread-{number}"),
+                session_id: format!("session-{number}"),
+            })
+        }
+
+        async fn thread_available(&self, _thread_id: &str) -> bool {
+            true
+        }
+
+        async fn start_turn(
+            &self,
+            _request: StartTurnRequest,
+        ) -> Result<StartedTurn, ExecutionError> {
+            let number = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(StartedTurn {
+                turn_id: format!("turn-{number}"),
+            })
+        }
+
+        async fn steer_turn(&self, _request: SteerTurnRequest) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
+        async fn interrupt_turn(
+            &self,
+            _thread_id: String,
+            _turn_id: String,
+        ) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+    }
+
+    async fn setup() -> (
+        tempfile::TempDir,
+        GameAppServerAdapter,
+        FakeExecution,
+        String,
+    ) {
+        let directory = tempdir().expect("tempdir");
+        let adapter = GameAppServerAdapter::new(directory.path().join("studio"));
+        let project_id = "project-1".to_string();
+        adapter
+            .project_create(
+                project_id.clone(),
+                GameProjectCreateParams {
+                    name: None,
+                    root: directory
+                        .path()
+                        .join("project")
+                        .to_string_lossy()
+                        .into_owned(),
+                    overwrite: None,
+                },
+            )
+            .await
+            .expect("project");
+        let conversation = adapter
+            .conversation_ensure(GameConversationEnsureParams {
+                project_id,
+                target_kind: "project".to_string(),
+                target_ref: None,
+                title: None,
+                director_agent_code: None,
+            })
+            .await
+            .expect("conversation")
+            .conversation;
+        (
+            directory,
+            adapter,
+            FakeExecution::default(),
+            conversation.id,
+        )
+    }
+
+    async fn submit(
+        adapter: &GameAppServerAdapter,
+        execution: &FakeExecution,
+        conversation_id: &str,
+        content: &str,
+    ) -> String {
+        adapter
+            .conversation_submit(
+                execution,
+                GameConversationSubmitParams {
+                    conversation_id: conversation_id.to_string(),
+                    content: content.to_string(),
+                    recipient_agent_code: None,
+                },
+            )
+            .await
+            .expect("submit")
+            .1
+            .expect("running task")
+            .attempt
+            .codex_turn_id
+            .expect("turn id")
+    }
+
+    fn action(kind: &str, target: Option<&str>, reason: &str, payload: &str) -> String {
+        let target = target.map_or_else(|| "null".to_string(), |value| format!("\"{value}\""));
+        format!(
+            "正文\n{}\n{{\"action\":\"{kind}\",\"target_agent\":{target},\"reason\":\"{reason}\",\"payload\":{payload}}}\n{}",
+            codex_game_domain::ACTION_START,
+            codex_game_domain::ACTION_END,
+        )
+    }
+
+    #[tokio::test]
+    async fn conversation_runs_ask_user_handoff_done_with_fake_execution() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let ask_user = action(
+            "ask_user",
+            None,
+            "需要用户选择风格",
+            r#"{"choices":[{"item":"风格","options":["写实","卡通"],"recommended":["卡通"],"multiple":false}]}"#,
+        );
+        adapter
+            .observe_turn_completed(&first_turn, Some(&ask_user), false)
+            .await
+            .expect("ask user completion")
+            .expect("projection");
+
+        let second_turn = submit(&adapter, &execution, &conversation_id, "选择卡通").await;
+        let handoff = action("handoff", Some("game_designer"), "交给美术设计师细化", "{}");
+        adapter
+            .observe_turn_completed(&second_turn, Some(&handoff), false)
+            .await
+            .expect("handoff completion")
+            .expect("projection");
+        let third = adapter
+            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .await
+            .expect("continue handoff")
+            .expect("handoff task");
+        let done = action("done", None, "美术基调已完成", "{}");
+        adapter
+            .observe_turn_completed(
+                third.attempt.codex_turn_id.as_deref().expect("turn id"),
+                Some(&done),
+                false,
+            )
+            .await
+            .expect("done completion")
+            .expect("projection");
+
+        let snapshot = adapter
+            .conversation_read(GameConversationReadParams { conversation_id })
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.conversation.status, "active");
+        assert_eq!(snapshot.handoffs.len(), 1);
+        assert_eq!(
+            snapshot
+                .messages
+                .last()
+                .and_then(|message| message.action.as_ref())
+                .and_then(|action| action.get("action"))
+                .and_then(serde_json::Value::as_str),
+            Some("done")
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_rejects_a_third_automatic_handoff() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let first_turn = submit(&adapter, &execution, &conversation_id, "开始协作").await;
+        let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
+        adapter
+            .observe_turn_completed(&first_turn, Some(&to_designer), false)
+            .await
+            .expect("first handoff")
+            .expect("projection");
+        let second = adapter
+            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .await
+            .expect("continue first")
+            .expect("second task");
+        let to_director = action("handoff", Some("studio_director"), "交回总管收口", "{}");
+        adapter
+            .observe_turn_completed(
+                second.attempt.codex_turn_id.as_deref().expect("turn id"),
+                Some(&to_director),
+                false,
+            )
+            .await
+            .expect("second handoff")
+            .expect("projection");
+
+        let error = adapter
+            .continue_handoff(&execution, &conversation_id, "studio_director")
+            .await
+            .expect_err("third handoff must be rejected");
+        assert!(error.contains("不得超过两次"));
     }
 }

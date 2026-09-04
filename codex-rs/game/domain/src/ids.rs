@@ -28,7 +28,6 @@ macro_rules! define_id {
 define_id!(ProjectId);
 define_id!(ConversationId);
 define_id!(InteractionId);
-define_id!(FocusWorkflowId);
 define_id!(TaskId);
 define_id!(TaskAttemptId);
 define_id!(ArtifactId);

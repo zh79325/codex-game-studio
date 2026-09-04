@@ -1,23 +1,17 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "properties": {
-    "conflictCount": {
-      "format": "uint64",
-      "minimum": 0.0,
-      "type": "integer"
-    },
     "conversationId": {
       "type": "string"
     },
-    "workflowId": {
+    "status": {
       "type": "string"
     }
   },
   "required": [
-    "conflictCount",
     "conversationId",
-    "workflowId"
+    "status"
   ],
-  "title": "GameDesignConfirmationRequiredNotification",
+  "title": "GameConversationTurnNotification",
   "type": "object"
 }

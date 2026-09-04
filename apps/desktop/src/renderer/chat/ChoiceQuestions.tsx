@@ -11,8 +11,6 @@ type ChoiceAnswer = {
   customDetail: string;
 };
 
-const CUSTOM_CHOICE_VALUE = "__custom_choice__";
-
 export default function ChoiceQuestions({
   groups,
   disabled,
@@ -76,9 +74,11 @@ export default function ChoiceQuestions({
 
   const complete = groups.every((_, index) => {
     const answer = answers[index];
+    const hasSelection =
+      answer.selectedOptions.length > 0 || answer.customSelected;
     return (
-      answer.selectedOptions.length > 0 ||
-      (answer.customSelected && Boolean(answer.customOption.trim()))
+      hasSelection &&
+      (!answer.customSelected || Boolean(answer.customOption.trim()))
     );
   });
 
@@ -87,10 +87,13 @@ export default function ChoiceQuestions({
       {groups.map((group, groupIndex) => {
         const answer = answers[groupIndex];
         const singleValue = answer.customSelected
-          ? CUSTOM_CHOICE_VALUE
-          : answer.selectedOptions[0];
+          ? group.options.length
+          : group.options.indexOf(answer.selectedOptions[0]);
         return (
-          <fieldset className="choice-group" key={`${groupIndex}-${group.item}`}>
+          <fieldset
+            className="choice-group"
+            key={`${groupIndex}-${group.item}`}
+          >
             <legend>
               <Typography.Text strong>{group.item}</Typography.Text>
               <Tag>{group.multiple ? "多选" : "单选"}</Tag>
@@ -135,19 +138,24 @@ export default function ChoiceQuestions({
                   className="choice-radio-group"
                   value={singleValue}
                   onChange={(event) => {
-                    const value = event.target.value as string;
-                    if (value === CUSTOM_CHOICE_VALUE) {
+                    const optionIndex = event.target.value as number;
+                    if (optionIndex === group.options.length) {
                       selectCustom(groupIndex, group, true);
-                    } else {
-                      selectOption(groupIndex, group, value, true);
+                      return;
                     }
+                    selectOption(
+                      groupIndex,
+                      group,
+                      group.options[optionIndex],
+                      true,
+                    );
                   }}
                 >
-                  {group.options.map((option) => (
+                  {group.options.map((option, optionIndex) => (
                     <ChoiceOptionRow
                       key={option}
                       control={
-                        <Radio value={option} disabled={disabled}>
+                        <Radio value={optionIndex} disabled={disabled}>
                           {option}
                           {group.recommended.includes(option) ? "（推荐）" : ""}
                         </Radio>
@@ -166,7 +174,7 @@ export default function ChoiceQuestions({
                   ))}
                   <CustomChoiceRow
                     control={
-                      <Radio value={CUSTOM_CHOICE_VALUE} disabled={disabled}>
+                      <Radio value={group.options.length} disabled={disabled}>
                         其他（自定义）
                       </Radio>
                     }

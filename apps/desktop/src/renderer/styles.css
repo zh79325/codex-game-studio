@@ -385,6 +385,60 @@ textarea {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.choice-questions,
+.choice-options,
+.choice-radio-group {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.choice-group {
+  width: 100%;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+.choice-group legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px;
+}
+
+.choice-option-row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(280px, 1.4fr) minmax(220px, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.choice-custom-option {
+  grid-template-columns: minmax(180px, 0.7fr) minmax(220px, 1fr) minmax(
+      220px,
+      1fr
+    );
+}
+
+.choice-option-control {
+  min-width: 0;
+  padding: 5px 0;
+}
+
+.choice-option-control .ant-checkbox-wrapper,
+.choice-option-control .ant-radio-wrapper {
+  align-items: flex-start;
+  white-space: normal;
+}
+
+.choice-questions > .ant-btn {
+  align-self: flex-end;
+}
+
 .draft-panel {
   padding-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -419,6 +473,11 @@ textarea {
 
   .app-content {
     padding: 20px;
+  }
+
+  .choice-option-row,
+  .choice-custom-option {
+    grid-template-columns: 1fr;
   }
 
   .chat-composer {

@@ -1,4 +1,5 @@
 import {
+  DeleteOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
   PlayCircleOutlined,
@@ -12,6 +13,10 @@ import { projectsApi } from "./api";
 import { useStudio } from "./AppShell";
 import type { Project } from "./types";
 
+type ListedProject = Project & {
+  projectFileExists: boolean;
+};
+
 export default function ProjectsPage() {
   const { message, modal } = App.useApp();
   const navigate = useNavigate();
@@ -21,9 +26,21 @@ export default function ProjectsPage() {
   const [root, setRoot] = useState<string>();
   const canManage = backend.type === "ready" || backend.type === "readOnly";
 
-  const projects = useQuery({
+  const projects = useQuery<ListedProject[]>({
     queryKey: ["projects"],
-    queryFn: projectsApi.list,
+    queryFn: async () => {
+      const listed = await projectsApi.list();
+      return Promise.all(
+        listed.map(async (project) => {
+          const inspected = await projectsApi.inspect(project.root);
+          return {
+            ...project,
+            projectFileExists:
+              inspected.supported && inspected.projectId === project.id,
+          };
+        }),
+      );
+    },
     enabled: canManage,
   });
 
@@ -84,6 +101,25 @@ export default function ProjectsPage() {
     }
   };
 
+  const removeProject = useMutation({
+    mutationFn: projectsApi.remove,
+    onSuccess: async () => {
+      message.success("已从项目列表移除");
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
+  const confirmRemove = (project: ListedProject) => {
+    modal.confirm({
+      title: "移除失效项目？",
+      content: `${project.root} 下缺少有效的 project.json。此操作只移除项目列表记录，不会删除目录中的其他文件。`,
+      okText: "移除",
+      okButtonProps: { danger: true },
+      onOk: () => removeProject.mutateAsync(project.id),
+    });
+  };
+
   const openProject = useMutation({
     mutationFn: async () => {
       const selected = await window.codexGame.selectDirectory("选择项目目录");
@@ -101,7 +137,7 @@ export default function ProjectsPage() {
     onError: (error: Error) => message.error(error.message),
   });
 
-  const columns: ColumnsType<Project> = [
+  const columns: ColumnsType<ListedProject> = [
     {
       title: "项目",
       dataIndex: "name",
@@ -118,23 +154,40 @@ export default function ProjectsPage() {
       title: "状态",
       dataIndex: "state",
       width: 180,
-      render: (state: Project["state"]) => (
-        <Tag color={state === "ready" ? "success" : "processing"}>{state}</Tag>
-      ),
+      render: (state: Project["state"], project) =>
+        project.projectFileExists ? (
+          <Tag color={state === "ready" ? "success" : "processing"}>
+            {state}
+          </Tag>
+        ) : (
+          <Tag color="error">项目文件不存在</Tag>
+        ),
     },
     {
       title: "操作",
       width: 120,
-      render: (_, project) => (
-        <Button
-          type="primary"
-          ghost
-          icon={<PlayCircleOutlined />}
-          onClick={() => void activate(project)}
-        >
-          进入
-        </Button>
-      ),
+      render: (_, project) =>
+        project.projectFileExists ? (
+          <Button
+            type="primary"
+            ghost
+            icon={<PlayCircleOutlined />}
+            onClick={() => void activate(project)}
+          >
+            进入
+          </Button>
+        ) : (
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            loading={
+              removeProject.isPending && removeProject.variables === project.id
+            }
+            onClick={() => confirmRemove(project)}
+          >
+            移除
+          </Button>
+        ),
     },
   ];
 
@@ -168,7 +221,7 @@ export default function ProjectsPage() {
       </section>
 
       <Card className="content-card">
-        <Table<Project>
+        <Table<ListedProject>
           rowKey="id"
           loading={projects.isLoading}
           dataSource={projects.data ?? []}

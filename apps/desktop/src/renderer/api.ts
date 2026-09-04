@@ -35,6 +35,8 @@ export const projectsApi = {
     ).project,
   open: async (root: string) =>
     (await rpc<{ project: Project }>("game/project/open", { root })).project,
+  remove: (projectId: string) =>
+    rpc<Record<string, never>>("project/delete", { projectId }),
 };
 
 export const conversationApi = {

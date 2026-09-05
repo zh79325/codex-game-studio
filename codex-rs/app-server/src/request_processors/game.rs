@@ -336,6 +336,16 @@ impl GameRequestProcessor {
         Ok(response)
     }
 
+    pub(crate) async fn character_group_create(
+        &self,
+        params: GameCharacterGroupCreateParams,
+    ) -> std::result::Result<GameCharacterGroupCreateResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_group_create(params)
+            .await
+            .map_err(game_error)
+    }
+
     pub(crate) async fn character_list(
         &self,
         params: GameCharacterListParams,

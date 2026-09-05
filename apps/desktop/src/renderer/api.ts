@@ -116,12 +116,17 @@ export const workspaceApi = {
 };
 
 export const charactersApi = {
-  list: async (projectId: string) =>
+  list: (projectId: string) =>
+    rpc<{ characters: Character[]; groups: string[] }>("game/character/list", {
+      projectId,
+    }),
+  createGroup: async (projectId: string, name: string) =>
     (
-      await rpc<{ characters: Character[] }>("game/character/list", {
+      await rpc<{ group: string }>("game/characterGroup/create", {
         projectId,
+        name,
       })
-    ).characters,
+    ).group,
   create: async (
     projectId: string,
     name: string,

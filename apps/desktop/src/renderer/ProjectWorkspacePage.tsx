@@ -1,4 +1,9 @@
-import { CheckCircleOutlined, PlusOutlined } from "@ant-design/icons";
+import {
+  CheckCircleOutlined,
+  FolderAddOutlined,
+  FolderOutlined,
+  UserAddOutlined,
+} from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -10,9 +15,12 @@ import {
   Input,
   Modal,
   Row,
+  Select,
   Space,
   Steps,
+  Tabs,
   Tag,
+  Tree,
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
@@ -22,7 +30,7 @@ import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChoiceSubmission } from "./chat/ChoiceQuestions";
 import { useConversation } from "./chat/useConversation";
-import type { ArtifactDraft, ChoiceGroup } from "./types";
+import type { ArtifactDraft, Character, ChoiceGroup } from "./types";
 
 const projectSteps = [
   { title: "定义美术基调", state: "drafting" },
@@ -37,7 +45,9 @@ export default function ProjectWorkspacePage() {
   const queryClient = useQueryClient();
   const { canWrite, activeProject, setActiveProject } = useStudio();
   const [characterOpen, setCharacterOpen] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
   const [characterForm] = Form.useForm<{ name: string; group?: string }>();
+  const [groupForm] = Form.useForm<{ name: string }>();
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -111,6 +121,20 @@ export default function ProjectWorkspacePage() {
     },
     onError: (error: Error) => message.error(error.message),
   });
+  const createCharacterGroup = useMutation({
+    mutationFn: ({ name }: { name: string }) =>
+      charactersApi.createGroup(projectId, name.trim()),
+    onSuccess: async (group) => {
+      setGroupOpen(false);
+      groupForm.resetFields();
+      characterForm.setFieldValue("group", group);
+      await queryClient.invalidateQueries({
+        queryKey: ["characters", projectId],
+      });
+      message.success(`已新建分组“${group}”`);
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
 
   const hasPendingArtBible = conversation.snapshot?.drafts.some(
     (draft) =>
@@ -158,6 +182,71 @@ export default function ProjectWorkspacePage() {
         确认游戏风格
       </Button>
     ) : null;
+  const characterList = characters.data?.characters ?? [];
+  const characterGroups = characters.data?.groups ?? [];
+  const renderCharacterNode = (character: Character) => (
+    <div className="character-tree-node">
+      <div className="entity-list-content">
+        <Typography.Text>{character.name}</Typography.Text>
+        <Typography.Text type="secondary">{character.state}</Typography.Text>
+      </div>
+      <Button
+        type="link"
+        size="small"
+        onClick={() =>
+          navigate(`/projects/${projectId}/characters/${character.id}`)
+        }
+      >
+        进入
+      </Button>
+    </div>
+  );
+  const ungroupedCharacters = characterList.filter(
+    (character) => !character.group,
+  );
+  const characterTree = [
+    ...characterGroups.map((group) => {
+      const groupedCharacters = characterList.filter(
+        (character) => character.group === group,
+      );
+      return {
+        key: `group:${group}`,
+        icon: <FolderOutlined />,
+        title: (
+          <Space size="small">
+            <Typography.Text strong>{group}</Typography.Text>
+            <Typography.Text type="secondary">
+              {groupedCharacters.length}
+            </Typography.Text>
+          </Space>
+        ),
+        children: groupedCharacters.map((character) => ({
+          key: `character:${character.id}`,
+          title: renderCharacterNode(character),
+        })),
+      };
+    }),
+    ...(ungroupedCharacters.length
+      ? [
+          {
+            key: "group:ungrouped",
+            icon: <FolderOutlined />,
+            title: (
+              <Space size="small">
+                <Typography.Text strong>未分组</Typography.Text>
+                <Typography.Text type="secondary">
+                  {ungroupedCharacters.length}
+                </Typography.Text>
+              </Space>
+            ),
+            children: ungroupedCharacters.map((character) => ({
+              key: `character:${character.id}`,
+              title: renderCharacterNode(character),
+            })),
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="page-stack workspace-page">
@@ -201,50 +290,79 @@ export default function ProjectWorkspacePage() {
                 />
               </Space>
             </Card>
-            <Card
-              title="角色"
-              className="content-card"
-              extra={
-                <Button
-                  size="small"
-                  icon={<PlusOutlined />}
-                  disabled={!canWrite || project.data?.state !== "ready"}
-                  onClick={() => setCharacterOpen(true)}
-                >
-                  新建
-                </Button>
-              }
-            >
-              {project.data?.state !== "ready" ? (
-                <Typography.Text type="secondary">
-                  确认 Art Bible 和项目名称后才能创建角色。
-                </Typography.Text>
-              ) : characters.data?.length ? (
-                <div className="entity-list">
-                  {characters.data.map((character) => (
-                    <div className="entity-list-item" key={character.id}>
-                      <div className="entity-list-content">
-                        <Typography.Text>{character.name}</Typography.Text>
-                        <Typography.Text type="secondary">
-                          {character.group ?? "未分组"} · {character.state}
-                        </Typography.Text>
-                      </div>
-                      <Button
-                        type="link"
-                        onClick={() =>
-                          navigate(
-                            `/projects/${projectId}/characters/${character.id}`,
-                          )
-                        }
-                      >
-                        进入
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <Typography.Text type="secondary">还没有角色</Typography.Text>
-              )}
+            <Card className="content-card asset-tabs-card">
+              <Tabs
+                defaultActiveKey="characters"
+                items={[
+                  {
+                    key: "characters",
+                    label: "角色",
+                    children: (
+                      <Space orientation="vertical" className="workspace-main">
+                        <Space wrap>
+                          <Button
+                            size="small"
+                            type="primary"
+                            icon={<UserAddOutlined />}
+                            disabled={
+                              !canWrite || project.data?.state !== "ready"
+                            }
+                            onClick={() => setCharacterOpen(true)}
+                          >
+                            新建角色
+                          </Button>
+                          <Button
+                            size="small"
+                            icon={<FolderAddOutlined />}
+                            disabled={
+                              !canWrite || project.data?.state !== "ready"
+                            }
+                            onClick={() => setGroupOpen(true)}
+                          >
+                            新建分组
+                          </Button>
+                        </Space>
+                        {project.data?.state !== "ready" ? (
+                          <Typography.Text type="secondary">
+                            确认 Art Bible 和项目名称后才能创建角色。
+                          </Typography.Text>
+                        ) : characterTree.length ? (
+                          <Tree
+                            className="character-tree"
+                            blockNode
+                            defaultExpandAll
+                            selectable={false}
+                            showIcon
+                            treeData={characterTree}
+                          />
+                        ) : (
+                          <Typography.Text type="secondary">
+                            还没有角色或分组
+                          </Typography.Text>
+                        )}
+                      </Space>
+                    ),
+                  },
+                  {
+                    key: "maps",
+                    label: "地图",
+                    children: (
+                      <Typography.Text type="secondary">
+                        地图素材将在这里管理。
+                      </Typography.Text>
+                    ),
+                  },
+                  {
+                    key: "equipment",
+                    label: "武器装备",
+                    children: (
+                      <Typography.Text type="secondary">
+                        武器装备素材将在这里管理。
+                      </Typography.Text>
+                    ),
+                  },
+                ]}
+              />
             </Card>
           </Space>
         </Col>
@@ -292,7 +410,39 @@ export default function ProjectWorkspacePage() {
             <Input autoFocus />
           </Form.Item>
           <Form.Item name="group" label="分组（可选）">
-            <Input />
+            <Select
+              allowClear
+              placeholder="未分组"
+              options={characterGroups.map((group) => ({
+                label: group,
+                value: group,
+              }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title="新建角色分组"
+        open={groupOpen}
+        okText="新建分组"
+        confirmLoading={createCharacterGroup.isPending}
+        onCancel={() => {
+          setGroupOpen(false);
+          groupForm.resetFields();
+        }}
+        onOk={() => groupForm.submit()}
+      >
+        <Form
+          form={groupForm}
+          layout="vertical"
+          onFinish={(values) => createCharacterGroup.mutate(values)}
+        >
+          <Form.Item
+            name="name"
+            label="分组名称"
+            rules={[{ required: true, whitespace: true }]}
+          >
+            <Input autoFocus placeholder="例如：主角、怪物、NPC" />
           </Form.Item>
         </Form>
       </Modal>

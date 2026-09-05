@@ -282,6 +282,36 @@ textarea {
   gap: 4px;
 }
 
+.asset-tabs-card > .ant-card-body {
+  padding-top: 8px;
+}
+
+.character-tree {
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: transparent;
+}
+
+.character-tree .ant-tree-treenode,
+.character-tree .ant-tree-node-content-wrapper,
+.character-tree .ant-tree-title {
+  width: 100%;
+  min-width: 0;
+}
+
+.character-tree .ant-tree-node-content-wrapper {
+  flex: 1;
+}
+
+.character-tree-node {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
 .binding-list {
   margin-top: 8px;
   background: rgba(8, 10, 12, 0.22);

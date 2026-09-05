@@ -1,8 +1,4 @@
-import {
-  ArrowLeftOutlined,
-  CheckOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
+import { CheckOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -19,7 +15,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
@@ -46,7 +42,6 @@ const labels = [
 
 export default function CharacterPage() {
   const { message } = App.useApp();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { projectId = "", characterId = "" } = useParams();
   const { canWrite, setActiveProject } = useStudio();
@@ -248,27 +243,6 @@ export default function CharacterPage() {
 
   return (
     <div className="page-stack workspace-page">
-      <section className="page-heading">
-        <div>
-          <Button
-            type="link"
-            icon={<ArrowLeftOutlined />}
-            onClick={() => navigate(`/projects/${projectId}/workspace`)}
-          >
-            返回项目
-          </Button>
-          <Space align="center" wrap>
-            <Typography.Title level={2}>
-              {character?.name ?? "角色"}
-            </Typography.Title>
-            {character && <Tag color="processing">{character.state}</Tag>}
-          </Space>
-          <Typography.Text type="secondary" className="path-text">
-            {character?.dirName}
-          </Typography.Text>
-        </div>
-      </section>
-
       <Card className="content-card">
         <Steps
           current={currentStep}
@@ -297,7 +271,16 @@ export default function CharacterPage() {
         </Col>
         <Col xs={24} xl={9}>
           <Space orientation="vertical" className="workspace-main">
-            <Card title="角色状态" className="content-card">
+            <Card
+              title="角色状态"
+              className="content-card"
+              extra={
+                character && <Tag color="processing">{character.state}</Tag>
+              }
+            >
+              <StatusRow label="角色" value={character?.name} />
+              <StatusRow label="分组" value={character?.group ?? "未分组"} />
+              <StatusRow label="目录" value={character?.dirName} />
               <StatusRow label="设定" value={character?.specPath} />
               <StatusRow label="效果图" value={character?.renderPath} />
               <StatusRow

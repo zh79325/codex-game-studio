@@ -1142,6 +1142,11 @@ impl MessageProcessor {
                 .character_create(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterGroupCreate { params, .. } => self
+                .game_processor
+                .character_group_create(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::GameCharacterList { params, .. } => self
                 .game_processor
                 .character_list(params)

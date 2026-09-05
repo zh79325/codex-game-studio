@@ -604,17 +604,35 @@ impl GameAppServerAdapter {
             })
     }
 
+    pub async fn character_group_create(
+        &self,
+        params: GameCharacterGroupCreateParams,
+    ) -> Result<GameCharacterGroupCreateResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .create_character_group(&params.project_id, params.name)
+            .await
+            .map(|group| GameCharacterGroupCreateResponse { group })
+    }
+
     pub async fn character_list(
         &self,
         params: GameCharacterListParams,
     ) -> Result<GameCharacterListResponse, GameServiceError> {
-        self.runtime
+        let characters = self
+            .runtime
             .service()
             .list_characters(&params.project_id)
-            .await
-            .map(|characters| GameCharacterListResponse {
-                characters: characters.into_iter().map(character_dto).collect(),
-            })
+            .await?;
+        let groups = self
+            .runtime
+            .service()
+            .list_character_groups(&params.project_id)
+            .await?;
+        Ok(GameCharacterListResponse {
+            characters: characters.into_iter().map(character_dto).collect(),
+            groups,
+        })
     }
 
     pub async fn character_read(

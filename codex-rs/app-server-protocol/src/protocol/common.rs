@@ -633,6 +633,12 @@ client_request_definitions! {
         serialization: global("game"),
         response: v2::GameCharacterCreateResponse,
     },
+    #[experimental("game/characterGroup/create")]
+    GameCharacterGroupCreate => "game/characterGroup/create" {
+        params: v2::GameCharacterGroupCreateParams,
+        serialization: global("game"),
+        response: v2::GameCharacterGroupCreateResponse,
+    },
     #[experimental("game/character/list")]
     GameCharacterList => "game/character/list" {
         params: v2::GameCharacterListParams,

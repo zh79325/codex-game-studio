@@ -325,8 +325,16 @@ game_dto!(GameCharacterCreateParams { project_id: String, name: String, group: O
 game_dto!(GameCharacterCreateResponse {
     character: GameCharacter
 });
+game_dto!(GameCharacterGroupCreateParams {
+    project_id: String,
+    name: String
+});
+game_dto!(GameCharacterGroupCreateResponse { group: String });
 game_dto!(GameCharacterListParams { project_id: String });
-game_dto!(GameCharacterListResponse { characters: Vec<GameCharacter> });
+game_dto!(GameCharacterListResponse {
+    characters: Vec<GameCharacter>,
+    groups: Vec<String>
+});
 game_dto!(GameCharacterReadParams {
     project_id: String,
     character_id: String

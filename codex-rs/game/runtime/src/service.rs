@@ -1774,6 +1774,17 @@ impl GameService {
         store.list_characters(project_id).await.map_err(Into::into)
     }
 
+    pub async fn list_character_groups(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<String>, GameServiceError> {
+        let store = self.project_store(project_id, false)?;
+        store
+            .list_character_groups(project_id)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn read_character(
         &self,
         project_id: &str,
@@ -1784,6 +1795,25 @@ impl GameService {
             .read_character(project_id, character_id)
             .await?
             .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))
+    }
+
+    pub async fn create_character_group(
+        &self,
+        project_id: &str,
+        name: String,
+    ) -> Result<String, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        if project.state != ProjectState::Ready {
+            return Err(GameServiceError::ProjectGate(
+                "Art Bible 与立项尚未确认".to_string(),
+            ));
+        }
+        let name = safe_segment(&name)?;
+        fs::create_dir_all(Path::new(&project.root).join("characters").join(&name))?;
+        self.project_store(project_id, true)?
+            .insert_character_group(project_id, &name, now())
+            .await?;
+        Ok(name)
     }
 
     pub async fn create_character(
@@ -1839,6 +1869,11 @@ impl GameService {
             updated_at: timestamp,
         };
         write_character_meta(&project, &character)?;
+        if let Some(group) = character.group.as_deref() {
+            store
+                .insert_character_group(project_id, group, timestamp)
+                .await?;
+        }
         store.insert_character(&character).await?;
         Ok(character)
     }

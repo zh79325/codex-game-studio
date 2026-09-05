@@ -207,6 +207,12 @@ CREATE TABLE IF NOT EXISTS characters (
     updated_at INTEGER NOT NULL,
     UNIQUE(project_id, dir_name)
 );
+CREATE TABLE IF NOT EXISTS character_groups (
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(project_id, name)
+);
 CREATE TABLE IF NOT EXISTS generations (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -1012,6 +1018,35 @@ impl ProjectStore {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn insert_character_group(
+        &self,
+        project_id: &str,
+        name: &str,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO character_groups(project_id, name, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(project_id)
+        .bind(name)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_character_groups(&self, project_id: &str) -> Result<Vec<String>, StoreError> {
+        sqlx::query_scalar(
+            "SELECT name FROM character_groups WHERE project_id = ? UNION SELECT group_name FROM characters WHERE project_id = ? AND group_name IS NOT NULL ORDER BY 1",
+        )
+        .bind(project_id)
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn insert_character(&self, character: &Character) -> Result<(), StoreError> {
@@ -2356,6 +2391,30 @@ mod tests {
         assert_eq!(writer.access(), ProjectAccess::ReadWrite);
         assert_eq!(explicit_reader.access(), ProjectAccess::ReadOnly);
         assert_eq!(contended_reader.access(), ProjectAccess::ReadOnly);
+    }
+
+    #[tokio::test]
+    async fn empty_character_groups_are_persisted() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        store
+            .insert_character_group("project-1", "主角", 1)
+            .await
+            .expect("create group");
+        store
+            .insert_character_group("project-1", "主角", 2)
+            .await
+            .expect("create group idempotently");
+
+        assert_eq!(
+            store
+                .list_character_groups("project-1")
+                .await
+                .expect("list groups"),
+            vec!["主角".to_string()]
+        );
     }
 
     #[tokio::test]

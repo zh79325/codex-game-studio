@@ -45,6 +45,7 @@ use codex_utils_git_discovery::GitRootDiscovery;
 const MEMORY_GIT_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 const MODEL_KEY: &str = "model";
+const CODEX_VERSION_KEY: &str = "codex_version";
 const REASONING_EFFORT_KEY: &str = "reasoning_effort";
 const USER_INPUT_REQUESTED_DURING_TURN_KEY: &str = "user_input_requested_during_turn";
 const WORKSPACE_KIND_KEY: &str = "workspace_kind";
@@ -92,7 +93,10 @@ pub async fn detached_memory_responses_metadata(
     permission_profile: &PermissionProfile,
     sandbox: Option<&str>,
 ) -> CodexResponsesMetadata {
+    let turn_id = uuid::Uuid::now_v7().to_string();
     let mut metadata = CodexResponsesMetadata {
+        turn_id: Some(turn_id.clone()),
+        root_turn_id: Some(turn_id),
         request_kind: Some(CodexResponsesRequestKind::Memory),
         thread_source: Some(ThreadSource::MemoryConsolidation),
         subagent_header: subagent_header_value(session_source),
@@ -246,6 +250,10 @@ impl TurnMetadataState {
             MODEL_KEY.to_string(),
             Value::String(context.model.to_string()),
         );
+        metadata.insert(
+            CODEX_VERSION_KEY.to_string(),
+            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+        );
         match context.reasoning_effort {
             Some(reasoning_effort) => {
                 metadata.insert(
@@ -333,24 +341,6 @@ impl TurnMetadataState {
 
     pub(crate) fn root_turn_id(&self) -> Option<String> {
         self.root_turn_id.get().cloned()
-    }
-
-    pub(crate) fn can_start_root_turn(&self, session_source: &SessionSource) -> bool {
-        if session_source.is_non_root_agent() {
-            return false;
-        }
-        match &self.thread_source {
-            // Desktop create/fork/send lacks trusted app-server provenance; fail closed.
-            Some(
-                ThreadSource::Subagent
-                | ThreadSource::GuardianReview
-                | ThreadSource::MemoryConsolidation,
-            ) => false,
-            Some(ThreadSource::Feature(feature)) => {
-                !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
-            }
-            Some(ThreadSource::User) | None => true,
-        }
     }
 
     pub(crate) fn set_responsesapi_client_metadata(

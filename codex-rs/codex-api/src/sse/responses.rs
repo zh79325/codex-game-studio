@@ -11,6 +11,8 @@ use codex_client::StreamResponse;
 use codex_client::StreamResponseAudit;
 use codex_client::StreamResponseAuditEvent;
 use codex_protocol::ResponseUsageMetadata;
+use codex_protocol::guardian_ticket::GUARDIAN_TICKET_HEADER;
+use codex_protocol::guardian_ticket::GuardianTicket;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use codex_protocol::protocol::ModelVerification;
@@ -408,8 +410,18 @@ pub fn process_responses_event(
             }
         }
         "response.created" => {
-            if event.response.is_some() {
-                return Ok(Some(ResponseEvent::Created {}));
+            if let Some(response) = event.response {
+                let guardian_ticket = response
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .and_then(|headers| {
+                        headers
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case(GUARDIAN_TICKET_HEADER))
+                    })
+                    .and_then(|(_, value)| value.as_str())
+                    .and_then(GuardianTicket::from_server);
+                return Ok(Some(ResponseEvent::Created { guardian_ticket }));
             }
         }
         "response.failed" => {
@@ -1443,7 +1455,7 @@ mod tests {
         }
 
         fn is_created(ev: &ResponseEvent) -> bool {
-            matches!(ev, ResponseEvent::Created)
+            matches!(ev, ResponseEvent::Created { .. })
         }
         fn is_output(ev: &ResponseEvent) -> bool {
             matches!(ev, ResponseEvent::OutputItemDone(_))
@@ -1627,7 +1639,7 @@ mod tests {
         .await;
 
         assert_eq!(events.len(), 2);
-        assert_matches!(&events[0], ResponseEvent::Created);
+        assert_matches!(&events[0], ResponseEvent::Created { .. });
         assert_matches!(
             &events[1],
             ResponseEvent::Completed {
@@ -1665,7 +1677,12 @@ mod tests {
             &events[0],
             ResponseEvent::ServerModel(model) if model == CYBER_RESTRICTED_MODEL_FOR_TESTS
         );
-        assert_matches!(&events[1], ResponseEvent::Created);
+        assert_matches!(
+            &events[1],
+            ResponseEvent::Created {
+                guardian_ticket: None
+            }
+        );
         assert_matches!(
             &events[2],
             ResponseEvent::Completed {
@@ -1787,7 +1804,7 @@ mod tests {
         .await;
 
         assert_eq!(events.len(), 7);
-        assert_matches!(&events[0], ResponseEvent::Created);
+        assert_matches!(&events[0], ResponseEvent::Created { .. });
         assert_matches!(
             &events[1],
             ResponseEvent::SafetyBuffering(buffering)

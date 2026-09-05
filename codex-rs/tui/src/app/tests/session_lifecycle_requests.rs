@@ -49,6 +49,8 @@ enum HistoryCapabilities {
     LegacyDynamicToolsAndHistory,
     ForkHydrationFails,
     ThreadListFails,
+    ThreadStartFails,
+    ConfigReadUnsupported(i64),
 }
 
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
@@ -78,6 +80,7 @@ pub(super) async fn start_recording_app_server(
         blocked_thread_list,
         failed_thread_name,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await
 }
@@ -91,6 +94,7 @@ pub(super) async fn start_recording_remote_app_server(
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Remote,
+        LoaderOverrides::default(),
     )
     .await
 }
@@ -102,6 +106,7 @@ async fn start_recording_app_server_with_history(
     mut blocked_thread_list: Option<(ThreadId, oneshot::Sender<()>, oneshot::Receiver<()>)>,
     failed_thread_name: Option<&'static str>,
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
+    loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
     let state_db =
         crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
@@ -110,7 +115,7 @@ async fn start_recording_app_server_with_history(
         codex_arg0::Arg0DispatchPaths::default(),
         config.clone(),
         Vec::new(),
-        codex_config::LoaderOverrides::default(),
+        loader_overrides,
         /*strict_config*/ false,
         codex_config::CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
@@ -185,7 +190,30 @@ async fn start_recording_app_server_with_history(
                             .is_some_and(|tools| {
                                 tools.iter().any(|tool| tool["type"] == "namespace")
                             });
-                    let response = if request.method == "thread/list"
+                    let response = if let HistoryCapabilities::ConfigReadUnsupported(code) =
+                        history_capabilities
+                        && request.method == "config/read"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code,
+                                data: None,
+                                message: "unknown variant `config/read`".to_string(),
+                            },
+                        })
+                    } else if history_capabilities == HistoryCapabilities::ThreadStartFails
+                        && request.method == "thread/start"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                data: None,
+                                message: "replacement unavailable".to_string(),
+                            },
+                        })
+                    } else if request.method == "thread/list"
                         && std::mem::take(&mut reject_thread_list)
                     {
                         JSONRPCMessage::Error(JSONRPCError {
@@ -411,6 +439,7 @@ async fn removing_remote_thread_omits_disconnect_guidance() -> Result<()> {
         .await?;
         let resumed = server
             .resume_thread(
+                &app.local_settings,
                 app.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -423,7 +452,9 @@ async fn removing_remote_thread_omits_disconnect_guidance() -> Result<()> {
         app.chat_widget.handle_thread_session(resumed.session);
         let mut tui = crate::tui::test_support::make_test_tui()?;
         let archived = matches!(&event, AppEvent::ArchiveCurrentThread);
-        let AppRunControl::Exit(reason) = app.handle_event(&mut tui, &mut server, event).await?
+        // Keep the large dispatcher future off the Windows test thread's stack.
+        let AppRunControl::Exit(reason) =
+            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?
         else {
             panic!("removing the current thread must exit");
         };
@@ -501,6 +532,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     assert!(app_server.task_tools_available(started.session.thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -549,6 +581,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         .await?;
     let resumed = restarted_app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             target_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -557,7 +590,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     assert!(resumed.task_tools_available);
     assert!(restarted_app_server.task_tools_available(target_id));
     let forked = restarted_app_server
-        .fork_thread(app.config.clone(), target_id)
+        .fork_thread(&app.local_settings, app.config.clone(), target_id)
         .await?;
     assert!(forked.task_tools_available);
     assert!(restarted_app_server.task_tools_available(forked.session.thread_id));
@@ -658,6 +691,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     assert!(app_server.task_tools_available(thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -738,6 +772,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     )?;
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             delegation_source,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -752,6 +787,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
     );
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             delegation_source,
             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
@@ -765,7 +801,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         starts[0]["config"]["mcp_servers.codex_tui"]
     );
     app_server
-        .fork_thread(app.config.clone(), delegation_source)
+        .fork_thread(&app.local_settings, app.config.clone(), delegation_source)
         .await?;
     let forked = recorded_params(&requests, "thread/fork")
         .pop()
@@ -1007,6 +1043,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1015,6 +1052,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
     assert!(!app_server.task_tools_available(started.session.thread_id));
     let startup = crate::app_server_session::start_thread_with_request_handle(
         app_server.request_handle(),
+        &app.local_settings,
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
         /*remote_cwd_override*/ None,
@@ -1158,14 +1196,15 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     assert_eq!(list_requests[0]["sourceKinds"], serde_json::Value::Null);
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.handle_event(
+    // Box each dispatcher await so this test does not retain its large future inline.
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolCallCompleted {
             request_id,
             response,
         },
-    )
+    ))
     .await?;
     let completed = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
         loop {
@@ -1245,6 +1284,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     )?;
     app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             creation_source,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1271,6 +1311,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             params: codex_app_server_protocol::ThreadMetadataUpdateParams {
                 thread_id: creation_source.to_string(),
                 project_id: Some(project.project.id.clone()),
+                daybreak_enabled: None,
                 git_info: None,
             },
         })
@@ -1316,7 +1357,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
         panic!("expected background task registration before its first turn: {registration:?}")
     };
     assert!(recorded_params(&requests, "turn/start").is_empty());
-    app.handle_event(
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolThreadStarted {
@@ -1324,7 +1365,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             task_tools_available,
             registered,
         },
-    )
+    ))
     .await?;
     assert!(
         app.agents_overview
@@ -1404,7 +1445,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     };
     assert_eq!(continued_thread_id, creation_source);
     assert_eq!(recorded_params(&requests, "turn/start").len(), 1);
-    app.handle_event(
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::DynamicToolThreadStarted {
@@ -1412,7 +1453,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             task_tools_available,
             registered,
         },
-    )
+    ))
     .await?;
     let AppEvent::DynamicToolCallCompleted { response, .. } =
         tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
@@ -1467,7 +1508,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
 #[tokio::test]
 async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(100);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(100);
     let thread_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2026-01-02T00-00-00",
@@ -1563,6 +1604,7 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1666,7 +1708,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(2);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(2);
     let thread_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2026-01-02T00-00-00",
@@ -1734,6 +1776,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1759,13 +1802,14 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.handle_event(
+    // Keep the large dispatcher future off the Windows test thread's stack.
+    Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::ExportTranscript {
             destination: TranscriptExportDestination::File(export_path.clone()),
         },
-    )
+    ))
     .await?;
     assert!(app.chat_widget.queued_user_message_texts().is_empty());
     let markdown = std::fs::read_to_string(export_path)?;
@@ -1803,7 +1847,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
             .await?
             .ok_or_else(|| color_eyre::eyre::eyre!("history event channel closed"))?;
         if matches!(event, AppEvent::OlderThreadHistoryLoaded { .. }) {
-            app.handle_event(&mut tui, &mut app_server, event).await?;
+            Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
         }
     }
 
@@ -1852,19 +1896,21 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
     let started = app_server.start_thread(&app.config).await?;
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             legacy_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
         )
         .await?;
     let forked = app_server
-        .fork_thread(app.config.clone(), legacy_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), legacy_thread_id)
         .await?;
 
     assert_ne!(started.session.thread_id, legacy_thread_id);
@@ -1943,6 +1989,7 @@ async fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> 
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1974,6 +2021,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -1981,6 +2029,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         LegacyHistoryRequest::Resume => {
             let resumed = app_server
                 .resume_thread(
+                    &app.local_settings,
                     app.config.clone(),
                     legacy_thread_id,
                     crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -1991,7 +2040,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         }
         LegacyHistoryRequest::Fork => {
             let forked = app_server
-                .fork_thread(app.config.clone(), legacy_thread_id)
+                .fork_thread(&app.local_settings, app.config.clone(), legacy_thread_id)
                 .await?;
             assert_ne!(forked.session.thread_id, legacy_thread_id);
             "thread/fork"
@@ -2040,11 +2089,13 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             parent_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2053,7 +2104,7 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
     assert_eq!(started.session.thread_id, parent_thread_id);
 
     let forked = app_server
-        .fork_thread(app.config.clone(), parent_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), parent_thread_id)
         .await?;
 
     assert_ne!(forked.session.thread_id, parent_thread_id);
@@ -2070,7 +2121,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(8);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(8);
     let thread_id = create_history_rollout(
         &app.config,
         ThreadHistoryMode::Paginated,
@@ -2133,6 +2184,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     .await?;
     let started = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2149,6 +2201,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         /*index*/ 0,
         Arc::new(crate::history_cell::new_session_info(
             &app.config,
+            &app.local_settings,
             started.session.model.as_str(),
             &started.session,
             /*is_first_event*/ false,
@@ -2161,7 +2214,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         .await?;
     app.transcript_cells = initial_cells;
     app.scrollback_has_older_history = app_server.has_older_history(thread_id);
-    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(32);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(32);
     let initial_cell_count = app.transcript_cells.len();
     let initial_page_requests = recorded_params(&requests, "thread/items/list").len();
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -2219,7 +2272,8 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
             None => panic!("scrollback refill request channel closed"),
         }
     };
-    app.handle_event(&mut tui, &mut app_server, request).await?;
+    // Keep the large dispatcher future off the Windows test thread's stack.
+    Box::pin(app.handle_event(&mut tui, &mut app_server, request)).await?;
     let loaded = loop {
         match app_event_rx.recv().await {
             Some(event @ AppEvent::OlderThreadHistoryLoaded { .. }) => break event,
@@ -2227,7 +2281,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
             None => panic!("older history page channel closed"),
         }
     };
-    app.handle_event(&mut tui, &mut app_server, loaded).await?;
+    Box::pin(app.handle_event(&mut tui, &mut app_server, loaded)).await?;
 
     assert!(app.overlay.is_none());
     assert!(app.transcript_cells.len() > initial_cell_count);
@@ -2270,6 +2324,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     app_server.remember_thread_history_mode(paginated_thread_id, ThreadHistoryMode::Legacy);
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             paginated_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -2289,12 +2344,16 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     .await?;
     assert!(!cells.is_empty());
     app_server
-        .fork_thread(app.config.clone(), paginated_thread_id)
+        .fork_thread(&app.local_settings, app.config.clone(), paginated_thread_id)
         .await?;
     let mut side_config = app.config.clone();
     side_config.ephemeral = true;
     app_server
-        .fork_side_thread(side_config, paginated_thread_id)
+        .fork_side_thread(
+            &crate::local_settings::LocalSettings::from(&side_config),
+            side_config,
+            paginated_thread_id,
+        )
         .await?;
 
     let paginated_reads = recorded_params(&requests, "thread/read");
@@ -2369,6 +2428,7 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> 
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
 
@@ -2415,6 +2475,7 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
             /*blocked_thread_list*/ None,
             /*failed_thread_name*/ None,
             crate::app_server_session::ThreadParamsMode::Embedded,
+            LoaderOverrides::default(),
         )
         .await?;
         let started = app_server.start_thread(&app.config).await?;
@@ -2492,6 +2553,7 @@ async fn agents_overview_stop_uses_full_history_after_legacy_negotiation() -> Re
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
+        LoaderOverrides::default(),
     )
     .await?;
     app_server.start_thread(&app.config).await?;
@@ -2631,6 +2693,7 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
 
     let resumed = app_server
         .resume_thread(
+            &app.local_settings,
             app.config.clone(),
             child_thread_id,
             crate::app_server_session::ResumeModelSettings::RestoreFromThread,
@@ -3132,6 +3195,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 .await?;
                 let root = app_server
                     .resume_thread(
+                        &app.local_settings,
                         app.config.clone(),
                         root_thread_id,
                         app.resume_model_settings(),
@@ -3141,6 +3205,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     .await?;
                 app_server
                     .resume_thread(
+                        &app.local_settings,
                         app.config.clone(),
                         child_thread_id,
                         app.resume_model_settings(),
@@ -3338,8 +3403,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     };
                     threads.push(discovered);
                 }
-                app.handle_event(&mut tui, &mut app_server, completion)
-                    .await?;
+                Box::pin(app.handle_event(&mut tui, &mut app_server, completion)).await?;
                 assert_eq!(
                     app.agent_navigation
                         .ordered_threads()
@@ -3368,3 +3432,6 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
         .join()
         .expect("session lifecycle request test thread")
 }
+
+#[path = "new_session_tests.rs"]
+mod new_session_tests;

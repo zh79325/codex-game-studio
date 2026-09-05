@@ -2270,6 +2270,61 @@
       ],
       "type": "object"
     },
+    "GameSpeechCompletedNotification": {
+      "properties": {
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "durationMs",
+        "sessionId",
+        "text"
+      ],
+      "type": "object"
+    },
+    "GameSpeechErrorNotification": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "GameSpeechTranscriptNotification": {
+      "properties": {
+        "definite": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "definite",
+        "sessionId",
+        "text"
+      ],
+      "type": "object"
+    },
     "GameTaskUpdatedNotification": {
       "properties": {
         "conversationId": {
@@ -2358,7 +2413,7 @@
               "type": "string"
             },
             "cwd": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "source": {
               "$ref": "#/definitions/GuardianCommandSource"
@@ -2451,11 +2506,11 @@
         {
           "properties": {
             "cwd": {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "files": {
               "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
+                "$ref": "#/definitions/LegacyAppPathString"
               },
               "type": "array"
             },
@@ -3793,6 +3848,13 @@
             "null"
           ]
         },
+        "normalModelSlug": {
+          "description": "Normal model whose display name and reasoning options describe this quota alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "planType": {
           "anyOf": [
             {
@@ -4543,6 +4605,13 @@
             "null"
           ]
         },
+        "originator": {
+          "description": "Originator recorded when the thread was created, independent of its current client or executor. Null when the recorded originator is unavailable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "parentThreadId": {
           "description": "The ID of the parent thread. This will only be set if this thread is a subagent.",
           "type": [
@@ -4706,6 +4775,29 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadEnvironment": {
+      "description": "An environment selected by a loaded thread, independent of connection status.",
+      "properties": {
+        "cwd": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "environmentId": {
+          "type": "string"
+        },
+        "runtimeWorkspaceRoots": {
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cwd",
+        "environmentId",
+        "runtimeWorkspaceRoots"
       ],
       "type": "object"
     },
@@ -7601,6 +7693,66 @@
         "params"
       ],
       "title": "Game/recovery/statusNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/speech/transcript"
+          ],
+          "title": "Game/speech/transcriptNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameSpeechTranscriptNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/speech/transcriptNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/speech/completed"
+          ],
+          "title": "Game/speech/completedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameSpeechCompletedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/speech/completedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "game/speech/error"
+          ],
+          "title": "Game/speech/errorNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/GameSpeechErrorNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Game/speech/errorNotification",
       "type": "object"
     },
     {

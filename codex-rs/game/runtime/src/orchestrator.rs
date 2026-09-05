@@ -13,6 +13,8 @@ use crate::StartThreadRequest;
 use crate::StartTurnRequest;
 use crate::SteerTurnRequest;
 use crate::TurnAuditContext;
+use crate::TurnAuditRetry;
+use crate::append_turn_audit_retry;
 use crate::append_turn_audit_start_error;
 use crate::bundled_agent_definition;
 use crate::write_turn_audit_request;
@@ -243,6 +245,7 @@ impl TaskOrchestrator {
             target: request.audit_target,
             agent_code: request.agent_code.clone(),
             attempt_id: attempt.id.as_str().to_string(),
+            attempt_no: attempt.attempt_no,
         };
         let start_request = StartTurnRequest {
             thread_id: binding.codex_thread_id.clone(),
@@ -318,7 +321,7 @@ impl TaskOrchestrator {
                 context.attempt_no
             ),
             None,
-            "Action 契约",
+            "action_contract",
         )
         .await
     }
@@ -334,6 +337,17 @@ impl TaskOrchestrator {
             .get(context.attempt_no.saturating_sub(1) as usize)
             .copied()
         else {
+            record_retry_audit(
+                &audit_context,
+                TurnAuditRetry {
+                    kind: "output_length".to_string(),
+                    status: "exhausted".to_string(),
+                    retry_attempt_id: None,
+                    retry_attempt_no: None,
+                    max_output_tokens: OUTPUT_LENGTH_RETRY_TOKEN_LIMITS.last().copied(),
+                    error: None,
+                },
+            );
             return Ok(None);
         };
         self.retry_task_attempt(
@@ -346,7 +360,7 @@ impl TaskOrchestrator {
                 context.attempt_no
             ),
             Some(max_output_tokens),
-            "输出长度",
+            "output_length",
         )
         .await
         .map(Some)
@@ -382,7 +396,9 @@ impl TaskOrchestrator {
             output_artifact_id: None,
             status: TaskAttemptStatus::Pending,
         };
+        let source_audit_context = audit_context.clone();
         audit_context.attempt_id = retry_attempt.id.as_str().to_string();
+        audit_context.attempt_no = retry_attempt.attempt_no;
         let request = StartTurnRequest {
             thread_id: context.codex_thread_id.clone(),
             attempt_id: retry_attempt.id.as_str().to_string(),
@@ -402,6 +418,24 @@ impl TaskOrchestrator {
         store
             .begin_task_attempt_retry(&context.attempt_id, &retry_attempt)
             .await?;
+        let scope = format!("conversation:{}", context.conversation_id);
+        let route = self
+            .routes
+            .current_binding(&scope)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| RouteDecision {
+                account_id: "configured".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            });
+        if let Err(error) = write_turn_audit_request(&audit_context, &route, &request) {
+            tracing::warn!(
+                path = %audit_context.target_dir.display(),
+                retry_kind,
+                "failed to write game retry audit request: {error}"
+            );
+        }
         let turn = match execution.start_turn(request).await {
             Ok(turn) => turn,
             Err(error) => {
@@ -414,6 +448,17 @@ impl TaskOrchestrator {
                         "failed to write game retry audit error: {audit_error}"
                     );
                 }
+                record_retry_audit(
+                    &source_audit_context,
+                    TurnAuditRetry {
+                        kind: retry_kind.to_string(),
+                        status: "failed".to_string(),
+                        retry_attempt_id: Some(retry_attempt.id.as_str().to_string()),
+                        retry_attempt_no: Some(retry_attempt.attempt_no),
+                        max_output_tokens,
+                        error: Some(error.to_string()),
+                    },
+                );
                 store
                     .rollback_task_attempt_retry(&context.attempt_id, retry_attempt.id.as_str())
                     .await?;
@@ -423,6 +468,17 @@ impl TaskOrchestrator {
         store
             .bind_turn_to_attempt(retry_attempt.id.as_str(), &turn.turn_id, now())
             .await?;
+        record_retry_audit(
+            &source_audit_context,
+            TurnAuditRetry {
+                kind: retry_kind.to_string(),
+                status: "started".to_string(),
+                retry_attempt_id: Some(retry_attempt.id.as_str().to_string()),
+                retry_attempt_no: Some(retry_attempt.attempt_no),
+                max_output_tokens,
+                error: None,
+            },
+        );
         Ok(TaskAttemptRetry {
             attempt_id: retry_attempt.id.as_str().to_string(),
             task_id: context.task_id.clone(),
@@ -852,6 +908,17 @@ impl TaskOrchestrator {
         let key = format!("{conversation_id}\u{1f}{agent_code}");
         let mut locks = self.binding_locks.lock().await;
         Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    }
+}
+
+fn record_retry_audit(context: &TurnAuditContext, retry: TurnAuditRetry) {
+    if let Err(error) = append_turn_audit_retry(context, &retry) {
+        tracing::warn!(
+            path = %context.target_dir.display(),
+            retry_kind = retry.kind,
+            retry_status = retry.status,
+            "failed to write game retry audit event: {error}"
+        );
     }
 }
 

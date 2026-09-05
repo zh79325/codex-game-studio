@@ -42,6 +42,8 @@ fn writes_request_and_completion_when_setting_is_missing() {
     assert!(contents.contains("done"));
     assert!(!contents.contains("### Stream"));
     assert!(contents.contains("- Total tokens：13"));
+    assert!(contents.contains("- Max output tokens：provider default"));
+    assert!(contents.contains("- Attempt no：1"));
     assert!(contents.contains("- Latency：25 ms"));
     assert!(contents.contains("- Time to first token：5 ms"));
 }
@@ -71,6 +73,53 @@ fn writes_abnormal_stream_termination() {
 }
 
 #[test]
+fn writes_structured_failure_and_retry_events() {
+    let temp = TempDir::new().expect("temp dir");
+    fs::write(
+        temp.path().join("project.json"),
+        r#"{"schemaVersion":2,"projectId":"project-1"}"#,
+    )
+    .expect("project config");
+    let context = audit_context(&temp);
+    let mut request = start_request("hello");
+    request.max_output_tokens = Some(64_000);
+
+    write_turn_audit_request(&context, &route(), &request).expect("write request");
+    append_turn_audit_completion(
+        &context,
+        &TurnAuditCompletion {
+            error: Some("Incomplete response returned, reason: length".to_string()),
+            ..TurnAuditCompletion::default()
+        },
+    )
+    .expect("write failure");
+    append_turn_audit_retry(
+        &context,
+        &TurnAuditRetry {
+            kind: "output_length".to_string(),
+            status: "started".to_string(),
+            retry_attempt_id: Some("attempt-2".to_string()),
+            retry_attempt_no: Some(2),
+            max_output_tokens: Some(128_000),
+            error: None,
+        },
+    )
+    .expect("write retry");
+
+    let contents = fs::read_to_string(audit_path(&context)).expect("audit contents");
+    assert!(contents.contains("- Max output tokens：64000"));
+    assert!(contents.contains("### Failure Event"));
+    assert!(contents.contains("- Stage：turn_completion"));
+    assert!(contents.contains("- Kind：output_length"));
+    assert!(contents.contains("- Token limit related：true"));
+    assert!(contents.contains("### Retry Event"));
+    assert!(contents.contains("- Status：started"));
+    assert!(contents.contains("- Retry attempt：attempt-2"));
+    assert!(contents.contains("- Retry attempt no：2"));
+    assert!(contents.contains("- Max output tokens：128000"));
+}
+
+#[test]
 fn skips_audit_when_explicitly_disabled() {
     let temp = TempDir::new().expect("temp dir");
     fs::write(
@@ -94,6 +143,7 @@ fn audit_context(temp: &TempDir) -> TurnAuditContext {
         target: "project".to_string(),
         agent_code: "director".to_string(),
         attempt_id: "attempt-1".to_string(),
+        attempt_no: 1,
     }
 }
 

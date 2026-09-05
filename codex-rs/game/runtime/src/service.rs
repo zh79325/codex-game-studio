@@ -531,6 +531,7 @@ impl GameService {
                 target,
                 agent_code: context.agent_code,
                 attempt_id: context.attempt_id,
+                attempt_no: context.attempt_no,
             }));
         }
         Ok(None)

@@ -29,7 +29,11 @@ use codex_game_runtime::RouteCandidate;
 use codex_game_runtime::RouteFailureKind;
 use codex_game_runtime::RouteOutcome;
 use codex_game_runtime::TaskExecution;
+use codex_game_runtime::TurnAuditFailure;
+use codex_game_runtime::TurnAuditRetry;
 use codex_game_runtime::TurnOutputCompletion;
+use codex_game_runtime::append_turn_audit_failure;
+use codex_game_runtime::append_turn_audit_retry;
 use codex_game_runtime::bundled_agent_definitions;
 use std::fs;
 use std::path::Path;
@@ -153,9 +157,23 @@ impl GameAppServerAdapter {
             {
                 TurnOutputCompletion::Completed(completion) => completion,
                 TurnOutputCompletion::ActionProtocolViolation(violation) => {
+                    let audit_context = self.runtime.service().turn_audit_context(turn_id).await?;
+                    if let Some(audit_context) = audit_context.as_ref() {
+                        let _ = append_turn_audit_failure(
+                            audit_context,
+                            &TurnAuditFailure {
+                                stage: "action_validation".to_string(),
+                                kind: "action_contract".to_string(),
+                                message: violation.message.clone(),
+                                retryable: violation.context.attempt_no
+                                    <= MAX_ACTION_CONTRACT_RETRIES,
+                                token_limit_related: false,
+                            },
+                        );
+                    }
                     let retry_error = if violation.context.attempt_no <= MAX_ACTION_CONTRACT_RETRIES
                     {
-                        match self.runtime.service().turn_audit_context(turn_id).await? {
+                        match audit_context {
                             Some(audit_context) => self
                                 .runtime
                                 .orchestrator()
@@ -171,6 +189,19 @@ impl GameAppServerAdapter {
                             None => Err("无法构建 Action 契约重试审计上下文".to_string()),
                         }
                     } else {
+                        if let Some(audit_context) = audit_context.as_ref() {
+                            let _ = append_turn_audit_retry(
+                                audit_context,
+                                &TurnAuditRetry {
+                                    kind: "action_contract".to_string(),
+                                    status: "exhausted".to_string(),
+                                    retry_attempt_id: None,
+                                    retry_attempt_no: None,
+                                    max_output_tokens: None,
+                                    error: None,
+                                },
+                            );
+                        }
                         Err(String::new())
                     };
                     match retry_error {
@@ -1457,6 +1488,21 @@ mod tests {
         )
     }
 
+    fn read_request_audit(request: &StartTurnRequest) -> String {
+        let context = request.audit_context.as_ref().expect("audit context");
+        fs::read_to_string(
+            context
+                .target_dir
+                .join("tmp")
+                .join("conversation")
+                .join(format!(
+                    "{}-turn-{}-{}.md",
+                    context.agent_code, context.turn, context.attempt_id
+                )),
+        )
+        .expect("audit contents")
+    }
+
     #[test]
     fn spec_writer_draft_completion_requests_director_resume() {
         let completion = codex_game_runtime::CompletedTaskAttempt {
@@ -1691,6 +1737,26 @@ mod tests {
             .expect("failed projection");
         assert_eq!(projection.status, "failed");
         assert_eq!(execution.turns.load(Ordering::SeqCst), 5);
+
+        let requests = execution
+            .turn_requests
+            .lock()
+            .expect("turn request lock")
+            .clone();
+        for (index, expected_limit) in [32_000, 64_000, 128_000, 200_000].into_iter().enumerate() {
+            let retry_audit = read_request_audit(&requests[index + 1]);
+            assert!(retry_audit.contains(&format!("- Attempt no：{}", index + 2)));
+            assert!(retry_audit.contains(&format!("- Max output tokens：{expected_limit}")));
+
+            let source_audit = read_request_audit(&requests[index]);
+            assert!(source_audit.contains("### Retry Event"));
+            assert!(source_audit.contains("- Kind：output_length"));
+            assert!(source_audit.contains("- Status：started"));
+            assert!(source_audit.contains(&format!("- Max output tokens：{expected_limit}")));
+        }
+        let exhausted_audit = read_request_audit(requests.last().expect("last request"));
+        assert!(exhausted_audit.contains("- Status：exhausted"));
+        assert!(exhausted_audit.contains("- Max output tokens：200000"));
     }
 
     #[tokio::test]

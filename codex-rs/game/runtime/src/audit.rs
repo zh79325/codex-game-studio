@@ -21,6 +21,26 @@ pub struct TurnAuditContext {
     pub target: String,
     pub agent_code: String,
     pub attempt_id: String,
+    pub attempt_no: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAuditFailure {
+    pub stage: String,
+    pub kind: String,
+    pub message: String,
+    pub retryable: bool,
+    pub token_limit_related: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAuditRetry {
+    pub kind: String,
+    pub status: String,
+    pub retry_attempt_id: Option<String>,
+    pub retry_attempt_no: Option<u32>,
+    pub max_output_tokens: Option<u64>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,16 +87,21 @@ pub fn write_turn_audit_request(
     } else {
         &route.model
     };
+    let max_output_tokens = request
+        .max_output_tokens
+        .map_or_else(|| "provider default".to_string(), |value| value.to_string());
     let body = format!(
-        "# LLM 对话审计\n\n- 会话：{}\n- 轮次：{}\n- 时间：{}\n- 目标：{}\n- Agent：{}\n- Attempt：{}\n\n## 调用 1：主回答\n\n- Provider：{}\n- Model：{}\n\n### Request\n\n#### 1.1 user\n\n{}",
+        "# LLM 对话审计\n\n- 会话：{}\n- 轮次：{}\n- 时间：{}\n- 目标：{}\n- Agent：{}\n- Attempt：{}\n- Attempt no：{}\n\n## 调用 1：主回答\n\n- Provider：{}\n- Model：{}\n- Max output tokens：{}\n\n### Request\n\n#### 1.1 user\n\n{}",
         context.conversation_id,
         context.turn,
         now(),
         context.target,
         context.agent_code,
         context.attempt_id,
+        context.attempt_no,
         provider,
         model,
+        max_output_tokens,
         code_block(&redact_data_urls(&input), "text"),
     );
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -96,8 +121,27 @@ pub fn append_turn_audit_completion(
 
     let mut body = String::new();
     if let Some(error) = completion.error.as_deref() {
-        body.push_str("\n### Error\n\n");
-        body.push_str(&code_block(error, "text"));
+        let normalized = error.to_ascii_lowercase();
+        let (kind, token_limit_related) = if normalized.contains("reason: length")
+            || (normalized.contains("finish_reason") && normalized.contains("length"))
+        {
+            ("output_length", true)
+        } else if error.starts_with("运行已中断") {
+            ("turn_aborted", false)
+        } else {
+            ("turn_execution", false)
+        };
+        append_failure_body(
+            &mut body,
+            context,
+            &TurnAuditFailure {
+                stage: "turn_completion".to_string(),
+                kind: kind.to_string(),
+                message: error.to_string(),
+                retryable: token_limit_related,
+                token_limit_related,
+            },
+        );
     } else if let Some(response) = completion.response.as_deref() {
         body.push_str("\n### Response\n\n");
         body.push_str(&code_block(&redact_data_urls(response), "markdown"));
@@ -118,6 +162,55 @@ pub fn append_turn_audit_completion(
     if let Some(time_to_first_token_ms) = completion.time_to_first_token_ms {
         body.push_str(&format!(
             "- Time to first token：{time_to_first_token_ms} ms\n"
+        ));
+    }
+    append(&path, &body)
+}
+
+pub fn append_turn_audit_failure(
+    context: &TurnAuditContext,
+    failure: &TurnAuditFailure,
+) -> io::Result<()> {
+    let path = audit_path(context);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut body = String::new();
+    append_failure_body(&mut body, context, failure);
+    append(&path, &body)
+}
+
+pub fn append_turn_audit_retry(
+    context: &TurnAuditContext,
+    retry: &TurnAuditRetry,
+) -> io::Result<()> {
+    let path = audit_path(context);
+    if !path.exists() {
+        return Ok(());
+    }
+    let retry_attempt_id = retry.retry_attempt_id.as_deref().unwrap_or("none");
+    let retry_attempt_no = retry
+        .retry_attempt_no
+        .map_or_else(|| "none".to_string(), |value| value.to_string());
+    let max_output_tokens = retry
+        .max_output_tokens
+        .map_or_else(|| "provider default".to_string(), |value| value.to_string());
+    let mut body = format!(
+        "\n### Retry Event\n\n- Time：{}\n- Kind：{}\n- Status：{}\n- Source attempt：{}\n- Source attempt no：{}\n- Retry attempt：{}\n- Retry attempt no：{}\n- Max output tokens：{}\n",
+        now(),
+        retry.kind,
+        retry.status,
+        context.attempt_id,
+        context.attempt_no,
+        retry_attempt_id,
+        retry_attempt_no,
+        max_output_tokens,
+    );
+    if let Some(error) = retry.error.as_deref() {
+        body.push_str("\n#### Retry Error\n\n");
+        body.push_str(&code_block(
+            &truncate_chars(&redact_data_urls(error), 4096),
+            "text",
         ));
     }
     append(&path, &body)
@@ -144,14 +237,33 @@ pub fn append_turn_audit_stream_termination(
 }
 
 pub fn append_turn_audit_start_error(context: &TurnAuditContext, error: &str) -> io::Result<()> {
-    let path = audit_path(context);
-    if !path.exists() {
-        return Ok(());
-    }
-    append(
-        &path,
-        &format!("\n### Error\n\n{}", code_block(error, "text")),
+    append_turn_audit_failure(
+        context,
+        &TurnAuditFailure {
+            stage: "turn_start".to_string(),
+            kind: "start_error".to_string(),
+            message: error.to_string(),
+            retryable: false,
+            token_limit_related: false,
+        },
     )
+}
+
+fn append_failure_body(body: &mut String, context: &TurnAuditContext, failure: &TurnAuditFailure) {
+    body.push_str(&format!(
+        "\n### Failure Event\n\n- Time：{}\n- Stage：{}\n- Kind：{}\n- Attempt：{}\n- Attempt no：{}\n- Retryable：{}\n- Token limit related：{}\n\n#### Error\n\n",
+        now(),
+        failure.stage,
+        failure.kind,
+        context.attempt_id,
+        context.attempt_no,
+        failure.retryable,
+        failure.token_limit_related,
+    ));
+    body.push_str(&code_block(
+        &truncate_chars(&redact_data_urls(&failure.message), 4096),
+        "text",
+    ));
 }
 
 fn conversation_audit_enabled(project_root: &Path) -> bool {

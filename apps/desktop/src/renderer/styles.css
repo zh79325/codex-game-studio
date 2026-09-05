@@ -108,8 +108,10 @@ textarea {
 
 .app-content {
   width: 100%;
+  height: 0;
   min-height: 0;
   max-width: 1680px;
+  flex: 1;
   margin: 0 auto;
   padding: 28px;
   overflow-y: auto;
@@ -145,7 +147,8 @@ textarea {
 }
 
 .chat-column {
-  display: flex;
+  position: relative;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -366,12 +369,13 @@ textarea {
 }
 
 .chat-panel {
+  position: absolute;
+  inset: 0;
   display: flex;
   width: 100%;
-  height: 100%;
   min-height: 0;
-  flex: 1;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .chat-panel > .ant-card-head {
@@ -379,25 +383,30 @@ textarea {
 }
 
 .chat-panel > .ant-card-body {
-  display: flex;
+  display: grid;
   height: 0;
   min-height: 0;
   flex: 1;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 16px;
+  overflow: hidden;
+}
+
+.chat-content {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
   gap: 16px;
   overflow: hidden;
 }
 
-.message-list-shell {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .message-list {
   display: flex;
+  width: 100%;
+  height: 0;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
@@ -405,6 +414,7 @@ textarea {
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .chat-empty {
@@ -428,7 +438,9 @@ textarea {
 
 .chat-message {
   max-width: 88%;
+  flex: none;
   padding: 12px 14px;
+  overflow-wrap: anywhere;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   background: #11161a;
@@ -449,6 +461,27 @@ textarea {
   padding: 8px 10px 10px 12px;
   border-left: 2px solid rgba(112, 214, 164, 0.45);
   background: rgba(112, 214, 164, 0.06);
+}
+
+.thinking-stream-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.message-status-thinking {
+  animation: message-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes message-status-pulse {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 .thinking-stream-content {
@@ -554,6 +587,14 @@ textarea {
 
 .interaction-section > h4.ant-typography {
   margin: 0;
+}
+
+.interaction-feedback .ant-input {
+  width: 100%;
+}
+
+.interaction-feedback > .ant-btn {
+  align-self: flex-end;
 }
 
 .draft-panel > .ant-card {

@@ -1,6 +1,8 @@
 import {
   AudioOutlined,
+  CheckOutlined,
   CloseOutlined,
+  LoadingOutlined,
   SendOutlined,
   StopOutlined,
 } from "@ant-design/icons";
@@ -19,10 +21,12 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AiAgent,
   ArtifactDraft,
+  ChoiceGroup,
   ConversationMessage,
   ConversationSnapshot,
 } from "../types";
 import InteractionDrawer from "./InteractionDrawer";
+import type { ChoiceSubmission } from "./ChoiceQuestions";
 import { useRealtimeSpeech } from "./useRealtimeSpeech";
 
 export type ChatPanelProps = {
@@ -40,6 +44,11 @@ export type ChatPanelProps = {
   onSend: (content: string, recipientAgentCode?: string) => Promise<unknown>;
   onInterrupt: () => Promise<unknown>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
+  choiceInteractionEnabled?: boolean;
+  onResolveChoice?: (
+    groups: ChoiceGroup[],
+    submission: ChoiceSubmission,
+  ) => Promise<boolean>;
   renderDraftAction?: (
     draft: ArtifactDraft,
     closeDrawer: () => void,
@@ -54,7 +63,9 @@ export default function ChatPanel(props: ChatPanelProps) {
     enabled: props.canWrite && !props.busy && Boolean(props.snapshot),
     onCompleted: (text) =>
       setContent((current) =>
-        current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`,
+        current && !/\s$/.test(current)
+          ? `${current} ${text}`
+          : `${current}${text}`,
       ),
     onError: (error) => message.error(error),
   });
@@ -65,9 +76,13 @@ export default function ChatPanel(props: ChatPanelProps) {
   const pendingDrafts =
     props.snapshot?.drafts.filter((draft) => draft.status === "pending") ?? [];
   const pendingChoice = useMemo(() => {
+    if (props.choiceInteractionEnabled === false) return undefined;
     const messages = props.snapshot?.messages ?? [];
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const choices = messages[index].action?.payload.choices;
+      const payload = messages[index].action?.payload;
+      const choices = payload?.choices?.length
+        ? payload.choices
+        : legacyNamingChoices(payload?.naming);
       if (!choices?.length) continue;
       const answered = messages
         .slice(index + 1)
@@ -75,7 +90,7 @@ export default function ChatPanel(props: ChatPanelProps) {
       return answered ? undefined : { id: messages[index].id, groups: choices };
     }
     return undefined;
-  }, [props.snapshot?.messages]);
+  }, [props.choiceInteractionEnabled, props.snapshot?.messages]);
 
   const send = async (value = content) => {
     const normalized = value.trim();
@@ -92,6 +107,18 @@ export default function ChatPanel(props: ChatPanelProps) {
       message.error(error instanceof Error ? error.message : String(error));
       return false;
     }
+  };
+  const submitChoice = async (
+    choice: { groups: ChoiceGroup[] },
+    submission: ChoiceSubmission,
+  ) => {
+    if (
+      props.onResolveChoice &&
+      (await props.onResolveChoice(choice.groups, submission))
+    ) {
+      return true;
+    }
+    return send(submission.content);
   };
 
   return (
@@ -117,20 +144,21 @@ export default function ChatPanel(props: ChatPanelProps) {
         }
         loading={props.loading}
       >
-        {props.lastError && (
-          <Alert type="error" showIcon message={props.lastError} />
-        )}
-        <MessageList
-          messages={props.snapshot?.messages ?? []}
-          streamingText={props.streamingText}
-          thinkingText={props.thinkingText}
-          workingAgentCode={props.workingAgentCode}
-          starterPrompt={props.starterPrompt}
-          autoFollow={props.busy}
-          followLatestRequest={followLatestRequest}
-          onStarter={send}
-          disabled={!props.canWrite || props.busy || !props.snapshot}
-        />
+        <div className="chat-content">
+          {props.lastError && (
+            <Alert type="error" showIcon message={props.lastError} />
+          )}
+          <MessageList
+            messages={props.snapshot?.messages ?? []}
+            streamingText={props.streamingText}
+            thinkingText={props.thinkingText}
+            workingAgentCode={props.workingAgentCode}
+            starterPrompt={props.starterPrompt}
+            followLatestRequest={followLatestRequest}
+            onStarter={send}
+            disabled={!props.canWrite || props.busy || !props.snapshot}
+          />
+        </div>
 
         <Composer
           value={content}
@@ -158,7 +186,8 @@ export default function ChatPanel(props: ChatPanelProps) {
         choice={pendingChoice}
         drafts={pendingDrafts}
         disabled={!props.canWrite || props.busy}
-        onSubmitChoice={send}
+        onSubmitChoice={submitChoice}
+        onSubmitFeedback={send}
         onCommitDrafts={props.onCommitDrafts}
         renderDraftAction={props.renderDraftAction}
       />
@@ -166,33 +195,51 @@ export default function ChatPanel(props: ChatPanelProps) {
   );
 }
 
-function useAutoFollowScroll(enabled: boolean) {
+function useAutoFollowScroll() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const wasEnabledRef = useRef(enabled);
 
   const scrollToLatest = useCallback(() => {
     const container = containerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
   }, []);
 
-  useLayoutEffect(() => {
-    if (enabled || wasEnabledRef.current) scrollToLatest();
-    wasEnabledRef.current = enabled;
-  });
-
   return { containerRef, scrollToLatest };
 }
 
 function ThinkingStream({ text }: { text: string }) {
-  const scroll = useAutoFollowScroll(true);
+  const scroll = useAutoFollowScroll();
+  useLayoutEffect(() => {
+    scroll.scrollToLatest();
+  }, [scroll.scrollToLatest, text]);
   return (
     <div className="thinking-stream">
-      <Typography.Text type="secondary">Thinking</Typography.Text>
+      <Typography.Text className="thinking-stream-title" type="secondary">
+        <LoadingOutlined spin />
+        Thinking
+      </Typography.Text>
       <div ref={scroll.containerRef} className="thinking-stream-content">
         <Typography.Paragraph type="secondary">{text}</Typography.Paragraph>
       </div>
     </div>
   );
+}
+
+function MessageStatus({ status }: { status: ConversationMessage["status"] }) {
+  if (status === "thinking") {
+    return (
+      <Tag className="message-status-thinking" icon={<LoadingOutlined spin />}>
+        thinking
+      </Tag>
+    );
+  }
+  if (status === "completed") {
+    return (
+      <Tag color="success" icon={<CheckOutlined />}>
+        completed
+      </Tag>
+    );
+  }
+  return <Tag>{status}</Tag>;
 }
 
 export function MessageList({
@@ -201,7 +248,6 @@ export function MessageList({
   thinkingText,
   workingAgentCode,
   starterPrompt,
-  autoFollow,
   followLatestRequest,
   disabled,
   onStarter,
@@ -211,15 +257,21 @@ export function MessageList({
   thinkingText?: string;
   workingAgentCode?: string;
   starterPrompt?: string;
-  autoFollow: boolean;
   followLatestRequest: number;
   disabled: boolean;
   onStarter: (content: string) => Promise<unknown>;
 }) {
-  const scroll = useAutoFollowScroll(autoFollow);
+  const scroll = useAutoFollowScroll();
   useLayoutEffect(() => {
-    if (followLatestRequest > 0) scroll.scrollToLatest();
-  }, [followLatestRequest, scroll.scrollToLatest]);
+    scroll.scrollToLatest();
+  }, [
+    followLatestRequest,
+    messages,
+    scroll.scrollToLatest,
+    streamingText,
+    thinkingText,
+    workingAgentCode,
+  ]);
 
   if (!messages.length) {
     return (
@@ -244,38 +296,36 @@ export function MessageList({
     );
   }
   return (
-    <div className="message-list-shell">
-      <div ref={scroll.containerRef} className="message-list">
-        {messages.map((item) => (
-          <article
-            className={`chat-message chat-message-${item.role}`}
-            key={item.id}
-          >
-            <Space className="message-meta" wrap>
-              <Typography.Text strong>
-                {item.role === "user" ? "你" : item.agentCode}
-              </Typography.Text>
-              <Tag>{item.status}</Tag>
-            </Space>
-            {item.status === "thinking" &&
-              thinkingText &&
-              item.agentCode === workingAgentCode && (
-                <ThinkingStream text={thinkingText} />
-              )}
-            {item.status === "thinking" && !item.content ? (
-              streamingText && item.agentCode === workingAgentCode ? (
-                <Typography.Paragraph>
-                  {stripActionBlock(streamingText)}
-                </Typography.Paragraph>
-              ) : thinkingText && item.agentCode === workingAgentCode ? null : (
-                <Spin size="small" />
-              )
-            ) : (
-              <Typography.Paragraph>{item.content}</Typography.Paragraph>
+    <div ref={scroll.containerRef} className="message-list">
+      {messages.map((item) => (
+        <article
+          className={`chat-message chat-message-${item.role}`}
+          key={item.id}
+        >
+          <Space className="message-meta" wrap>
+            <Typography.Text strong>
+              {item.role === "user" ? "你" : item.agentCode}
+            </Typography.Text>
+            <MessageStatus status={item.status} />
+          </Space>
+          {item.status === "thinking" &&
+            thinkingText &&
+            item.agentCode === workingAgentCode && (
+              <ThinkingStream text={thinkingText} />
             )}
-          </article>
-        ))}
-      </div>
+          {item.status === "thinking" && !item.content ? (
+            streamingText && item.agentCode === workingAgentCode ? (
+              <Typography.Paragraph>
+                {stripActionBlock(streamingText)}
+              </Typography.Paragraph>
+            ) : thinkingText && item.agentCode === workingAgentCode ? null : (
+              <Spin size="small" />
+            )
+          ) : (
+            <Typography.Paragraph>{item.content}</Typography.Paragraph>
+          )}
+        </article>
+      ))}
     </div>
   );
 }
@@ -377,10 +427,7 @@ export function Composer({
           icon={busy ? <StopOutlined /> : <SendOutlined />}
           loading={busy && interrupting}
           disabled={
-            disabled ||
-            interrupting ||
-            voiceMode ||
-            (!busy && !value.trim())
+            disabled || interrupting || voiceMode || (!busy && !value.trim())
           }
           onClick={busy ? onInterrupt : onSend}
         >
@@ -405,6 +452,26 @@ function findMentionedAgent(value: string, agents: AiAgent[]) {
     if (agentCode) return agentCode;
   }
   return undefined;
+}
+
+function legacyNamingChoices(
+  naming?: Array<{ name: string; code: string; reason: string }>,
+): ChoiceGroup[] | undefined {
+  if (!naming?.length) return undefined;
+  return [
+    {
+      item: "项目名称",
+      options: naming.map((suggestion) => suggestion.name),
+      recommended: [naming[0].name],
+      multiple: false,
+    },
+    {
+      item: "项目代号",
+      options: naming.map((suggestion) => suggestion.code),
+      recommended: [naming[0].code],
+      multiple: false,
+    },
+  ];
 }
 
 function stripActionBlock(value: string) {

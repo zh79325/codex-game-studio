@@ -11,6 +11,14 @@ type ChoiceAnswer = {
   customDetail: string;
 };
 
+export type ChoiceSubmission = {
+  content: string;
+  answers: Array<{
+    item: string;
+    values: string[];
+  }>;
+};
+
 export default function ChoiceQuestions({
   groups,
   disabled,
@@ -18,8 +26,9 @@ export default function ChoiceQuestions({
 }: {
   groups: ChoiceGroup[];
   disabled: boolean;
-  onSubmit: (content: string) => Promise<void>;
+  onSubmit: (submission: ChoiceSubmission) => Promise<void>;
 }) {
+  const [submitting, setSubmitting] = useState(false);
   const [answers, setAnswers] = useState<ChoiceAnswer[]>(() =>
     groups.map(() => ({
       selectedOptions: [],
@@ -81,6 +90,16 @@ export default function ChoiceQuestions({
       (!answer.customSelected || Boolean(answer.customOption.trim()))
     );
   });
+  const controlsDisabled = disabled || submitting;
+  const submit = async () => {
+    if (!complete || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(buildChoiceSubmission(groups, answers));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="choice-questions">
@@ -106,7 +125,7 @@ export default function ChoiceQuestions({
                     control={
                       <Checkbox
                         checked={answer.selectedOptions.includes(option)}
-                        disabled={disabled}
+                        disabled={controlsDisabled}
                         onChange={(event) =>
                           selectOption(
                             groupIndex,
@@ -121,7 +140,7 @@ export default function ChoiceQuestions({
                       </Checkbox>
                     }
                     detail={answer.details[option] ?? ""}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onDetailChange={(detail) =>
                       updateAnswer(groupIndex, (current) => ({
                         ...current,
@@ -155,13 +174,13 @@ export default function ChoiceQuestions({
                     <ChoiceOptionRow
                       key={option}
                       control={
-                        <Radio value={optionIndex} disabled={disabled}>
+                        <Radio value={optionIndex} disabled={controlsDisabled}>
                           {option}
                           {group.recommended.includes(option) ? "（推荐）" : ""}
                         </Radio>
                       }
                       detail={answer.details[option] ?? ""}
-                      disabled={disabled}
+                      disabled={controlsDisabled}
                       onDetailChange={(detail) =>
                         updateAnswer(groupIndex, (current) => ({
                           ...current,
@@ -174,12 +193,15 @@ export default function ChoiceQuestions({
                   ))}
                   <CustomChoiceRow
                     control={
-                      <Radio value={group.options.length} disabled={disabled}>
+                      <Radio
+                        value={group.options.length}
+                        disabled={controlsDisabled}
+                      >
                         其他（自定义）
                       </Radio>
                     }
                     answer={answer}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onSelect={() => selectCustom(groupIndex, group, true)}
                     onChange={(change) =>
                       updateAnswer(groupIndex, (current) => ({
@@ -197,7 +219,7 @@ export default function ChoiceQuestions({
                   control={
                     <Checkbox
                       checked={answer.customSelected}
-                      disabled={disabled}
+                      disabled={controlsDisabled}
                       onChange={(event) =>
                         selectCustom(groupIndex, group, event.target.checked)
                       }
@@ -206,7 +228,7 @@ export default function ChoiceQuestions({
                     </Checkbox>
                   }
                   answer={answer}
-                  disabled={disabled}
+                  disabled={controlsDisabled}
                   onSelect={() => selectCustom(groupIndex, group, true)}
                   onChange={(change) =>
                     updateAnswer(groupIndex, (current) => ({
@@ -223,8 +245,9 @@ export default function ChoiceQuestions({
       })}
       <Button
         type="primary"
-        disabled={disabled || !complete}
-        onClick={() => void onSubmit(formatChoiceAnswers(groups, answers))}
+        loading={submitting}
+        disabled={controlsDisabled || !complete}
+        onClick={() => void submit()}
       >
         提交选择
       </Button>
@@ -288,6 +311,25 @@ function CustomChoiceRow({
       />
     </div>
   );
+}
+
+function buildChoiceSubmission(
+  groups: ChoiceGroup[],
+  answers: ChoiceAnswer[],
+): ChoiceSubmission {
+  return {
+    content: formatChoiceAnswers(groups, answers),
+    answers: groups.map((group, index) => {
+      const answer = answers[index];
+      return {
+        item: group.item,
+        values: [
+          ...answer.selectedOptions,
+          ...(answer.customSelected ? [answer.customOption.trim()] : []),
+        ],
+      };
+    }),
+  };
 }
 
 export function formatChoiceAnswers(

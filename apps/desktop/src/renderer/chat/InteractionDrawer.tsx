@@ -1,9 +1,9 @@
-import { Button, Card, Checkbox, Drawer, Typography } from "antd";
-import { App } from "antd";
+import { App, Button, Card, Checkbox, Drawer, Input, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { ArtifactDraft, ChoiceGroup } from "../types";
 import ChoiceQuestions from "./ChoiceQuestions";
+import type { ChoiceSubmission } from "./ChoiceQuestions";
 import MarkdownDocument from "./MarkdownDocument";
 
 type PendingChoice = {
@@ -16,13 +16,18 @@ export default function InteractionDrawer({
   drafts,
   disabled,
   onSubmitChoice,
+  onSubmitFeedback,
   onCommitDrafts,
   renderDraftAction,
 }: {
   choice?: PendingChoice;
   drafts: ArtifactDraft[];
   disabled: boolean;
-  onSubmitChoice: (content: string) => Promise<boolean>;
+  onSubmitChoice: (
+    choice: PendingChoice,
+    submission: ChoiceSubmission,
+  ) => Promise<boolean>;
+  onSubmitFeedback: (content: string) => Promise<boolean>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
   renderDraftAction?: (
     draft: ArtifactDraft,
@@ -43,6 +48,8 @@ export default function InteractionDrawer({
   ].join(":");
   const [dismissedKey, setDismissedKey] = useState("");
   const [selectedDrafts, setSelectedDrafts] = useState<string[]>([]);
+  const [feedback, setFeedback] = useState("");
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
   const open =
     Boolean(choice || visibleDrafts.length) && dismissedKey !== interactionKey;
 
@@ -51,11 +58,32 @@ export default function InteractionDrawer({
     setSelectedDrafts((current) =>
       current.filter((id) => availableIds.has(id)),
     );
+    setFeedback("");
   }, [interactionKey]);
 
   const closeDrawer = () => setDismissedKey(interactionKey);
-  const submitChoice = async (content: string) => {
-    if (await onSubmitChoice(content)) closeDrawer();
+  const submitChoice = async (submission: ChoiceSubmission) => {
+    if (!choice) return;
+    try {
+      if (await onSubmitChoice(choice, submission)) closeDrawer();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const submitFeedback = async () => {
+    const content = feedback.trim();
+    if (!content || submittingFeedback) return;
+    setSubmittingFeedback(true);
+    try {
+      if (await onSubmitFeedback(content)) {
+        setFeedback("");
+        closeDrawer();
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSubmittingFeedback(false);
+    }
   };
   const commitDrafts = async () => {
     if (!onCommitDrafts || !selectedDrafts.length) return;
@@ -107,6 +135,27 @@ export default function InteractionDrawer({
             closeDrawer={closeDrawer}
           />
         )}
+        <section className="interaction-section interaction-feedback">
+          <Typography.Title level={4}>补充要求</Typography.Title>
+          <Typography.Text type="secondary">
+            如果当前方案还需要调整，可以直接告诉 Agent 需要修改的内容。
+          </Typography.Text>
+          <Input.TextArea
+            value={feedback}
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            disabled={disabled || submittingFeedback}
+            placeholder="输入其他要求，Agent 将据此重新优化"
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+          <Button
+            type="primary"
+            loading={submittingFeedback}
+            disabled={disabled || !feedback.trim()}
+            onClick={() => void submitFeedback()}
+          >
+            提交给 Agent 重新优化
+          </Button>
+        </section>
       </div>
     </Drawer>
   );

@@ -655,6 +655,11 @@ impl ProjectStore {
             )));
         }
         for draft in action.payload.drafts.as_deref().unwrap_or_default() {
+            sqlx::query("UPDATE artifact_drafts SET status = 'superseded' WHERE conversation_id = ? AND target_path = ? AND status = 'pending'")
+                .bind(&completion.conversation_id)
+                .bind(&draft.target_path)
+                .execute(&mut *transaction)
+                .await?;
             sqlx::query("INSERT INTO artifact_drafts(id, conversation_id, target_path, content, based_on_hash, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
                 .bind(uuid::Uuid::now_v7().to_string())
                 .bind(&completion.conversation_id)
@@ -2235,6 +2240,10 @@ async fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_game_domain::AgentActionKind;
+    use codex_game_domain::AgentActionPayload;
+    use codex_game_domain::ArtifactDraft;
+    use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -2322,6 +2331,89 @@ mod tests {
         .await
         .expect("read statuses");
         assert_eq!(statuses, ("succeeded".to_string(), "succeeded".to_string()));
+    }
+
+    #[tokio::test]
+    async fn new_draft_supersedes_only_pending_drafts_for_the_same_path() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        sqlx::query(
+            "INSERT INTO interactions(id, conversation_id, idempotency_key, created_at) VALUES ('i1', 'c1', 'key1', 1)",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed interaction");
+        sqlx::query(
+            "INSERT INTO tasks(id, interaction_id, target_id, stage, agent_code, status) VALUES ('t1', 'i1', 'w1', 'project', 'game_designer', 'running')",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed task");
+        sqlx::query(
+            "INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, codex_turn_id, status) VALUES ('a1', 't1', 1, 'ct1', 'turn1', 'running')",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed attempt");
+        sqlx::query(
+            "INSERT INTO messages(id, conversation_id, role, content, status, created_at) VALUES ('m1', 'c1', 'assistant', '', 'thinking', 1)",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed message");
+        sqlx::query(
+            "INSERT INTO artifact_drafts(id, conversation_id, target_path, content, status, created_at) VALUES ('d1', 'c1', 'art-bible.md', 'old art bible', 'pending', 1), ('d2', 'c1', 'project.json', 'old project', 'pending', 1)",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed drafts");
+        let action = AgentAction {
+            action: AgentActionKind::AskUser,
+            target_agent: None,
+            reason: "请确认更新后的风格".to_string(),
+            payload: AgentActionPayload {
+                drafts: Some(vec![ArtifactDraft {
+                    target_path: "art-bible.md".to_string(),
+                    content: "new art bible".to_string(),
+                    based_on_hash: None,
+                }]),
+                ..Default::default()
+            },
+        };
+
+        store
+            .commit_action_turn("turn1", "m1", "updated", &action, &[], None, 2)
+            .await
+            .expect("commit action turn");
+
+        let drafts: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT target_path, content, status FROM artifact_drafts WHERE conversation_id = 'c1' ORDER BY target_path, created_at, content",
+        )
+        .fetch_all(store.pool())
+        .await
+        .expect("read drafts");
+        assert_eq!(
+            drafts,
+            vec![
+                (
+                    "art-bible.md".to_string(),
+                    "old art bible".to_string(),
+                    "superseded".to_string(),
+                ),
+                (
+                    "art-bible.md".to_string(),
+                    "new art bible".to_string(),
+                    "pending".to_string(),
+                ),
+                (
+                    "project.json".to_string(),
+                    "old project".to_string(),
+                    "pending".to_string(),
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

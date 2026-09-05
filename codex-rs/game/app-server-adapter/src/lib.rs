@@ -1281,22 +1281,21 @@ mod tests {
             .await
             .expect("continue handoff")
             .expect("handoff task");
-        let return_to_director = action(
-            "handoff",
-            Some("studio_director"),
-            "美术基调已完成，交回总管决定下一步",
-            "{}",
-        );
-        adapter
+        let specialist_done = action("done", None, "美术基调已完成", "{}");
+        let projection = adapter
             .observe_turn_completed(
                 &execution,
                 third.attempt.codex_turn_id.as_deref().expect("turn id"),
-                Some(&return_to_director),
+                Some(&specialist_done),
                 false,
             )
             .await
             .expect("return completion")
             .expect("projection");
+        assert_eq!(
+            projection.handoff_target.as_deref(),
+            Some("studio_director")
+        );
         let director = adapter
             .continue_handoff(&execution, &conversation_id, "studio_director")
             .await

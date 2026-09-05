@@ -11,6 +11,7 @@ import type {
 } from "../shared/ipc";
 
 const GAME_PROTOCOL_VERSION = 1;
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 
 export class BackendSupervisor extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
@@ -62,6 +63,35 @@ export class BackendSupervisor extends EventEmitter {
       setTimeout(() => this.restart(), 0);
     }
     return result;
+  }
+
+  async heartbeat(): Promise<BackendState> {
+    if (!this.child || !this.initialized) return this.state;
+    try {
+      const ping = await this.send<GamePingResponse>(
+        "game/ping",
+        {},
+        HEARTBEAT_TIMEOUT_MS,
+      );
+      if (ping.protocolVersion !== GAME_PROTOCOL_VERSION) {
+        this.emitState({
+          type: "incompatible",
+          message: `协议版本不匹配：客户端 ${GAME_PROTOCOL_VERSION}，后端 ${ping.protocolVersion}`,
+        });
+      } else if (ping.status === "ready" || ping.status === "readOnly") {
+        this.emitState({
+          type: ping.status,
+          backendVersion: ping.backendVersion,
+        });
+      } else {
+        this.emitState({ type: "recovering" });
+      }
+    } catch {
+      if (this.child && this.initialized) {
+        this.emitState({ type: "recovering" });
+      }
+    }
+    return this.state;
   }
 
   private restart(): void {
@@ -148,32 +178,44 @@ export class BackendSupervisor extends EventEmitter {
 
   private async waitUntilReady(): Promise<void> {
     while (this.child && this.initialized) {
-      const ping = await this.send<GamePingResponse>("game/ping", {});
-      if (ping.protocolVersion !== GAME_PROTOCOL_VERSION) {
-        throw new Error(
-          `协议版本不匹配：客户端 ${GAME_PROTOCOL_VERSION}，后端 ${ping.protocolVersion}`,
-        );
-      }
-      if (ping.status === "ready" || ping.status === "readOnly") {
-        this.emitState({
-          type: ping.status,
-          backendVersion: ping.backendVersion,
-        });
+      const state = await this.heartbeat();
+      if (
+        state.type === "ready" ||
+        state.type === "readOnly" ||
+        state.type === "incompatible"
+      ) {
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
 
-  private send<T>(method: string, params?: unknown): Promise<T> {
+  private send<T>(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+  ): Promise<T> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("后端进程未运行"));
     const request: JsonRpcRequest = { id: this.nextId++, method, params };
     return new Promise<T>((resolve, reject) => {
+      let timeout: NodeJS.Timeout | undefined;
       this.pending.set(request.id, {
-        resolve: (value) => resolve(value as T),
-        reject,
+        resolve: (value) => {
+          if (timeout) clearTimeout(timeout);
+          resolve(value as T);
+        },
+        reject: (error) => {
+          if (timeout) clearTimeout(timeout);
+          reject(error);
+        },
       });
+      if (timeoutMs) {
+        timeout = setTimeout(() => {
+          if (!this.pending.delete(request.id)) return;
+          reject(new Error(`${method} 请求超时`));
+        }, timeoutMs);
+      }
       child.stdin.write(`${JSON.stringify(request)}\n`);
     });
   }
@@ -210,6 +252,7 @@ export class BackendSupervisor extends EventEmitter {
   }
 
   private emitState(state: BackendState): void {
+    if (JSON.stringify(this.state) === JSON.stringify(state)) return;
     this.state = state;
     this.emit("state", state);
   }

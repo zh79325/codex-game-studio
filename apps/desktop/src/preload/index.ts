@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
+  IPC_BACKEND_HEARTBEAT,
   IPC_BACKEND_STATE,
   IPC_EVENT,
   IPC_NOTIFY,
@@ -12,6 +13,8 @@ import {
 const api: GameDesktopApi = {
   request: <T>(method: string, params?: unknown) =>
     ipcRenderer.invoke(IPC_REQUEST, method, params) as Promise<T>,
+  heartbeat: () =>
+    ipcRenderer.invoke(IPC_BACKEND_HEARTBEAT) as Promise<BackendState>,
   selectDirectory: (title) =>
     ipcRenderer.invoke(IPC_SELECT_DIRECTORY, title) as Promise<
       string | undefined

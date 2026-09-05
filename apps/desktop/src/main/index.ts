@@ -3,6 +3,7 @@ import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { BackendSupervisor } from "./backend";
 import {
+  IPC_BACKEND_HEARTBEAT,
   IPC_BACKEND_STATE,
   IPC_EVENT,
   IPC_NOTIFY,
@@ -105,6 +106,9 @@ ipcMain.handle(IPC_REQUEST, (_event, method: string, params?: unknown) => {
   }
   return backend.request(method, params);
 });
+ipcMain.handle(IPC_BACKEND_HEARTBEAT, () =>
+  backend ? backend.heartbeat() : latestState,
+);
 ipcMain.handle(IPC_SELECT_DIRECTORY, async (_event, title: string) => {
   const result = await dialog.showOpenDialog(window!, {
     title,

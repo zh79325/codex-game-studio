@@ -148,7 +148,7 @@ export default function ChatPanel(props: ChatPanelProps) {
       >
         <div className="chat-content">
           {props.lastError && (
-            <Alert type="error" showIcon message={props.lastError} />
+            <Alert type="error" showIcon title={props.lastError} />
           )}
           <MessageList
             messages={visibleMessages}

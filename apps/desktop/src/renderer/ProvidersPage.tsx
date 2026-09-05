@@ -575,7 +575,7 @@ export default function ProvidersPage() {
         <Alert
           type="error"
           showIcon
-          message="公共套餐文件校验失败"
+          title="公共套餐文件校验失败"
           description={(presets.error as Error).message}
         />
       )}
@@ -746,7 +746,7 @@ export default function ProvidersPage() {
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
-              message={`该套餐的 Key 以 ${selectedPreset.keyPrefix} 开头`}
+              title={`该套餐的 Key 以 ${selectedPreset.keyPrefix} 开头`}
               description="请确认使用对应套餐的 Key，避免请求未计入套餐额度。"
             />
           )}
@@ -1052,13 +1052,13 @@ export default function ProvidersPage() {
           )
         }
       >
-        <Alert type="warning" showIcon message="导入导出不包含任何 API Key" />
+        <Alert type="warning" showIcon title="导入导出不包含任何 API Key" />
         {importPreview && (
           <Alert
             className="modal-alert"
             type="success"
             showIcon
-            message={`校验通过：${importPreview.providerCount} 个 Provider，${importPreview.modelCount} 个模型`}
+            title={`校验通过：${importPreview.providerCount} 个 Provider，${importPreview.modelCount} 个模型`}
           />
         )}
         <Input.TextArea

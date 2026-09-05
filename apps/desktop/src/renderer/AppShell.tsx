@@ -18,6 +18,7 @@ import type { BackendState } from "../shared/ipc";
 import type { Project } from "./types";
 
 const brandIconUrl = new URL("./brand-icon.svg", import.meta.url).href;
+const BACKEND_HEARTBEAT_INTERVAL_MS = 2_000;
 
 export type StudioContext = {
   backend: BackendState;
@@ -37,7 +38,9 @@ export default function AppShell() {
   const previousBackendType = useRef(backend.type);
 
   useEffect(() => {
-    const removeState = window.codexGame.onBackendState((state) => {
+    let stopped = false;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+    const applyBackendState = (state: BackendState) => {
       const wasConnected = ["ready", "readOnly"].includes(
         previousBackendType.current,
       );
@@ -45,7 +48,23 @@ export default function AppShell() {
       previousBackendType.current = state.type;
       setBackend(state);
       if (isConnected && !wasConnected) void queryClient.invalidateQueries();
-    });
+    };
+    const refreshBackendState = async () => {
+      try {
+        const state = await window.codexGame.heartbeat();
+        if (!stopped) applyBackendState(state);
+      } catch {
+        if (!stopped) applyBackendState({ type: "recovering" });
+      } finally {
+        if (!stopped) {
+          heartbeatTimer = setTimeout(
+            () => void refreshBackendState(),
+            BACKEND_HEARTBEAT_INTERVAL_MS,
+          );
+        }
+      }
+    };
+    const removeState = window.codexGame.onBackendState(applyBackendState);
     const removeEvent = window.codexGame.onEvent((event) => {
       if (typeof event === "object" && event && "method" in event) {
         if (String(event.method).startsWith("game/")) {
@@ -53,7 +72,10 @@ export default function AppShell() {
         }
       }
     });
+    void refreshBackendState();
     return () => {
+      stopped = true;
+      if (heartbeatTimer) clearTimeout(heartbeatTimer);
       removeState();
       removeEvent();
     };

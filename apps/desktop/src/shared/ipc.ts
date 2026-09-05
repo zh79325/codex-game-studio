@@ -1,6 +1,7 @@
 export const IPC_REQUEST = "game:request";
 export const IPC_EVENT = "game:event";
 export const IPC_BACKEND_STATE = "game:backend-state";
+export const IPC_BACKEND_HEARTBEAT = "game:backend-heartbeat";
 export const IPC_SELECT_DIRECTORY = "native:select-directory";
 export const IPC_NOTIFY = "native:notify";
 
@@ -34,6 +35,7 @@ export interface GamePingResponse {
 
 export interface GameDesktopApi {
   request<T>(method: string, params?: unknown): Promise<T>;
+  heartbeat(): Promise<BackendState>;
   selectDirectory(title: string): Promise<string | undefined>;
   notify(title: string, body: string): Promise<void>;
   onEvent(listener: (event: unknown) => void): () => void;

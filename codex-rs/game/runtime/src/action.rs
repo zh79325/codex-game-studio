@@ -30,8 +30,6 @@ pub enum ActionProtocolError {
     UnexpectedTarget(&'static str),
     #[error("handoff 必须指定当前阶段允许的其他 Agent")]
     InvalidHandoff,
-    #[error("专业 Agent 完成工作后必须 handoff 回总管，不能直接 done")]
-    SpecialistMustReturnToDirector,
     #[error("payload.choices 最多四组且每组至少两个不同选项")]
     InvalidChoices,
     #[error("包含 choices 时 action 必须是 ask_user")]
@@ -64,8 +62,17 @@ pub fn parse_agent_turn(
     }
     let json = output[body_start..end].trim();
     let value = parse_json_without_duplicate_keys(json)?;
-    let action: AgentAction = serde_json::from_value(value)
+    let mut action: AgentAction = serde_json::from_value(value)
         .map_err(|error| ActionProtocolError::InvalidJson(error.to_string()))?;
+    if current_agent != director_agent
+        && matches!(
+            action.action,
+            AgentActionKind::Handoff | AgentActionKind::Done
+        )
+    {
+        action.action = AgentActionKind::Handoff;
+        action.target_agent = Some(director_agent.to_string());
+    }
     validate_action(&action, current_agent, director_agent, allowed_handoffs)?;
     Ok(AgentTurnOutput {
         text: output[..start].trim_end().to_string(),
@@ -104,9 +111,6 @@ fn validate_action(
         AgentActionKind::Done => {
             if action.target_agent.is_some() {
                 return Err(ActionProtocolError::UnexpectedTarget("done"));
-            }
-            if current_agent != director_agent {
-                return Err(ActionProtocolError::SpecialistMustReturnToDirector);
             }
         }
         AgentActionKind::Blocked => {
@@ -533,22 +537,33 @@ mod tests {
     }
 
     #[test]
-    fn specialists_must_return_control_to_the_director() {
-        let done = output(json!({
+    fn specialists_always_return_control_to_the_director() {
+        let reviewer_done = output(json!({
             "action": "done",
             "target_agent": null,
-            "reason": "设定编写完成",
-            "payload": {}
+            "reason": "设定审校完成",
+            "payload": {
+                "verdict": {
+                    "token": "SPEC-CHECK",
+                    "decision": "CONCERNS",
+                    "sections": { "模糊表述": ["需要补充材质数值"] },
+                    "constraints": []
+                }
+            }
         }));
+        let parsed = parse_agent_turn(
+            &reviewer_done,
+            "spec_reviewer",
+            "studio_director",
+            &["studio_director".to_string()],
+        )
+        .expect("specialist done should return to director");
+        assert_eq!(parsed.action.action, AgentActionKind::Handoff);
         assert_eq!(
-            parse_agent_turn(
-                &done,
-                "spec_writer",
-                "studio_director",
-                &["studio_director".to_string()],
-            ),
-            Err(ActionProtocolError::SpecialistMustReturnToDirector)
+            parsed.action.target_agent.as_deref(),
+            Some("studio_director")
         );
+        assert!(parsed.action.payload.verdict.is_some());
 
         let direct_handoff = output(json!({
             "action": "handoff",
@@ -556,14 +571,17 @@ mod tests {
             "reason": "交给审校继续处理",
             "payload": {}
         }));
+        let parsed = parse_agent_turn(
+            &direct_handoff,
+            "spec_writer",
+            "studio_director",
+            &["studio_director".to_string()],
+        )
+        .expect("specialist handoff should be routed through director");
+        assert_eq!(parsed.action.action, AgentActionKind::Handoff);
         assert_eq!(
-            parse_agent_turn(
-                &direct_handoff,
-                "spec_writer",
-                "studio_director",
-                &["studio_director".to_string(), "spec_reviewer".to_string()],
-            ),
-            Err(ActionProtocolError::InvalidHandoff)
+            parsed.action.target_agent.as_deref(),
+            Some("studio_director")
         );
 
         let return_to_director = output(json!({

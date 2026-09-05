@@ -297,7 +297,7 @@ export default function ProjectWorkspacePage() {
         <Alert
           type="warning"
           showIcon
-          message="当前为只读模式，所有提交操作已禁用。"
+          title="当前为只读模式，所有提交操作已禁用。"
         />
       )}
       <Row gutter={[16, 16]} align="stretch">

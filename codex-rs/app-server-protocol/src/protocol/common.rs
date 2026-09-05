@@ -573,6 +573,30 @@ client_request_definitions! {
         serialization: global("game"),
         response: v2::GameProjectFinalizeResponse,
     },
+    #[experimental("game/speech/start")]
+    GameSpeechStart => "game/speech/start" {
+        params: v2::GameSpeechStartParams,
+        serialization: global("game-speech"),
+        response: v2::GameSpeechStartResponse,
+    },
+    #[experimental("game/speech/chunk")]
+    GameSpeechChunk => "game/speech/chunk" {
+        params: v2::GameSpeechChunkParams,
+        serialization: global("game-speech"),
+        response: v2::GameSpeechChunkResponse,
+    },
+    #[experimental("game/speech/finish")]
+    GameSpeechFinish => "game/speech/finish" {
+        params: v2::GameSpeechFinishParams,
+        serialization: global("game-speech"),
+        response: v2::GameSpeechFinishResponse,
+    },
+    #[experimental("game/speech/cancel")]
+    GameSpeechCancel => "game/speech/cancel" {
+        params: v2::GameSpeechCancelParams,
+        serialization: global("game-speech"),
+        response: v2::GameSpeechCancelResponse,
+    },
     #[experimental("game/conversation/ensure")]
     GameConversationEnsure => "game/conversation/ensure" {
         params: v2::GameConversationEnsureParams,
@@ -2156,6 +2180,12 @@ server_notification_definitions! {
     GameArtifactCommitted => "game/artifact/committed" (v2::GameArtifactCommittedNotification),
     #[experimental("game/recovery/status")]
     GameRecoveryStatus => "game/recovery/status" (v2::GameRecoveryStatusNotification),
+    #[experimental("game/speech/transcript")]
+    GameSpeechTranscript => "game/speech/transcript" (v2::GameSpeechTranscriptNotification),
+    #[experimental("game/speech/completed")]
+    GameSpeechCompleted => "game/speech/completed" (v2::GameSpeechCompletedNotification),
+    #[experimental("game/speech/error")]
+    GameSpeechError => "game/speech/error" (v2::GameSpeechErrorNotification),
     #[experimental("thread/project/updated")]
     ThreadProjectUpdated => "thread/project/updated" (v2::ThreadProjectUpdatedNotification),
     #[experimental("thread/environment/connected")]

@@ -73,7 +73,7 @@ export default function InteractionDrawer({
       rootClassName="interaction-drawer"
       title="待完成交互"
       placement="bottom"
-      height="min(78dvh, 760px)"
+      size="min(78dvh, 760px)"
       open={open}
       closable={false}
       maskClosable={false}

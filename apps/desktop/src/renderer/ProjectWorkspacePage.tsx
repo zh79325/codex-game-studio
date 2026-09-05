@@ -8,7 +8,6 @@ import {
   Col,
   Form,
   Input,
-  List,
   Modal,
   Row,
   Space,
@@ -160,7 +159,7 @@ export default function ProjectWorkspacePage() {
       )}
       <Row gutter={[16, 16]} align="stretch">
         <Col xs={24} xl={7}>
-          <Space direction="vertical" className="workspace-main">
+          <Space orientation="vertical" className="workspace-main">
             <Card
               title="立项流程"
               className="content-card"
@@ -177,7 +176,7 @@ export default function ProjectWorkspacePage() {
                 ) : null
               }
             >
-              <Space direction="vertical" className="workspace-main">
+              <Space orientation="vertical" className="workspace-main">
                 <div>
                   <Space align="center" wrap>
                     <Typography.Text strong>
@@ -200,7 +199,7 @@ export default function ProjectWorkspacePage() {
                   </Typography.Text>
                 </div>
                 <Steps
-                  direction="vertical"
+                  orientation="vertical"
                   current={currentStep}
                   items={projectSteps}
                 />
@@ -224,33 +223,31 @@ export default function ProjectWorkspacePage() {
                 <Typography.Text type="secondary">
                   确认 Art Bible 和项目名称后才能创建角色。
                 </Typography.Text>
+              ) : characters.data?.length ? (
+                <div className="entity-list">
+                  {characters.data.map((character) => (
+                    <div className="entity-list-item" key={character.id}>
+                      <div className="entity-list-content">
+                        <Typography.Text>{character.name}</Typography.Text>
+                        <Typography.Text type="secondary">
+                          {character.group ?? "未分组"} · {character.state}
+                        </Typography.Text>
+                      </div>
+                      <Button
+                        type="link"
+                        onClick={() =>
+                          navigate(
+                            `/projects/${projectId}/characters/${character.id}`,
+                          )
+                        }
+                      >
+                        进入
+                      </Button>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                <List
-                  dataSource={characters.data ?? []}
-                  locale={{ emptyText: "还没有角色" }}
-                  renderItem={(character) => (
-                    <List.Item
-                      actions={[
-                        <Button
-                          key="open"
-                          type="link"
-                          onClick={() =>
-                            navigate(
-                              `/projects/${projectId}/characters/${character.id}`,
-                            )
-                          }
-                        >
-                          进入
-                        </Button>,
-                      ]}
-                    >
-                      <List.Item.Meta
-                        title={character.name}
-                        description={`${character.group ?? "未分组"} · ${character.state}`}
-                      />
-                    </List.Item>
-                  )}
-                />
+                <Typography.Text type="secondary">还没有角色</Typography.Text>
               )}
             </Card>
           </Space>
@@ -310,7 +307,7 @@ export default function ProjectWorkspacePage() {
             <Input placeholder="project-code" />
           </Form.Item>
           {latestNaming.length > 0 && (
-            <Space direction="vertical" className="workspace-main">
+            <Space orientation="vertical" className="workspace-main">
               <Typography.Text type="secondary">Agent 建议</Typography.Text>
               {latestNaming.map((suggestion) => (
                 <Button

@@ -14,6 +14,7 @@ pub enum AiCapability {
     VideoTextToVideo,
     VideoImageToVideo,
     Model3d,
+    SpeechRecognition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub enum LimitKind {
     TotalTokens,
     Tokens,
     Credits,
+    DurationSeconds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ pub enum AgentCapability {
     Model3d,
     T2v,
     I2v,
+    Speech,
 }
 
 impl AgentCapability {
@@ -98,6 +101,7 @@ impl AgentCapability {
             Self::Model3d => AiCapability::Model3d,
             Self::T2v => AiCapability::VideoTextToVideo,
             Self::I2v => AiCapability::VideoImageToVideo,
+            Self::Speech => AiCapability::SpeechRecognition,
         }
     }
 }

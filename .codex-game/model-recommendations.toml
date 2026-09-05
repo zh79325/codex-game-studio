@@ -405,3 +405,22 @@ limit_kind = "credits"
 default_period = "total"
 params = {}
 remark = "image-to-3d / rigging / animations / text-to-motion 全链路，按 consumed_credits 计量。阶段三接入"
+
+[[presets]]
+code = "volcengine-asr"
+vendor = "火山引擎"
+plan = "豆包流式输入语音识别 2.0"
+label = "火山引擎 · 豆包流式输入语音识别 2.0"
+base_url = "wss://openspeech.bytedance.com"
+driver = "volcengine_asr"
+auth_style = "x-api-key"
+
+[[presets.models]]
+model_id = "bigmodel"
+capabilities = ["speech_recognition"]
+driver = "volcengine_asr"
+api_path = "/api/v3/sauc/bigmodel_nostream"
+limit_kind = "duration_seconds"
+default_period = "month"
+params = { resource_id = "volc.seedasr.sauc.duration", sample_rate = 16000, channels = 1, chunk_ms = 200 }
+remark = "豆包流式输入语音识别模型 2.0，使用新版控制台 X-Api-Key，录音结束后提交，按音频时长计量。"

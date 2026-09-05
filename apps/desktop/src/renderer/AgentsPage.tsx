@@ -13,7 +13,6 @@ import {
   Form,
   Input,
   InputNumber,
-  List,
   Modal,
   Select,
   Space,
@@ -40,6 +39,7 @@ const limitKinds = [
   "total_tokens",
   "tokens",
   "credits",
+  "duration_seconds",
 ];
 const limitKindLabels: Record<string, string> = {
   calls: "调用次数",
@@ -49,6 +49,7 @@ const limitKindLabels: Record<string, string> = {
   total_tokens: "总 Token",
   tokens: "Token",
   credits: "Credits",
+  duration_seconds: "语音时长（秒）",
 };
 const periodOptions = [
   "second",
@@ -78,7 +79,7 @@ export default function AgentsPage() {
     {
       title: "Agent",
       render: (_, agent) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <Space>
             <RobotOutlined />
             <Typography.Text strong>{agent.role}</Typography.Text>
@@ -98,7 +99,7 @@ export default function AgentsPage() {
       title: "能力",
       width: 190,
       render: (_, agent) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <Tag color="blue">{agent.capability}</Tag>
           <Typography.Text type="secondary">
             {agent.requiredModelCapability}
@@ -344,53 +345,24 @@ function AgentBindingModal({
         width="clamp(720px, 55vw, 960px)"
         destroyOnHidden
       >
-        <Space direction="vertical" className="workspace-main" size="middle">
+        <Space orientation="vertical" className="workspace-main" size="middle">
           <Typography.Text type="secondary">
             仅显示已启用且支持 {agent?.requiredModelCapability ?? "所需能力"}{" "}
             的模型；调用顺序按 Provider 优先级和模型排序确定。
           </Typography.Text>
-          <List
-            bordered
-            locale={{ emptyText: "未绑定模型，执行时将返回 blocked" }}
-            dataSource={modelIds}
-            renderItem={(id, index) => {
-              const entry = modelMap.get(id);
-              return (
-                <List.Item
-                  actions={[
-                    entry && (
-                      <Button
-                        key="limit"
-                        type="link"
-                        size="small"
-                        onClick={() => openLimits(entry.provider, entry.model)}
-                      >
-                        限流
-                      </Button>
-                    ),
-                    <Button
-                      key="remove"
-                      type="text"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() =>
-                        setModelIds((current) =>
-                          current.filter((item) => item !== id),
-                        )
-                      }
-                    />,
-                  ]}
-                >
-                  <List.Item.Meta
-                    title={
+          {modelIds.length ? (
+            <div className="entity-list binding-list">
+              {modelIds.map((id, index) => {
+                const entry = modelMap.get(id);
+                return (
+                  <div className="entity-list-item" key={id}>
+                    <div className="entity-list-content">
                       <Space>
                         <Tag color="geekblue">#{index + 1}</Tag>
                         {entry?.model.displayName ?? id}
                       </Space>
-                    }
-                    description={
-                      entry ? (
-                        <Space direction="vertical" size={4}>
+                      {entry ? (
+                        <Space orientation="vertical" size={4}>
                           <Typography.Text type="secondary">
                             {entry.provider.name} · {entry.model.modelId}
                           </Typography.Text>
@@ -417,15 +389,40 @@ function AgentBindingModal({
                           </Space>
                         </Space>
                       ) : (
-                        "模型已不存在，请移除后保存"
-                      )
-                    }
-                  />
-                </List.Item>
-              );
-            }}
-          />
-          <Space direction="vertical" size={4} className="workspace-main">
+                        <Typography.Text type="secondary">
+                          模型已不存在，请移除后保存
+                        </Typography.Text>
+                      )}
+                    </div>
+                    <Space>
+                      {entry && (
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => openLimits(entry.provider, entry.model)}
+                        >
+                          限流
+                        </Button>
+                      )}
+                      <Button
+                        type="text"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() =>
+                          setModelIds((current) =>
+                            current.filter((item) => item !== id),
+                          )
+                        }
+                      />
+                    </Space>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <Empty description="未绑定模型，执行时将返回 blocked" />
+          )}
+          <Space orientation="vertical" size={4} className="workspace-main">
             <Typography.Text type="secondary">
               第一步：选择 Provider
             </Typography.Text>
@@ -512,7 +509,7 @@ function AgentLimitFields() {
   return (
     <Form.List name="limits">
       {(fields, { add, remove }) => (
-        <Space direction="vertical" className="workspace-main">
+        <Space orientation="vertical" className="workspace-main">
           {fields.map((field) => (
             <Space key={field.key} align="start" wrap>
               <Form.Item

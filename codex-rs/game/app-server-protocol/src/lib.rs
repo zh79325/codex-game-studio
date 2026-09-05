@@ -174,6 +174,37 @@ game_dto!(GameArtifactCommittedNotification {
 game_dto!(GameRecoveryStatusNotification {
     status: GameBackendStatus
 });
+game_dto!(GameSpeechTranscriptNotification {
+    session_id: String,
+    text: String,
+    definite: bool
+});
+game_dto!(GameSpeechCompletedNotification {
+    session_id: String,
+    text: String,
+    duration_ms: u64
+});
+game_dto!(GameSpeechErrorNotification {
+    session_id: String,
+    message: String
+});
+
+empty_params!(GameSpeechStartParams);
+game_dto!(GameSpeechStartResponse {
+    session_id: String,
+    sample_rate: u32,
+    channels: u16,
+    chunk_ms: u32
+});
+game_dto!(GameSpeechChunkParams {
+    session_id: String,
+    audio_base64: String
+});
+empty_params!(GameSpeechChunkResponse);
+game_dto!(GameSpeechFinishParams { session_id: String });
+empty_params!(GameSpeechFinishResponse);
+game_dto!(GameSpeechCancelParams { session_id: String });
+empty_params!(GameSpeechCancelResponse);
 
 game_dto!(GameProjectInspectParams { root: String });
 game_dto!(GameProjectInspectResponse {

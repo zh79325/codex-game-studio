@@ -5002,6 +5002,66 @@
           "properties": {
             "method": {
               "enum": [
+                "game/speech/transcript"
+              ],
+              "title": "Game/speech/transcriptNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/GameSpeechTranscriptNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/speech/transcriptNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/speech/completed"
+              ],
+              "title": "Game/speech/completedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/GameSpeechCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/speech/completedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "game/speech/error"
+              ],
+              "title": "Game/speech/errorNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/GameSpeechErrorNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Game/speech/errorNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/project/updated"
               ],
               "title": "Thread/project/updatedNotificationMethod",
@@ -13701,6 +13761,67 @@
           "status"
         ],
         "title": "GameRecoveryStatusNotification",
+        "type": "object"
+      },
+      "GameSpeechCompletedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "durationMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "durationMs",
+          "sessionId",
+          "text"
+        ],
+        "title": "GameSpeechCompletedNotification",
+        "type": "object"
+      },
+      "GameSpeechErrorNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "sessionId"
+        ],
+        "title": "GameSpeechErrorNotification",
+        "type": "object"
+      },
+      "GameSpeechTranscriptNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "definite": {
+            "type": "boolean"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "definite",
+          "sessionId",
+          "text"
+        ],
+        "title": "GameSpeechTranscriptNotification",
         "type": "object"
       },
       "GameTask": {

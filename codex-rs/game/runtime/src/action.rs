@@ -199,19 +199,18 @@ fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
             "asset_specs 缺少必填字段".to_string(),
         ));
     }
-    if let Some(verdict) = &payload.verdict {
-        if !matches!(verdict.token.as_str(), "SPEC-CHECK" | "VIEW-CHECK")
+    if let Some(verdict) = &payload.verdict
+        && (!matches!(verdict.token.as_str(), "SPEC-CHECK" | "VIEW-CHECK")
             || !matches!(verdict.decision.as_str(), "APPROVE" | "CONCERNS" | "REJECT")
             || verdict.sections.is_empty()
             || verdict
                 .constraints
                 .iter()
-                .any(|item| item.item.trim().is_empty() || item.value.trim().is_empty())
-        {
-            return Err(ActionProtocolError::InvalidPayload(
-                "verdict 结构或枚举值不合法".to_string(),
-            ));
-        }
+                .any(|item| item.item.trim().is_empty() || item.value.trim().is_empty()))
+    {
+        return Err(ActionProtocolError::InvalidPayload(
+            "verdict 结构或枚举值不合法".to_string(),
+        ));
     }
     if let Some(result) = &payload.result {
         let expected = match result.status {

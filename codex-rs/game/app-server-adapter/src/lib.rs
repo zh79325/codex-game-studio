@@ -34,6 +34,8 @@ use std::path::PathBuf;
 
 mod ai_config;
 
+pub use ai_config::RealtimeSpeechRoute;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameTurnProjection {
     pub attempt_id: String,
@@ -814,6 +816,9 @@ fn capability_for_agent(agent_code: &str) -> Result<Capability, String> {
         AgentCapability::Model3d => Capability::Model3d,
         AgentCapability::T2v => Capability::VideoTextToVideo,
         AgentCapability::I2v => Capability::VideoImageToVideo,
+        AgentCapability::Speech => {
+            return Err("实时语音 Agent 只能通过 game/speech API 调用".to_string());
+        }
     })
 }
 

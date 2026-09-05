@@ -118,9 +118,25 @@ impl GameAppServerAdapter {
         execution: &E,
         turn_id: &str,
         output: Option<&str>,
-        failed: bool,
+        terminal_error: Option<&str>,
     ) -> Result<Option<GameTurnProjection>, GameServiceError> {
-        let completion = if failed {
+        let failed = terminal_error.is_some();
+        let completion = if let Some(error) = terminal_error {
+            if is_output_length_error(error)
+                && let Some(context) = self.runtime.service().turn_attempt_context(turn_id).await?
+                && let Some(audit_context) =
+                    self.runtime.service().turn_audit_context(turn_id).await?
+            {
+                let (_, store) = self
+                    .runtime
+                    .service()
+                    .execution_context(&context.conversation_id)?;
+                if let Ok(Some(retry)) = self
+                    .runtime
+                    .orchestrator()
+                    .retry_output_length(execution, store.as_ref(), &context, audit_context)
+                    .await { return Ok(Some(retry_projection(retry))) }
+            }
             self.runtime
                 .service()
                 .complete_turn(turn_id, TaskAttemptStatus::Failed)
@@ -155,21 +171,7 @@ impl GameAppServerAdapter {
                         Err(String::new())
                     };
                     match retry_error {
-                        Ok(retry) => {
-                            return Ok(Some(GameTurnProjection {
-                                attempt_id: retry.attempt_id,
-                                task_id: retry.task_id,
-                                conversation_id: retry.conversation_id,
-                                turn_id: Some(retry.turn_id),
-                                status: "running".to_string(),
-                                agent_code: Some(retry.agent_code),
-                                handoff_target: None,
-                                handoff_reason: None,
-                                director_resume_reason: None,
-                                character: None,
-                                generations: Vec::new(),
-                            }));
-                        }
+                        Ok(retry) => return Ok(Some(retry_projection(retry))),
                         Err(error) => {
                             self.runtime
                                 .service()
@@ -1051,6 +1053,28 @@ impl GameAppServerAdapter {
     }
 }
 
+fn is_output_length_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("incomplete response returned, reason: length")
+        || (normalized.contains("finish_reason") && normalized.contains("length"))
+}
+
+fn retry_projection(retry: codex_game_runtime::TaskAttemptRetry) -> GameTurnProjection {
+    GameTurnProjection {
+        attempt_id: retry.attempt_id,
+        task_id: retry.task_id,
+        conversation_id: retry.conversation_id,
+        turn_id: Some(retry.turn_id),
+        status: "running".to_string(),
+        agent_code: Some(retry.agent_code),
+        handoff_target: None,
+        handoff_reason: None,
+        director_resume_reason: None,
+        character: None,
+        generations: Vec::new(),
+    }
+}
+
 fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> GameTurnProjection {
     let (handoff_target, handoff_reason) = completion
         .action
@@ -1494,7 +1518,7 @@ mod tests {
             r#"{"choices":[{"item":"风格","options":["写实","卡通"],"recommended":["卡通"],"multiple":false}]}"#,
         );
         adapter
-            .observe_turn_completed(&execution, &first_turn, Some(&ask_user), false)
+            .observe_turn_completed(&execution, &first_turn, Some(&ask_user), None)
             .await
             .expect("ask user completion")
             .expect("projection");
@@ -1502,7 +1526,7 @@ mod tests {
         let second_turn = submit(&adapter, &execution, &conversation_id, "选择卡通").await;
         let handoff = action("handoff", Some("game_designer"), "交给美术设计师细化", "{}");
         adapter
-            .observe_turn_completed(&execution, &second_turn, Some(&handoff), false)
+            .observe_turn_completed(&execution, &second_turn, Some(&handoff), None)
             .await
             .expect("handoff completion")
             .expect("projection");
@@ -1517,7 +1541,7 @@ mod tests {
                 &execution,
                 third.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&specialist_done),
-                false,
+                None,
             )
             .await
             .expect("return completion")
@@ -1537,7 +1561,7 @@ mod tests {
                 &execution,
                 director.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&done),
-                false,
+                None,
             )
             .await
             .expect("director completion")
@@ -1566,7 +1590,7 @@ mod tests {
         let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
         let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
         adapter
-            .observe_turn_completed(&execution, &first_turn, Some(&to_designer), false)
+            .observe_turn_completed(&execution, &first_turn, Some(&to_designer), None)
             .await
             .expect("director handoff")
             .expect("projection");
@@ -1586,7 +1610,7 @@ mod tests {
                 &execution,
                 designer.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&draft),
-                false,
+                None,
             )
             .await
             .expect("draft completion")
@@ -1634,11 +1658,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_length_failure_increases_token_limit_until_cap() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let mut turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let length_error =
+            "stream disconnected before completion: Incomplete response returned, reason: length";
+
+        for (retry_number, expected_limit) in
+            [32_000, 64_000, 128_000, 200_000].into_iter().enumerate()
+        {
+            let projection = adapter
+                .observe_turn_completed(&execution, &turn_id, None, Some(length_error))
+                .await
+                .expect("length retry")
+                .expect("retry projection");
+            assert_eq!(projection.status, "running");
+            turn_id = projection.turn_id.expect("retry turn id");
+            let requests = execution.turn_requests.lock().expect("turn request lock");
+            assert_eq!(
+                requests[retry_number + 1].max_output_tokens,
+                Some(expected_limit)
+            );
+        }
+
+        let projection = adapter
+            .observe_turn_completed(&execution, &turn_id, None, Some(length_error))
+            .await
+            .expect("final length failure")
+            .expect("failed projection");
+        assert_eq!(projection.status, "failed");
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn non_length_failure_does_not_retry() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+
+        let projection = adapter
+            .observe_turn_completed(
+                &execution,
+                &turn_id,
+                None,
+                Some("stream disconnected before completion: connection reset"),
+            )
+            .await
+            .expect("terminal failure")
+            .expect("failed projection");
+
+        assert_eq!(projection.status, "failed");
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn action_contract_retry_can_recover_with_a_valid_output() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
         let retry = adapter
-            .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), false)
+            .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), None)
             .await
             .expect("contract retry")
             .expect("retry projection");
@@ -1649,7 +1726,7 @@ mod tests {
                 &execution,
                 retry.turn_id.as_deref().expect("retry turn id"),
                 Some(&valid),
-                false,
+                None,
             )
             .await
             .expect("valid retry completion")
@@ -1673,7 +1750,7 @@ mod tests {
 
         for retry_number in 1..=MAX_ACTION_CONTRACT_RETRIES {
             let projection = adapter
-                .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), false)
+                .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), None)
                 .await
                 .expect("contract retry")
                 .expect("retry projection");
@@ -1699,7 +1776,7 @@ mod tests {
         assert!(retrying_assistant.content.is_empty());
 
         let projection = adapter
-            .observe_turn_completed(&execution, &turn_id, Some("仍然格式错误"), false)
+            .observe_turn_completed(&execution, &turn_id, Some("仍然格式错误"), None)
             .await
             .expect("final contract failure")
             .expect("failed projection");

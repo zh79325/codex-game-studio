@@ -475,6 +475,7 @@ impl Session {
                 NewTurnContextOptions {
                     guardian_ticket: start_options.guardian_ticket,
                     final_output_json_schema: start_options.final_output_json_schema,
+                    max_output_tokens: start_options.max_output_tokens,
                     cyber_access_program: start_options.cyber_access_program,
                 },
             )

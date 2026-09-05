@@ -551,6 +551,7 @@ impl LunaSampler {
             service_tier: None,
             prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
             text: None,
+            max_output_tokens: None,
             client_metadata: None,
             access_programs: None,
         };

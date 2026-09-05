@@ -128,6 +128,7 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             allowed_handoffs: Vec::new(),
             action_protocol: "json".to_string(),
         },
+        max_output_tokens: None,
         audit_context: None,
     }
 }

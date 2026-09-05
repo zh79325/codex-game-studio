@@ -133,6 +133,7 @@ fn serializes_text_verbosity_when_set() {
             verbosity: Some(OpenAiVerbosity::Low),
             format: None,
         }),
+        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };
@@ -178,6 +179,7 @@ fn serializes_text_schema_with_strict_format() {
         prompt_cache_key: None,
         service_tier: None,
         text: Some(text_controls),
+        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };
@@ -240,12 +242,39 @@ fn omits_text_when_not_set() {
         prompt_cache_key: None,
         service_tier: None,
         text: None,
+        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
     assert!(v.get("text").is_none());
+}
+
+#[test]
+fn serializes_max_output_tokens_when_set() {
+    let req = ResponsesApiRequest {
+        model: "gpt-5.4".to_string(),
+        instructions: "i".to_string(),
+        input: vec![],
+        tools: Some(empty_tools().into()),
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: true,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: vec![],
+        prompt_cache_key: None,
+        service_tier: None,
+        text: None,
+        max_output_tokens: Some(32_000),
+        client_metadata: None,
+        access_programs: None,
+    };
+
+    let value = serde_json::to_value(&req).expect("json");
+    assert_eq!(value.get("max_output_tokens"), Some(&32_000.into()));
 }
 
 #[test]
@@ -265,6 +294,7 @@ fn serializes_flex_service_tier_when_set() {
         prompt_cache_key: None,
         service_tier: Some(ServiceTier::Flex.to_string()),
         text: None,
+        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };

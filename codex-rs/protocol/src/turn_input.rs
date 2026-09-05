@@ -166,6 +166,8 @@ pub struct TurnStartOptions {
     /// Structured-output schema for a new turn. When steering, Core rejects
     /// the input if the active turn uses a different schema.
     pub final_output_json_schema: Option<Value>,
+    /// Maximum number of output tokens requested for this turn.
+    pub max_output_tokens: Option<u64>,
     /// Service tier for a new turn, without changing the thread's preference.
     pub service_tier: Option<String>,
     /// Parent turn lineage recorded if this request starts a new turn.

@@ -228,6 +228,7 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             })?;
             turn.start.final_output_json_schema = Some(schema);
         }
+        turn.start.max_output_tokens = request.max_output_tokens;
         let audit_registered = if let Some(context) = request.audit_context {
             register_stream_response_audit(
                 request.thread_id.clone(),

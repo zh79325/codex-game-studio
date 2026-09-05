@@ -124,6 +124,7 @@ impl PreparedTurnInputSettings {
             guardian_ticket,
             turn_trigger,
             final_output_json_schema,
+            max_output_tokens,
             service_tier,
             parent_turn_id,
             root_turn_id,
@@ -141,6 +142,7 @@ impl PreparedTurnInputSettings {
         let options = NewTurnContextOptions {
             guardian_ticket,
             final_output_json_schema,
+            max_output_tokens,
             cyber_access_program,
         };
         let turn_context = match kind {

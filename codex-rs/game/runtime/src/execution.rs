@@ -25,6 +25,7 @@ pub struct StartTurnRequest {
     pub agent_definition: String,
     pub prompt: String,
     pub context: ContextPackage,
+    pub max_output_tokens: Option<u64>,
     pub audit_context: Option<TurnAuditContext>,
 }
 

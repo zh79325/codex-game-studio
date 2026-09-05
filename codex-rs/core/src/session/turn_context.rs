@@ -187,6 +187,7 @@ impl std::fmt::Debug for TurnEnvironment {
 pub(crate) struct NewTurnContextOptions {
     pub(crate) guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) max_output_tokens: Option<u64>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
@@ -237,6 +238,7 @@ pub struct TurnContext {
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) max_output_tokens: Option<u64>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
@@ -542,6 +544,7 @@ impl TurnContext {
             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             guardian_ticket: self.guardian_ticket.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
+            max_output_tokens: self.max_output_tokens,
             dynamic_tools: self.dynamic_tools.clone(),
             turn_metadata_state: self.turn_metadata_state.clone(),
             extension_data: Arc::clone(&self.extension_data),
@@ -815,6 +818,7 @@ impl Session {
             available_models,
             unified_exec_shell_mode,
             final_output_json_schema: None,
+            max_output_tokens: None,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_state,
             extension_data,
@@ -1031,6 +1035,7 @@ impl Session {
 
         turn_context.guardian_ticket = options.guardian_ticket;
         turn_context.final_output_json_schema = options.final_output_json_schema;
+        turn_context.max_output_tokens = options.max_output_tokens;
         if turn_context.config.model_provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
             turn_context.cyber_access_program = options.cyber_access_program;
         }

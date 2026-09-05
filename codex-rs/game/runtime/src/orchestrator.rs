@@ -80,9 +80,10 @@ pub struct TaskExecution {
 }
 
 pub const MAX_ACTION_CONTRACT_RETRIES: u32 = 3;
+const OUTPUT_LENGTH_RETRY_TOKEN_LIMITS: [u64; 4] = [32_000, 64_000, 128_000, 200_000];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActionContractRetry {
+pub struct TaskAttemptRetry {
     pub attempt_id: String,
     pub task_id: String,
     pub conversation_id: String,
@@ -256,6 +257,7 @@ impl TaskOrchestrator {
                 .to_string(),
             prompt: request.prompt,
             context: request.context,
+            max_output_tokens: None,
             audit_context: Some(audit_context.clone()),
         };
         if let Err(error) = write_turn_audit_request(&audit_context, &route, &start_request) {
@@ -298,18 +300,73 @@ impl TaskOrchestrator {
         })
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "serializes contract retries per conversation+agent"
-    )]
     pub async fn retry_action_contract<E: CodexExecutionPort>(
         &self,
         execution: &E,
         store: &ProjectStore,
         context: &codex_game_store::TurnAttemptContext,
-        mut audit_context: TurnAuditContext,
+        audit_context: TurnAuditContext,
         validation_error: &str,
-    ) -> Result<ActionContractRetry, OrchestrationError> {
+    ) -> Result<TaskAttemptRetry, OrchestrationError> {
+        self.retry_task_attempt(
+            execution,
+            store,
+            context,
+            audit_context,
+            format!(
+                "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是第 {} 次自动重试。请根据校验错误修正输出，重新给出完整回复，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
+                context.attempt_no
+            ),
+            None,
+            "Action 契约",
+        )
+        .await
+    }
+
+    pub async fn retry_output_length<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        store: &ProjectStore,
+        context: &codex_game_store::TurnAttemptContext,
+        audit_context: TurnAuditContext,
+    ) -> Result<Option<TaskAttemptRetry>, OrchestrationError> {
+        let Some(max_output_tokens) = OUTPUT_LENGTH_RETRY_TOKEN_LIMITS
+            .get(context.attempt_no.saturating_sub(1) as usize)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        self.retry_task_attempt(
+            execution,
+            store,
+            context,
+            audit_context,
+            format!(
+                "系统检测到上一轮输出因达到长度上限而中断。这是第 {} 次自动重试，本轮输出上限已提高到 {max_output_tokens} tokens。请重新给出完整回复，保持内容精炼，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
+                context.attempt_no
+            ),
+            Some(max_output_tokens),
+            "输出长度",
+        )
+        .await
+        .map(Some)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serializes retries per conversation+agent"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    async fn retry_task_attempt<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        store: &ProjectStore,
+        context: &codex_game_store::TurnAttemptContext,
+        mut audit_context: TurnAuditContext,
+        prompt: String,
+        max_output_tokens: Option<u64>,
+        retry_kind: &str,
+    ) -> Result<TaskAttemptRetry, OrchestrationError> {
         let lock = self
             .binding_lock(&context.conversation_id, &context.agent_code)
             .await;
@@ -337,15 +394,13 @@ impl TaskOrchestrator {
                     ))
                 })?
                 .to_string(),
-            prompt: format!(
-                "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是第 {} 次自动重试。请根据校验错误修正输出，重新给出完整回复，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
-                retry_attempt.attempt_no - 1
-            ),
+            prompt,
             context: context.context.clone(),
+            max_output_tokens,
             audit_context: Some(audit_context.clone()),
         };
         store
-            .begin_action_contract_retry(&context.attempt_id, &retry_attempt)
+            .begin_task_attempt_retry(&context.attempt_id, &retry_attempt)
             .await?;
         let turn = match execution.start_turn(request).await {
             Ok(turn) => turn,
@@ -355,11 +410,12 @@ impl TaskOrchestrator {
                 {
                     tracing::warn!(
                         path = %audit_context.target_dir.display(),
-                        "failed to write game contract retry audit error: {audit_error}"
+                        retry_kind,
+                        "failed to write game retry audit error: {audit_error}"
                     );
                 }
                 store
-                    .rollback_action_contract_retry(&context.attempt_id, retry_attempt.id.as_str())
+                    .rollback_task_attempt_retry(&context.attempt_id, retry_attempt.id.as_str())
                     .await?;
                 return Err(error.into());
             }
@@ -367,7 +423,7 @@ impl TaskOrchestrator {
         store
             .bind_turn_to_attempt(retry_attempt.id.as_str(), &turn.turn_id, now())
             .await?;
-        Ok(ActionContractRetry {
+        Ok(TaskAttemptRetry {
             attempt_id: retry_attempt.id.as_str().to_string(),
             task_id: context.task_id.clone(),
             conversation_id: context.conversation_id.clone(),

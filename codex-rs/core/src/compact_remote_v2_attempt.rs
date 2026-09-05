@@ -81,6 +81,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
+        max_output_tokens: None,
         cyber_access_program: turn_context.cyber_access_program,
     };
 

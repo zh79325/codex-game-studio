@@ -1563,7 +1563,7 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub async fn begin_action_contract_retry(
+    pub async fn begin_task_attempt_retry(
         &self,
         current_attempt_id: &str,
         retry_attempt: &TaskAttempt,
@@ -1576,7 +1576,7 @@ impl ProjectStore {
         .bind(current_attempt_id)
         .fetch_optional(&mut *transaction)
         .await?
-        .ok_or_else(|| StoreError::Conflict("Action 契约重试的原始尝试已结束".to_string()))?;
+        .ok_or_else(|| StoreError::Conflict("自动重试的原始尝试已结束".to_string()))?;
         let task_id: String = row.try_get("task_id")?;
         let attempt_no = row.try_get::<i64, _>("attempt_no")? as u32;
         let binding_id: String = row.try_get("conversation_codex_thread_id")?;
@@ -1585,7 +1585,7 @@ impl ProjectStore {
             || retry_attempt.conversation_codex_thread_id.as_str() != binding_id
         {
             return Err(StoreError::Conflict(
-                "Action 契约重试上下文与原始尝试不一致".to_string(),
+                "自动重试上下文与原始尝试不一致".to_string(),
             ));
         }
         sqlx::query("UPDATE task_attempts SET status = 'failed' WHERE id = ?")
@@ -1609,7 +1609,7 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub async fn rollback_action_contract_retry(
+    pub async fn rollback_task_attempt_retry(
         &self,
         current_attempt_id: &str,
         retry_attempt_id: &str,
@@ -1624,7 +1624,7 @@ impl ProjectStore {
         .await?;
         if deleted.rows_affected() != 1 {
             return Err(StoreError::Conflict(
-                "Action 契约重试已经开始，无法回滚".to_string(),
+                "自动重试已经开始，无法回滚".to_string(),
             ));
         }
         let restored = sqlx::query(
@@ -1635,7 +1635,7 @@ impl ProjectStore {
         .await?;
         if restored.rows_affected() != 1 {
             return Err(StoreError::Conflict(
-                "Action 契约重试的原始尝试无法恢复".to_string(),
+                "自动重试的原始尝试无法恢复".to_string(),
             ));
         }
         sqlx::query(

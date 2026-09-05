@@ -155,7 +155,7 @@ pub(crate) fn spawn_game_event_observer(
                             execution.as_ref(),
                             &completed.turn_id,
                             completed.last_agent_message.as_deref(),
-                            completed.error.is_some(),
+                            completed.error.as_ref().map(|error| error.message.as_str()),
                         )
                         .await
                 }

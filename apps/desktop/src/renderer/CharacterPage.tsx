@@ -344,8 +344,6 @@ export default function CharacterPage() {
                     </Checkbox>
                   ))}
                   <FinalConfirmationActions
-                    disabled={!canWrite || conversation.isBusy}
-                    confirmDisabled={!hasCompleteViewSelection}
                     confirming={action.isPending}
                     onConfirm={confirmViews}
                     onSupplement={(content) => requestRevision("views", content)}
@@ -392,10 +390,6 @@ function GenerationGate({
   onConfirm: () => Promise<unknown>;
   onSupplement: (content: string) => Promise<unknown>;
 }) {
-  const canConfirmSelection = generations.some(
-    (generation) =>
-      generation.id === selectedId && canSelect(generation),
-  );
   return (
     <Card title={title} className="content-card">
       <Space orientation="vertical" className="workspace-main">
@@ -423,8 +417,6 @@ function GenerationGate({
           <Typography.Text type="secondary">尚无可确认候选</Typography.Text>
         )}
         <FinalConfirmationActions
-          disabled={disabled}
-          confirmDisabled={!canConfirmSelection}
           confirming={confirming}
           onConfirm={onConfirm}
           onSupplement={onSupplement}

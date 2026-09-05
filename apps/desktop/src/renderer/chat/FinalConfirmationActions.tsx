@@ -2,14 +2,10 @@ import { App, Button, Input, Space, Typography } from "antd";
 import { useState } from "react";
 
 export default function FinalConfirmationActions({
-  disabled = false,
-  confirmDisabled = false,
   confirming = false,
   onConfirm,
   onSupplement,
 }: {
-  disabled?: boolean;
-  confirmDisabled?: boolean;
   confirming?: boolean;
   onConfirm: () => Promise<unknown>;
   onSupplement: (content: string) => Promise<unknown>;
@@ -59,7 +55,6 @@ export default function FinalConfirmationActions({
       <Input.TextArea
         value={supplement}
         autoSize={{ minRows: 3, maxRows: 6 }}
-        disabled={disabled || submittingSupplement || confirmationBusy}
         placeholder="输入需要补充或调整的内容"
         onChange={(event) => setSupplement(event.target.value)}
       />
@@ -67,14 +62,12 @@ export default function FinalConfirmationActions({
         <Button
           type="primary"
           loading={confirmationBusy}
-          disabled={disabled || confirmDisabled || submittingSupplement}
           onClick={() => void submitConfirmation()}
         >
           没问题，确认设定
         </Button>
         <Button
           loading={submittingSupplement}
-          disabled={disabled || confirmationBusy}
           onClick={() => void submitSupplement()}
         >
           我还有需要补充的

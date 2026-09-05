@@ -62,7 +62,11 @@ export default function InteractionDrawer({
     if (await onSubmitFeedback(content)) closeDrawer();
   };
   const confirmDrafts = async () => {
-    if (dedicatedDraft && onConfirmDraft) {
+    if (dedicatedDraft) {
+      if (!onConfirmDraft) throw new Error("当前内容缺少确认操作");
+      if (!(canConfirmDraft?.(dedicatedDraft) ?? true)) {
+        throw new Error("当前内容尚未满足确认条件");
+      }
       await onConfirmDraft(dedicatedDraft);
     } else if (onCommitDrafts) {
       await onCommitDrafts(visibleDrafts.map((draft) => draft.id));
@@ -71,9 +75,6 @@ export default function InteractionDrawer({
     }
     closeDrawer();
   };
-  const confirmDisabled = dedicatedDraft
-    ? !onConfirmDraft || !(canConfirmDraft?.(dedicatedDraft) ?? true)
-    : !onCommitDrafts;
 
   return (
     <Drawer
@@ -104,8 +105,6 @@ export default function InteractionDrawer({
         )}
         {visibleDrafts.length > 0 && (
           <FinalConfirmationActions
-            disabled={disabled}
-            confirmDisabled={confirmDisabled}
             confirming={confirmingDraft}
             onConfirm={confirmDrafts}
             onSupplement={submitFeedback}

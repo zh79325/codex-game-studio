@@ -44,15 +44,15 @@ export type ChatPanelProps = {
   onSend: (content: string, recipientAgentCode?: string) => Promise<unknown>;
   onInterrupt: () => Promise<unknown>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
+  onConfirmDraft?: (draft: ArtifactDraft) => Promise<unknown>;
+  canConfirmDraft?: (draft: ArtifactDraft) => boolean;
+  confirmingDraft?: boolean;
+  onSubmitDraftFeedback?: (content: string) => Promise<unknown>;
   choiceInteractionEnabled?: boolean;
   onResolveChoice?: (
     groups: ChoiceGroup[],
     submission: ChoiceSubmission,
   ) => Promise<boolean>;
-  renderDraftAction?: (
-    draft: ArtifactDraft,
-    closeDrawer: () => void,
-  ) => React.ReactNode;
 };
 
 export default function ChatPanel(props: ChatPanelProps) {
@@ -122,6 +122,11 @@ export default function ChatPanel(props: ChatPanelProps) {
     }
     return send(submission.content);
   };
+  const submitDraftFeedback = async (feedback: string) => {
+    if (!props.onSubmitDraftFeedback) return send(feedback);
+    await props.onSubmitDraftFeedback(feedback);
+    return true;
+  };
 
   return (
     <>
@@ -189,9 +194,11 @@ export default function ChatPanel(props: ChatPanelProps) {
         drafts={props.busy ? [] : pendingDrafts}
         disabled={!props.canWrite || (props.busy && !pendingChoice)}
         onSubmitChoice={submitChoice}
-        onSubmitFeedback={send}
+        onSubmitFeedback={submitDraftFeedback}
         onCommitDrafts={props.onCommitDrafts}
-        renderDraftAction={props.renderDraftAction}
+        onConfirmDraft={props.onConfirmDraft}
+        canConfirmDraft={props.canConfirmDraft}
+        confirmingDraft={props.confirmingDraft}
       />
     </>
   );

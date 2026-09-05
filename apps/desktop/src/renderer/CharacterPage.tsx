@@ -1,24 +1,22 @@
-import { CheckOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
-  Button,
   Card,
   Checkbox,
   Col,
-  Input,
-  Modal,
+  Radio,
   Row,
   Space,
   Steps,
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
+import FinalConfirmationActions from "./chat/FinalConfirmationActions";
 import { useConversation } from "./chat/useConversation";
 import type { ArtifactDraft, Generation } from "./types";
 
@@ -45,11 +43,8 @@ export default function CharacterPage() {
   const queryClient = useQueryClient();
   const { projectId = "", characterId = "" } = useParams();
   const { canWrite, setActiveProject } = useStudio();
+  const [selectedRender, setSelectedRender] = useState<string>();
   const [selectedViews, setSelectedViews] = useState<string[]>([]);
-  const [rejectOpen, setRejectOpen] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
-  const [requestingRedraw, setRequestingRedraw] = useState(false);
-  const draftDrawerCloseRef = useRef<(() => void) | null>(null);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -135,10 +130,10 @@ export default function CharacterPage() {
     },
     onSuccess: async () => {
       message.success("人工门禁已确认");
+      setSelectedRender(undefined);
       setSelectedViews([]);
       await refresh();
     },
-    onError: (error: Error) => message.error(error.message),
   });
 
   const character = detail.data?.character;
@@ -169,76 +164,84 @@ export default function CharacterPage() {
         item.variant === "quad" &&
         hasApprovedVerdict("VIEW-CHECK", item.createdAt),
     );
+  const hasApprovedRenderSelection = renderGenerations.some(
+    (item) =>
+      item.id === selectedRender &&
+      hasApprovedVerdict("VIEW-CHECK", item.createdAt),
+  );
 
-  const renderDraftAction = (draft: ArtifactDraft, closeDrawer: () => void) =>
-    character?.state === "S0_spec_drafting" &&
-    draft.targetPath === "docs/角色定稿.md" ? (
-      <Space size="small">
-        <Button
-          type="primary"
-          size="small"
-          icon={<CheckOutlined />}
-          disabled={
-            !canWrite || !hasApprovedVerdict("SPEC-CHECK", draft.createdAt)
-          }
-          loading={action.isPending}
-          onClick={() =>
-            action.mutate(
-              { type: "spec", draftId: draft.id },
-              { onSuccess: closeDrawer },
-            )
-          }
-        >
-          保存并确认设定
-        </Button>
-        <Button
-          size="small"
-          icon={<ReloadOutlined />}
-          disabled={!canWrite || conversation.isBusy}
-          onClick={() => {
-            draftDrawerCloseRef.current = closeDrawer;
-            setRejectOpen(true);
-          }}
-        >
-          要求修改
-        </Button>
-      </Space>
-    ) : null;
-
-  const requestRedraw = async () => {
-    const reason = rejectReason.trim();
-    if (!reason || !character) return;
-    const stage =
-      character.state === "S0_spec_drafting"
-        ? "spec"
-        : character.state === "S2_render_generated"
-          ? "render"
-          : character.state === "S4_views_generated"
-            ? "views"
-            : null;
-    if (!stage) return;
-    setRequestingRedraw(true);
-    try {
-      if (stage === "spec")
-        await charactersApi.rejectSpec(projectId, characterId, reason);
-      if (stage === "render")
-        await charactersApi.rejectRender(projectId, characterId, reason);
-      if (stage === "views")
-        await charactersApi.rejectViews(projectId, characterId, reason);
-      await conversation.send(
-        `用户已通过人工门禁拒绝当前 ${stage} 候选。必须按以下原因修订或重画：${reason}`,
-        stage === "spec" ? "spec_writer" : "prompt_smith",
-      );
-      draftDrawerCloseRef.current?.();
-      draftDrawerCloseRef.current = null;
-      setRejectOpen(false);
-      setRejectReason("");
-      await refresh();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRequestingRedraw(false);
+  const continueAfterConfirmation = async (
+    stage: "spec" | "render" | "views",
+  ) => {
+    const stageLabel =
+      stage === "spec" ? "角色设定" : stage === "render" ? "效果图" : "四视图";
+    await conversation.send(
+      `用户已确认当前角色的${stageLabel}。请根据已确认结果决定并推进下一步。`,
+      "studio_director",
+    );
+  };
+  const confirmSpecDraft = async (draft: ArtifactDraft) => {
+    if (
+      character?.state !== "S0_spec_drafting" ||
+      draft.targetPath !== "docs/角色定稿.md"
+    ) {
+      throw new Error("当前草稿不是待确认的角色设定");
     }
+    await action.mutateAsync({ type: "spec", draftId: draft.id });
+    await continueAfterConfirmation("spec");
+  };
+  const canConfirmSpecDraft = (draft: ArtifactDraft) =>
+    character?.state === "S0_spec_drafting" &&
+    draft.targetPath === "docs/角色定稿.md" &&
+    hasApprovedVerdict("SPEC-CHECK", draft.createdAt);
+  const confirmRender = async () => {
+    if (!selectedRender || !hasApprovedRenderSelection) {
+      throw new Error("请选择已通过审校的效果图候选");
+    }
+    await action.mutateAsync({
+      type: "render",
+      generationId: selectedRender,
+    });
+    await continueAfterConfirmation("render");
+  };
+  const confirmViews = async () => {
+    if (!hasCompleteViewSelection) {
+      throw new Error("请选择已通过审校的完整四视图");
+    }
+    await action.mutateAsync({
+      type: "views",
+      generationIds: selectedViews,
+    });
+    await continueAfterConfirmation("views");
+  };
+  const requestRevision = async (
+    stage: "spec" | "render" | "views",
+    content: string,
+  ) => {
+    if (!character) throw new Error("角色信息尚未加载");
+    const expectedState =
+      stage === "spec"
+        ? "S0_spec_drafting"
+        : stage === "render"
+          ? "S2_render_generated"
+          : "S4_views_generated";
+    if (character.state !== expectedState) {
+      throw new Error("当前角色阶段已变化，请刷新后重试");
+    }
+    if (stage === "spec") {
+      await charactersApi.rejectSpec(projectId, characterId, content);
+    } else if (stage === "render") {
+      await charactersApi.rejectRender(projectId, characterId, content);
+      setSelectedRender(undefined);
+    } else {
+      await charactersApi.rejectViews(projectId, characterId, content);
+      setSelectedViews([]);
+    }
+    await refresh();
+    await conversation.send(
+      `用户对当前角色${stage === "spec" ? "设定" : stage === "render" ? "效果图" : "四视图"}有以下补充要求：${content}`,
+      "studio_director",
+    );
   };
 
   return (
@@ -266,7 +269,12 @@ export default function CharacterPage() {
             onSend={conversation.send}
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}
-            renderDraftAction={renderDraftAction}
+            onConfirmDraft={confirmSpecDraft}
+            canConfirmDraft={canConfirmSpecDraft}
+            confirmingDraft={action.isPending}
+            onSubmitDraftFeedback={(content) =>
+              requestRevision("spec", content)
+            }
           />
         </Col>
         <Col xs={24} xl={9}>
@@ -299,14 +307,15 @@ export default function CharacterPage() {
               <GenerationGate
                 title="选择效果图定稿"
                 generations={renderGenerations}
-                canWrite={canWrite}
-                canConfirm={(generation) =>
+                selectedId={selectedRender}
+                disabled={!canWrite || conversation.isBusy}
+                canSelect={(generation) =>
                   hasApprovedVerdict("VIEW-CHECK", generation.createdAt)
                 }
-                onConfirm={(id) =>
-                  action.mutate({ type: "render", generationId: id })
-                }
-                onReject={() => setRejectOpen(true)}
+                confirming={action.isPending}
+                onSelect={setSelectedRender}
+                onConfirm={confirmRender}
+                onSupplement={(content) => requestRevision("render", content)}
               />
             )}
             {character?.state === "S4_views_generated" && (
@@ -316,6 +325,12 @@ export default function CharacterPage() {
                     <Checkbox
                       key={generation.id}
                       checked={selectedViews.includes(generation.id)}
+                      disabled={
+                        !canWrite ||
+                        conversation.isBusy ||
+                        generation.variant !== "quad" ||
+                        !hasApprovedVerdict("VIEW-CHECK", generation.createdAt)
+                      }
                       onChange={(event) =>
                         setSelectedViews(
                           event.target.checked ? [generation.id] : [],
@@ -328,54 +343,19 @@ export default function CharacterPage() {
                       · {generation.filePath}
                     </Checkbox>
                   ))}
-                  <Button
-                    type="primary"
-                    disabled={!canWrite || !hasCompleteViewSelection}
-                    loading={action.isPending}
-                    onClick={() =>
-                      action.mutate({
-                        type: "views",
-                        generationIds: selectedViews,
-                      })
-                    }
-                  >
-                    确认完整四视图
-                  </Button>
-                  <Button
-                    icon={<ReloadOutlined />}
-                    disabled={!canWrite}
-                    onClick={() => setRejectOpen(true)}
-                  >
-                    重画
-                  </Button>
+                  <FinalConfirmationActions
+                    disabled={!canWrite || conversation.isBusy}
+                    confirmDisabled={!hasCompleteViewSelection}
+                    confirming={action.isPending}
+                    onConfirm={confirmViews}
+                    onSupplement={(content) => requestRevision("views", content)}
+                  />
                 </Space>
               </Card>
             )}
           </Space>
         </Col>
       </Row>
-
-      <Modal
-        title="说明拒绝原因"
-        open={rejectOpen}
-        okText="提交并继续修订"
-        confirmLoading={requestingRedraw}
-        okButtonProps={{
-          disabled: !rejectReason.trim() || conversation.isBusy,
-        }}
-        onOk={() => void requestRedraw()}
-        onCancel={() => {
-          draftDrawerCloseRef.current = null;
-          setRejectOpen(false);
-        }}
-      >
-        <Input.TextArea
-          value={rejectReason}
-          autoSize={{ minRows: 3 }}
-          placeholder="必须说明不采用当前结果的原因"
-          onChange={(event) => setRejectReason(event.target.value)}
-        />
-      </Modal>
     </div>
   );
 }
@@ -394,50 +374,61 @@ function StatusRow({ label, value }: { label: string; value?: string | null }) {
 function GenerationGate({
   title,
   generations,
-  canWrite,
-  canConfirm,
+  selectedId,
+  disabled,
+  canSelect,
+  confirming,
+  onSelect,
   onConfirm,
-  onReject,
+  onSupplement,
 }: {
   title: string;
   generations: Generation[];
-  canWrite: boolean;
-  canConfirm: (generation: Generation) => boolean;
-  onConfirm: (id: string) => void;
-  onReject: () => void;
+  selectedId?: string;
+  disabled: boolean;
+  canSelect: (generation: Generation) => boolean;
+  confirming: boolean;
+  onSelect: (id: string) => void;
+  onConfirm: () => Promise<unknown>;
+  onSupplement: (content: string) => Promise<unknown>;
 }) {
+  const canConfirmSelection = generations.some(
+    (generation) =>
+      generation.id === selectedId && canSelect(generation),
+  );
   return (
     <Card title={title} className="content-card">
       <Space orientation="vertical" className="workspace-main">
-        {generations.map((generation) => (
-          <Card
-            size="small"
-            key={generation.id}
-            title={generation.variant ?? "候选"}
-          >
-            <Typography.Text className="path-text">
-              {generation.filePath}
-            </Typography.Text>
-            <Button
-              type="primary"
-              size="small"
-              disabled={!canWrite || !canConfirm(generation)}
-              onClick={() => onConfirm(generation.id)}
-            >
-              采用
-            </Button>
-          </Card>
-        ))}
+        <Radio.Group
+          className="generation-options"
+          value={selectedId}
+          disabled={disabled}
+          onChange={(event) => onSelect(event.target.value as string)}
+        >
+          {generations.map((generation) => (
+            <Card size="small" key={generation.id}>
+              <Radio
+                value={generation.id}
+                disabled={!canSelect(generation)}
+              >
+                {generation.variant ?? "候选"}
+              </Radio>
+              <Typography.Text className="path-text">
+                {generation.filePath}
+              </Typography.Text>
+            </Card>
+          ))}
+        </Radio.Group>
         {!generations.length && (
           <Typography.Text type="secondary">尚无可确认候选</Typography.Text>
         )}
-        <Button
-          icon={<ReloadOutlined />}
-          disabled={!canWrite || !generations.length}
-          onClick={onReject}
-        >
-          重画
-        </Button>
+        <FinalConfirmationActions
+          disabled={disabled}
+          confirmDisabled={!canConfirmSelection}
+          confirming={confirming}
+          onConfirm={onConfirm}
+          onSupplement={onSupplement}
+        />
       </Space>
     </Card>
   );

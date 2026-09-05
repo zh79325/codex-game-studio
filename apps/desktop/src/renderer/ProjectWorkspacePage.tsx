@@ -1,5 +1,4 @@
 import {
-  CheckCircleOutlined,
   DeleteOutlined,
   FolderAddOutlined,
   FolderOutlined,
@@ -92,11 +91,10 @@ export default function ProjectWorkspacePage() {
       message.success("游戏风格已确认");
       await refreshProject();
       await conversation.send(
-        "游戏风格已由用户确认。请基于已确认的 Art Bible 给出 2–3 组项目名称和合法项目代号建议，并在 Action payload.choices 中返回两组单选题：项目名称、项目代号。",
-        "game_designer",
+        "用户已确认项目 Art Bible。请根据已确认结果决定并推进下一步。",
+        "studio_director",
       );
     },
-    onError: (error: Error) => message.error(error.message),
   });
 
   const finalize = useMutation({
@@ -178,22 +176,23 @@ export default function ProjectWorkspacePage() {
     await finalize.mutateAsync({ name, code });
     return true;
   };
-  const renderDraftAction = (draft: ArtifactDraft, closeDrawer: () => void) =>
-    draft.targetPath === "art-bible.md" &&
-    project.data?.state === "drafting" ? (
-      <Button
-        type="primary"
-        size="small"
-        icon={<CheckCircleOutlined />}
-        disabled={!canWrite}
-        loading={commitArtBible.isPending}
-        onClick={() =>
-          commitArtBible.mutate(draft.id, { onSuccess: closeDrawer })
-        }
-      >
-        确认游戏风格
-      </Button>
-    ) : null;
+  const confirmDraft = async (draft: ArtifactDraft) => {
+    if (
+      draft.targetPath !== "art-bible.md" ||
+      project.data?.state !== "drafting"
+    ) {
+      throw new Error("当前草稿不是待确认的 Art Bible");
+    }
+    await commitArtBible.mutateAsync(draft.id);
+  };
+  const canConfirmDraft = (draft: ArtifactDraft) =>
+    draft.targetPath === "art-bible.md" && project.data?.state === "drafting";
+  const submitDraftFeedback = async (content: string) => {
+    await conversation.send(
+      `用户对当前最终确认内容有以下补充要求：${content}`,
+      "studio_director",
+    );
+  };
   const characterList = characters.data?.characters ?? [];
   const characterGroups = characters.data?.groups ?? [];
   const renderCharacterNode = (character: ListedCharacter) => (
@@ -425,9 +424,12 @@ export default function ProjectWorkspacePage() {
             onSend={conversation.send}
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}
+            onConfirmDraft={confirmDraft}
+            canConfirmDraft={canConfirmDraft}
+            confirmingDraft={commitArtBible.isPending}
+            onSubmitDraftFeedback={submitDraftFeedback}
             choiceInteractionEnabled={project.data?.state !== "ready"}
             onResolveChoice={resolveProjectNaming}
-            renderDraftAction={renderDraftAction}
           />
         </Col>
       </Row>

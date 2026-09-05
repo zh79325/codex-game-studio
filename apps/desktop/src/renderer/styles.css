@@ -520,7 +520,8 @@ textarea {
 .choice-group,
 .draft-panel,
 .interaction-drawer-content,
-.interaction-section {
+.interaction-section,
+.final-confirmation-actions {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -613,12 +614,29 @@ textarea {
   margin: 0;
 }
 
-.interaction-feedback .ant-input {
+.final-confirmation-actions {
+  width: 100%;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.final-confirmation-actions .ant-input {
   width: 100%;
 }
 
-.interaction-feedback > .ant-btn {
+.final-confirmation-buttons {
   align-self: flex-end;
+}
+
+.generation-options {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.generation-options > .ant-card {
+  width: 100%;
 }
 
 .draft-panel > .ant-card {

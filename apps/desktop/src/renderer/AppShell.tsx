@@ -17,6 +17,8 @@ import {
 import type { BackendState } from "../shared/ipc";
 import type { Project } from "./types";
 
+const brandIconUrl = new URL("./brand-icon.svg", import.meta.url).href;
+
 export type StudioContext = {
   backend: BackendState;
   canWrite: boolean;
@@ -97,7 +99,7 @@ export default function AppShell() {
     <Layout className="app-shell">
       <Layout.Header className="app-header">
         <button className="brand" onClick={() => navigate("/projects")}>
-          <span className="brand-mark">CG</span>
+          <img className="brand-mark" src={brandIconUrl} alt="" />
           <span>Codex Game Studio</span>
         </button>
         <Menu

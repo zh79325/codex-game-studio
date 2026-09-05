@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Codex Game Studio">
+  <defs>
+    <linearGradient id="frame" x1="9" y1="8" x2="55" y2="57" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#65F4A8"/>
+      <stop offset="1" stop-color="#20CFC1"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="27" y1="12" x2="38" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF4A8"/>
+      <stop offset="1" stop-color="#FFB94A"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="#10191A" stroke="url(#frame)" stroke-width="2"/>
+  <path d="M18 29h8l4 4h4l4-4h8c3.2 0 5.7 2.3 6.2 5.4l2.1 13.2-6.8 5.2-7.2-6.4H23.7l-7.2 6.4-6.8-5.2 2.1-13.2A6.3 6.3 0 0 1 18 29Z" fill="#142726" stroke="url(#frame)" stroke-width="2.6" stroke-linejoin="round"/>
+  <path d="m29 35-4 4 4 4M35 35l4 4-4 4" fill="none" stroke="url(#frame)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M19 35v8M15 39h8" stroke="#65F4A8" stroke-width="2.6" stroke-linecap="round"/>
+  <circle cx="45" cy="37" r="1.8" fill="#5DEFC0"/>
+  <circle cx="49" cy="41" r="1.8" fill="#20CFC1"/>
+  <path d="m32 10 2.2 5.8L40 18l-5.8 2.2L32 26l-2.2-5.8L24 18l5.8-2.2L32 10Z" fill="url(#spark)" stroke="#FFF2A0" stroke-width="1" filter="url(#glow)"/>
+  <path d="m47 16 .9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9.9-2.4Z" fill="#65F4D0"/>
+</svg>

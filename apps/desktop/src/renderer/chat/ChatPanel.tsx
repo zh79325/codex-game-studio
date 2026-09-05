@@ -71,6 +71,10 @@ export default function ChatPanel(props: ChatPanelProps) {
     () => props.agents?.filter((agent) => agent.focusable) ?? [],
     [props.agents],
   );
+  const visibleMessages = useMemo(
+    () => props.snapshot?.messages.filter((message) => !message.folded) ?? [],
+    [props.snapshot?.messages],
+  );
   const pendingDrafts =
     props.snapshot?.drafts.filter((draft) => draft.status === "pending") ?? [];
   const pendingChoice = useMemo(() => {
@@ -147,7 +151,7 @@ export default function ChatPanel(props: ChatPanelProps) {
             <Alert type="error" showIcon message={props.lastError} />
           )}
           <MessageList
-            messages={props.snapshot?.messages ?? []}
+            messages={visibleMessages}
             streamingText={props.streamingText}
             thinkingText={props.thinkingText}
             workingAgentCode={props.workingAgentCode}

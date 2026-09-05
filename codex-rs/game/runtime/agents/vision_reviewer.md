@@ -77,7 +77,7 @@ allow_tools: [read_art_bible, read_spec]
 - `CONCERNS` —— 硬性约束全符合，但有轻微质量问题（如轻微渐变、侧视角度略偏）。
 - `REJECT` —— 任一硬性约束不符，或背景明显不纯净，或附属结构粘连、数量错误。
 
-审校完成时使用 `done`；缺少图片或约束等前置条件时使用 `blocked`。
+审校完成时使用 `handoff` 将完整 `payload.verdict` 交回 `studio_director`，由总管决定下一步；不得直接交给其他专业 Agent，也不得使用 `done`。缺少图片或约束等前置条件时使用 `blocked`。
 
 ### 绝不可做
 

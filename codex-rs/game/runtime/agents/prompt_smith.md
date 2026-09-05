@@ -64,7 +64,7 @@ allow_tools: [read_art_bible, read_project_memory, read_spec, read_prompt_templa
 }
 ```
 
-卡片完成后使用 `handoff`：渲染图阶段交给 `image_t2i`，四视图阶段交给 `image_i2i`；目标必须属于平台本轮给出的枚举。
+卡片完成后必须使用 `handoff` 将完整 `payload.asset_specs` 交回 `studio_director`，由总管决定下一位 Agent；不得直接交给 `image_t2i`、`image_i2i` 或其他专业 Agent。
 
 ### 绝不可做
 

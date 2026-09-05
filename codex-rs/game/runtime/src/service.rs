@@ -526,7 +526,7 @@ impl GameService {
             let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
                 continue;
             };
-            let (assistant_message_id, allowed_handoffs) = {
+            let (assistant_message_id, director_agent, allowed_handoffs) = {
                 let projects = self
                     .projects
                     .lock()
@@ -555,26 +555,26 @@ impl GameService {
                     .iter()
                     .filter(|handoff| handoff.turn == snapshot.conversation.turn)
                     .count();
-                let stage_agents = codex_game_domain::agents_for_stage(
+                let director = snapshot.conversation.director_agent_code.clone();
+                let allowed = allowed_handoffs_for(
                     snapshot.conversation.target_kind.as_str(),
                     &context.stage,
+                    &context.agent_code,
+                    &director,
+                    handoff_count,
                 );
-                let allowed = if handoff_count >= MAX_HANDOFFS {
-                    Vec::new()
-                } else {
-                    stage_agents
-                        .iter()
-                        .copied()
-                        .filter(|agent| *agent != context.agent_code)
-                        .collect()
-                };
-                (assistant.id.clone(), allowed)
+                (assistant.id.clone(), director, allowed)
             };
             let parsed = output
                 .ok_or_else(|| "Agent 未返回输出".to_string())
                 .and_then(|value| {
-                    super::parse_agent_turn(value, &context.agent_code, &allowed_handoffs)
-                        .map_err(|error| error.to_string())
+                    super::parse_agent_turn(
+                        value,
+                        &context.agent_code,
+                        &director_agent,
+                        &allowed_handoffs,
+                    )
+                    .map_err(|error| error.to_string())
                 });
             let parsed = match parsed {
                 Ok(parsed) => parsed,
@@ -1058,6 +1058,41 @@ impl GameService {
         content: String,
         recipient_agent_code: Option<String>,
     ) -> Result<PreparedConversationTurn, GameServiceError> {
+        self.prepare_conversation_turn_with_visibility(
+            conversation_id,
+            content,
+            recipient_agent_code,
+            false,
+        )
+        .await
+    }
+
+    pub async fn prepare_director_resume_turn(
+        &self,
+        conversation_id: &str,
+        content: String,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let director_agent_code = self
+            .read_conversation(conversation_id)
+            .await?
+            .conversation
+            .director_agent_code;
+        self.prepare_conversation_turn_with_visibility(
+            conversation_id,
+            content,
+            Some(director_agent_code),
+            true,
+        )
+        .await
+    }
+
+    async fn prepare_conversation_turn_with_visibility(
+        &self,
+        conversation_id: &str,
+        content: String,
+        recipient_agent_code: Option<String>,
+        folded: bool,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
         if content.trim().is_empty() {
             return Err(GameServiceError::InvalidAction("消息不能为空".to_string()));
         }
@@ -1104,6 +1139,7 @@ impl GameService {
                     .to_string()
             }
         };
+        let previous_focus = current_focus.clone();
         let agent_code = recipient_agent_code
             .clone()
             .or(current_focus)
@@ -1128,6 +1164,7 @@ impl GameService {
                     GameServiceError::ConversationNotFound(conversation_id.to_string())
                 })?;
             snapshot.conversation.turn += 1;
+            snapshot.conversation.focus_agent_code = Some(agent_code.clone());
             snapshot.conversation.status = ConversationStatus::Running;
             snapshot.conversation.updated_at = timestamp;
             let turn = snapshot.conversation.turn;
@@ -1141,7 +1178,7 @@ impl GameService {
                 recipient_agent_code,
                 status: MessageStatus::Completed,
                 token_count: 0,
-                folded: false,
+                folded,
                 attachments: Vec::new(),
                 action: None,
                 created_at: timestamp,
@@ -1183,6 +1220,7 @@ impl GameService {
                     message.id != user_message.id && message.id != assistant_message.id
                 });
                 snapshot.conversation.turn = snapshot.conversation.turn.saturating_sub(1);
+                snapshot.conversation.focus_agent_code = previous_focus;
                 snapshot.conversation.status = ConversationStatus::Active;
             }
             return Err(error.into());
@@ -1281,11 +1319,15 @@ impl GameService {
         target_agent: &str,
     ) -> Result<PreparedConversationTurn, GameServiceError> {
         let snapshot = self.read_conversation(conversation_id).await?;
-        let latest_action = snapshot
+        let latest_message = snapshot
             .messages
             .iter()
             .rev()
-            .find_map(|message| message.action.as_ref())
+            .find(|message| message.action.is_some())
+            .ok_or_else(|| GameServiceError::InvalidAction("没有可继续的 handoff".to_string()))?;
+        let latest_action = latest_message
+            .action
+            .as_ref()
             .ok_or_else(|| GameServiceError::InvalidAction("没有可继续的 handoff".to_string()))?;
         if latest_action.action != AgentActionKind::Handoff
             || latest_action.target_agent.as_deref() != Some(target_agent)
@@ -1294,15 +1336,22 @@ impl GameService {
                 "handoff 目标与上一条 Action 不一致".to_string(),
             ));
         }
+        if latest_message.agent_code != snapshot.conversation.director_agent_code
+            && target_agent != snapshot.conversation.director_agent_code
+        {
+            return Err(GameServiceError::InvalidAction(
+                "专业 Agent 只能将控制权交回总管".to_string(),
+            ));
+        }
         let handoff_count = snapshot
             .handoffs
             .iter()
             .filter(|handoff| handoff.turn == snapshot.conversation.turn)
             .count();
-        if handoff_count >= MAX_HANDOFFS {
-            return Err(GameServiceError::InvalidAction(
-                "单轮自动 handoff 不得超过两次".to_string(),
-            ));
+        if handoff_count > MAX_HANDOFFS {
+            return Err(GameServiceError::InvalidAction(format!(
+                "单轮自动 handoff 不得超过 {MAX_HANDOFFS} 次"
+            )));
         }
         let (project, store) = {
             let projects = self
@@ -1336,7 +1385,9 @@ impl GameService {
         };
         let allowed =
             codex_game_domain::agents_for_stage(snapshot.conversation.target_kind.as_str(), &stage);
-        if !allowed.contains(&target_agent) {
+        if target_agent != snapshot.conversation.director_agent_code
+            && !allowed.contains(&target_agent)
+        {
             return Err(GameServiceError::InvalidAction(format!(
                 "Agent {target_agent} 不允许处理 {stage} 阶段"
             )));
@@ -1430,18 +1481,13 @@ impl GameService {
             .iter()
             .filter(|handoff| handoff.turn == prepared.conversation.turn)
             .count();
-        let allowed_handoffs = if handoff_count >= MAX_HANDOFFS {
-            Vec::new()
-        } else {
-            codex_game_domain::agents_for_stage(
-                prepared.conversation.target_kind.as_str(),
-                &prepared.stage,
-            )
-            .iter()
-            .filter(|agent| **agent != prepared.agent_code.as_str())
-            .map(|agent| (*agent).to_string())
-            .collect::<Vec<_>>()
-        };
+        let allowed_handoffs = allowed_handoffs_for(
+            prepared.conversation.target_kind.as_str(),
+            &prepared.stage,
+            &prepared.agent_code,
+            &prepared.conversation.director_agent_code,
+            handoff_count,
+        );
         let conversation_history = snapshot
             .messages
             .iter()
@@ -1479,7 +1525,10 @@ impl GameService {
             character_context,
             memories,
             allowed_handoffs,
-            action_protocol: action_protocol_instruction(),
+            action_protocol: action_protocol_instruction(
+                &prepared.agent_code,
+                &prepared.conversation.director_agent_code,
+            ),
         })
     }
 
@@ -1613,7 +1662,7 @@ impl GameService {
         &self,
         conversation_id: &str,
         draft_ids: &[String],
-    ) -> Result<(), GameServiceError> {
+    ) -> Result<Vec<String>, GameServiceError> {
         if draft_ids.is_empty() {
             return Err(GameServiceError::InvalidAction(
                 "至少选择一个草稿".to_string(),
@@ -1682,7 +1731,10 @@ impl GameService {
         if let Some(current) = session.conversations.get_mut(conversation_id) {
             current.drafts = drafts;
         }
-        Ok(())
+        Ok(selected
+            .into_iter()
+            .map(|draft| draft.target_path)
+            .collect())
     }
 
     pub async fn finalize_project(
@@ -2561,9 +2613,37 @@ fn append_line_once(path: &Path, line: &str) -> Result<(), io::Error> {
     fs::write(path, content)
 }
 
-fn action_protocol_instruction() -> String {
+fn allowed_handoffs_for(
+    target_kind: &str,
+    stage: &str,
+    current_agent: &str,
+    director_agent: &str,
+    handoff_count: usize,
+) -> Vec<String> {
+    if handoff_count >= MAX_HANDOFFS {
+        return Vec::new();
+    }
+    if current_agent != director_agent {
+        return vec![director_agent.to_string()];
+    }
+    codex_game_domain::agents_for_stage(target_kind, stage)
+        .iter()
+        .filter(|agent| **agent != director_agent)
+        .map(|agent| (*agent).to_string())
+        .collect()
+}
+
+fn action_protocol_instruction(current_agent: &str, director_agent: &str) -> String {
+    let control_flow = if current_agent == director_agent {
+        "你是当前会话总管，只有你可以决定并 handoff 给下一位专业 Agent；无需继续派单时才可使用 done。"
+            .to_string()
+    } else {
+        format!(
+            "你是专业 Agent，只负责当前任务；工作完成后必须 handoff 回总管 {director_agent}，不得直接 done，也不得 handoff 给其他专业 Agent。"
+        )
+    };
     format!(
-        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。一次只允许一个待用户完成的交互阶段：payload.choices 与非空 payload.drafts 不得同轮出现；存在待确认问题时只输出 choices，用户完成选择后的下一轮才能输出 drafts 进入最终确认。",
+        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。{control_flow} 一次只允许一个待用户完成的交互阶段：payload.choices 与非空 payload.drafts 不得同轮出现；存在待确认问题时只输出 choices，用户完成选择后的下一轮才能输出 drafts 进入最终确认。",
         start = codex_game_domain::ACTION_START,
         end = codex_game_domain::ACTION_END,
     )

@@ -67,7 +67,7 @@ allow_tools: [read_art_bible, read_project_memory, read_spec]
 - `CONCERNS` —— 维度齐全但有模糊表述或轻微风格偏离，可生图但需用户知晓。
 - `REJECT` —— 缺必填维度，或与 art bible 硬性冲突，或附属结构数量未写明。
 
-审校完成时使用 `done`；缺少设定或 art bible 等前置条件时使用 `blocked`。
+审校完成时使用 `handoff` 将完整 `payload.verdict` 交回 `studio_director`，由总管决定下一步；不得直接交给其他专业 Agent，也不得使用 `done`。缺少设定或 art bible 等前置条件时使用 `blocked`。
 
 硬性约束示例：`尾巴 = 2 条，彼此分离`、`眼睛 = 红色发光`、`手 = 三指利爪`、`脚 = 三趾带爪、赤足`、`背部棘刺 = 一排，颈部至尾部`、`姿态 = 直立双足`。
 

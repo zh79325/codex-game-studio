@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 pub const ACTION_START: &str = "<-------- ACTION-START------->";
 pub const ACTION_END: &str = "<-------- ACTION-END------->";
 pub const MAX_CHOICE_GROUPS: usize = 4;
-pub const MAX_HANDOFFS: usize = 2;
+pub const MAX_HANDOFFS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

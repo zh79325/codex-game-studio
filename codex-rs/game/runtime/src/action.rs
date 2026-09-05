@@ -30,6 +30,8 @@ pub enum ActionProtocolError {
     UnexpectedTarget(&'static str),
     #[error("handoff 必须指定当前阶段允许的其他 Agent")]
     InvalidHandoff,
+    #[error("专业 Agent 完成工作后必须 handoff 回总管，不能直接 done")]
+    SpecialistMustReturnToDirector,
     #[error("payload.choices 最多四组且每组至少两个不同选项")]
     InvalidChoices,
     #[error("包含 choices 时 action 必须是 ask_user")]
@@ -43,7 +45,8 @@ pub enum ActionProtocolError {
 pub fn parse_agent_turn(
     output: &str,
     current_agent: &str,
-    allowed_handoffs: &[&str],
+    director_agent: &str,
+    allowed_handoffs: &[String],
 ) -> Result<AgentTurnOutput, ActionProtocolError> {
     if output.matches(ACTION_START).count() != 1 || output.matches(ACTION_END).count() != 1 {
         return Err(ActionProtocolError::MissingOrDuplicate);
@@ -63,7 +66,7 @@ pub fn parse_agent_turn(
     let value = parse_json_without_duplicate_keys(json)?;
     let action: AgentAction = serde_json::from_value(value)
         .map_err(|error| ActionProtocolError::InvalidJson(error.to_string()))?;
-    validate_action(&action, current_agent, allowed_handoffs)?;
+    validate_action(&action, current_agent, director_agent, allowed_handoffs)?;
     Ok(AgentTurnOutput {
         text: output[..start].trim_end().to_string(),
         action,
@@ -73,7 +76,8 @@ pub fn parse_agent_turn(
 fn validate_action(
     action: &AgentAction,
     current_agent: &str,
-    allowed_handoffs: &[&str],
+    director_agent: &str,
+    allowed_handoffs: &[String],
 ) -> Result<(), ActionProtocolError> {
     let reason = action.reason.trim();
     if reason.is_empty() || reason.contains(['\n', '\r']) || sentence_break_before_end(reason) {
@@ -86,9 +90,9 @@ fn validate_action(
                 .target_agent
                 .as_deref()
                 .filter(|target| *target != current_agent)
-                .filter(|target| allowed_handoffs.contains(target))
+                .filter(|target| allowed_handoffs.iter().any(|allowed| allowed == *target))
                 .ok_or(ActionProtocolError::InvalidHandoff)?;
-            if target.is_empty() {
+            if target.is_empty() || (current_agent != director_agent && target != director_agent) {
                 return Err(ActionProtocolError::InvalidHandoff);
             }
         }
@@ -100,6 +104,9 @@ fn validate_action(
         AgentActionKind::Done => {
             if action.target_agent.is_some() {
                 return Err(ActionProtocolError::UnexpectedTarget("done"));
+            }
+            if current_agent != director_agent {
+                return Err(ActionProtocolError::SpecialistMustReturnToDirector);
             }
         }
         AgentActionKind::Blocked => {
@@ -135,11 +142,15 @@ fn validate_action(
         }
     }
 
-    validate_payload(action)?;
+    validate_payload(action, current_agent, director_agent)?;
     Ok(())
 }
 
-fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
+fn validate_payload(
+    action: &AgentAction,
+    current_agent: &str,
+    director_agent: &str,
+) -> Result<(), ActionProtocolError> {
     let payload = &action.payload;
     if payload.drafts.as_ref().is_some_and(|drafts| {
         drafts.iter().any(|draft| {
@@ -213,6 +224,9 @@ fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
     }
     if let Some(result) = &payload.result {
         let expected = match result.status {
+            AgentResultStatus::Success if current_agent != director_agent => {
+                AgentActionKind::Handoff
+            }
             AgentResultStatus::Success => AgentActionKind::Done,
             AgentResultStatus::Failed => AgentActionKind::Blocked,
         };
@@ -249,9 +263,14 @@ fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
             "asset_specs 只能配合 handoff".to_string(),
         ));
     }
-    if payload.verdict.is_some() && action.action != AgentActionKind::Done {
+    let successful_completion_action = if current_agent == director_agent {
+        AgentActionKind::Done
+    } else {
+        AgentActionKind::Handoff
+    };
+    if payload.verdict.is_some() && action.action != successful_completion_action {
         return Err(ActionProtocolError::InvalidPayload(
-            "verdict 只能配合 done".to_string(),
+            "verdict 必须随完成结果交回总管".to_string(),
         ));
     }
     if payload.naming.is_some() && (payload.choices.is_some() || payload.drafts.is_some()) {
@@ -431,7 +450,8 @@ mod tests {
                 }
             })),
             "game_designer",
-            &["studio_director"],
+            "studio_director",
+            &["studio_director".to_string()],
         )
         .expect("valid action");
 
@@ -448,11 +468,21 @@ mod tests {
             "payload": {}
         }));
         assert_eq!(
-            parse_agent_turn(&format!("{valid}\n{valid}"), "game_designer", &[]),
+            parse_agent_turn(
+                &format!("{valid}\n{valid}"),
+                "game_designer",
+                "studio_director",
+                &[],
+            ),
             Err(ActionProtocolError::MissingOrDuplicate)
         );
         assert_eq!(
-            parse_agent_turn(&format!("{valid}\n额外内容"), "game_designer", &[]),
+            parse_agent_turn(
+                &format!("{valid}\n额外内容"),
+                "game_designer",
+                "studio_director",
+                &[],
+            ),
             Err(ActionProtocolError::NotLast)
         );
         let unknown = output(json!({
@@ -463,7 +493,7 @@ mod tests {
             "extra": true
         }));
         assert!(matches!(
-            parse_agent_turn(&unknown, "game_designer", &[]),
+            parse_agent_turn(&unknown, "game_designer", "studio_director", &[]),
             Err(ActionProtocolError::InvalidJson(_))
         ));
     }
@@ -477,10 +507,18 @@ mod tests {
             "payload": {}
         }));
         assert_eq!(
-            parse_agent_turn(&handoff, "studio_director", &[]),
+            parse_agent_turn(&handoff, "studio_director", "studio_director", &[]),
             Err(ActionProtocolError::InvalidHandoff)
         );
-        assert!(parse_agent_turn(&handoff, "studio_director", &["spec_writer"]).is_ok());
+        assert!(
+            parse_agent_turn(
+                &handoff,
+                "studio_director",
+                "studio_director",
+                &["spec_writer".to_string()],
+            )
+            .is_ok()
+        );
 
         let empty_choices = output(json!({
             "action": "ask_user",
@@ -489,8 +527,59 @@ mod tests {
             "payload": { "choices": [] }
         }));
         assert_eq!(
-            parse_agent_turn(&empty_choices, "game_designer", &[]),
+            parse_agent_turn(&empty_choices, "game_designer", "studio_director", &[],),
             Err(ActionProtocolError::InvalidChoices)
+        );
+    }
+
+    #[test]
+    fn specialists_must_return_control_to_the_director() {
+        let done = output(json!({
+            "action": "done",
+            "target_agent": null,
+            "reason": "设定编写完成",
+            "payload": {}
+        }));
+        assert_eq!(
+            parse_agent_turn(
+                &done,
+                "spec_writer",
+                "studio_director",
+                &["studio_director".to_string()],
+            ),
+            Err(ActionProtocolError::SpecialistMustReturnToDirector)
+        );
+
+        let direct_handoff = output(json!({
+            "action": "handoff",
+            "target_agent": "spec_reviewer",
+            "reason": "交给审校继续处理",
+            "payload": {}
+        }));
+        assert_eq!(
+            parse_agent_turn(
+                &direct_handoff,
+                "spec_writer",
+                "studio_director",
+                &["studio_director".to_string(), "spec_reviewer".to_string()],
+            ),
+            Err(ActionProtocolError::InvalidHandoff)
+        );
+
+        let return_to_director = output(json!({
+            "action": "handoff",
+            "target_agent": "studio_director",
+            "reason": "设定编写完成，交回总管决定下一步",
+            "payload": {}
+        }));
+        assert!(
+            parse_agent_turn(
+                &return_to_director,
+                "spec_writer",
+                "studio_director",
+                &["studio_director".to_string()],
+            )
+            .is_ok()
         );
     }
 
@@ -510,7 +599,15 @@ mod tests {
                 "drafts": []
             }
         }));
-        assert!(parse_agent_turn(&choice_with_empty_drafts, "spec_writer", &[]).is_ok());
+        assert!(
+            parse_agent_turn(
+                &choice_with_empty_drafts,
+                "spec_writer",
+                "studio_director",
+                &[],
+            )
+            .is_ok()
+        );
 
         let mixed_interaction = output(json!({
             "action": "ask_user",
@@ -531,7 +628,7 @@ mod tests {
         }));
 
         assert_eq!(
-            parse_agent_turn(&mixed_interaction, "spec_writer", &[]),
+            parse_agent_turn(&mixed_interaction, "spec_writer", "studio_director", &[],),
             Err(ActionProtocolError::InvalidPayload(
                 "choices 与 drafts 不能在同一轮出现；必须先让用户完成选择，下一轮才能输出 drafts"
                     .to_string()
@@ -542,15 +639,20 @@ mod tests {
     #[test]
     fn enforces_result_status_and_artifact_contract() {
         let invalid_success = output(json!({
-            "action": "done",
-            "target_agent": null,
-            "reason": "图片生成完成",
+            "action": "handoff",
+            "target_agent": "studio_director",
+            "reason": "图片生成完成，交回总管",
             "payload": {
                 "result": { "status": "success", "artifacts": [], "error": null }
             }
         }));
         assert_eq!(
-            parse_agent_turn(&invalid_success, "image_t2i", &[]),
+            parse_agent_turn(
+                &invalid_success,
+                "image_t2i",
+                "studio_director",
+                &["studio_director".to_string()],
+            ),
             Err(ActionProtocolError::InvalidResult)
         );
 
@@ -563,7 +665,7 @@ mod tests {
             }
         }));
         assert_eq!(
-            parse_agent_turn(&invalid_failure, "image_t2i", &[]),
+            parse_agent_turn(&invalid_failure, "image_t2i", "studio_director", &[],),
             Err(ActionProtocolError::InvalidResult)
         );
     }

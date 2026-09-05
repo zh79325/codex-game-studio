@@ -314,12 +314,30 @@ impl GameRequestProcessor {
 
     pub(crate) async fn conversation_commit_drafts(
         &self,
+        connection_id: ConnectionId,
         params: GameConversationCommitDraftsParams,
     ) -> std::result::Result<GameConversationCommitDraftsResponse, JSONRPCErrorError> {
-        self.adapter
-            .conversation_commit_drafts(params)
+        let conversation_id = params.conversation_id.clone();
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
+            .adapter
+            .conversation_commit_drafts(&execution, params)
             .await
-            .map_err(game_error)
+            .map_err(game_error)?;
+        if let Some(task_execution) = task_execution {
+            self.notify_task_started(&conversation_id, task_execution)
+                .await;
+        } else {
+            self.outgoing
+                .send_server_notification(ServerNotification::GameConversationTurn(
+                    GameConversationTurnNotification {
+                        conversation_id,
+                        status: "blocked".to_string(),
+                    },
+                ))
+                .await;
+        }
+        Ok(response)
     }
 
     pub(crate) async fn character_create(

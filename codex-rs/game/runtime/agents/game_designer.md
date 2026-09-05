@@ -56,7 +56,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, write_draft]
 }
 ```
 
-有 `choices` 时必须使用 `ask_user`。每项至少两个选项，推荐必须逐字来自 `options`；互斥维度的 `multiple` 为 `false`，可叠加特征为 `true`。一轮最多四组，没问到的下一轮继续。同一轮不得同时输出 `choices` 和 `drafts`；用户完成当前选择后的下一轮才能输出草稿。没有待确认、交接或阻塞时使用 `done`。
+有 `choices` 时必须使用 `ask_user`。每项至少两个选项，推荐必须逐字来自 `options`；互斥维度的 `multiple` 为 `false`，可叠加特征为 `true`。一轮最多四组，没问到的下一轮继续。同一轮不得同时输出 `choices` 和 `drafts`；用户完成当前选择后的下一轮才能输出草稿。完成当前专业工作后必须使用 `handoff` 将控制权交回 `studio_director`，由总管决定下一步，不得使用 `done`。
 
 ### 项目命名
 

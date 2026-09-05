@@ -575,15 +575,31 @@ impl GameAppServerAdapter {
         Ok(GameConversationInterruptResponse {})
     }
 
-    pub async fn conversation_commit_drafts(
+    pub async fn conversation_commit_drafts<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameConversationCommitDraftsParams,
-    ) -> Result<GameConversationCommitDraftsResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameConversationCommitDraftsResponse, Option<TaskExecution>), String> {
+        let target_paths = self
+            .runtime
             .service()
             .commit_conversation_drafts(&params.conversation_id, &params.draft_ids)
-            .await?;
-        Ok(GameConversationCommitDraftsResponse {})
+            .await
+            .map_err(|error| error.to_string())?;
+        let prepared = self
+            .runtime
+            .service()
+            .prepare_director_resume_turn(
+                &params.conversation_id,
+                format!(
+                    "用户已确认并提交本轮草稿：{}。请根据最新流程状态决定下一步。",
+                    target_paths.join("、")
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let task = self.execute_prepared(execution, &prepared).await?;
+        Ok((GameConversationCommitDraftsResponse {}, task))
     }
 
     pub async fn character_create(
@@ -1238,7 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_runs_ask_user_handoff_done_with_fake_execution() {
+    async fn conversation_routes_specialist_completion_back_to_director() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
         let ask_user = action(
@@ -1265,16 +1281,37 @@ mod tests {
             .await
             .expect("continue handoff")
             .expect("handoff task");
-        let done = action("done", None, "美术基调已完成", "{}");
+        let return_to_director = action(
+            "handoff",
+            Some("studio_director"),
+            "美术基调已完成，交回总管决定下一步",
+            "{}",
+        );
         adapter
             .observe_turn_completed(
                 &execution,
                 third.attempt.codex_turn_id.as_deref().expect("turn id"),
+                Some(&return_to_director),
+                false,
+            )
+            .await
+            .expect("return completion")
+            .expect("projection");
+        let director = adapter
+            .continue_handoff(&execution, &conversation_id, "studio_director")
+            .await
+            .expect("continue to director")
+            .expect("director task");
+        let done = action("done", None, "本轮工作已完成", "{}");
+        adapter
+            .observe_turn_completed(
+                &execution,
+                director.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&done),
                 false,
             )
             .await
-            .expect("done completion")
+            .expect("director completion")
             .expect("projection");
 
         let snapshot = adapter
@@ -1282,7 +1319,7 @@ mod tests {
             .await
             .expect("snapshot");
         assert_eq!(snapshot.conversation.status, "active");
-        assert_eq!(snapshot.handoffs.len(), 1);
+        assert_eq!(snapshot.handoffs.len(), 2);
         assert_eq!(
             snapshot
                 .messages
@@ -1291,6 +1328,79 @@ mod tests {
                 .and_then(|action| action.get("action"))
                 .and_then(serde_json::Value::as_str),
             Some("done")
+        );
+    }
+
+    #[tokio::test]
+    async fn committing_specialist_drafts_resumes_with_the_director() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
+        adapter
+            .observe_turn_completed(&execution, &first_turn, Some(&to_designer), false)
+            .await
+            .expect("director handoff")
+            .expect("projection");
+        let designer = adapter
+            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .await
+            .expect("continue to designer")
+            .expect("designer task");
+        let draft = action(
+            "ask_user",
+            None,
+            "请确认设计草稿",
+            r##"{"drafts":[{"target_path":"docs/视觉说明.md","content":"# 视觉说明"}]}"##,
+        );
+        adapter
+            .observe_turn_completed(
+                &execution,
+                designer.attempt.codex_turn_id.as_deref().expect("turn id"),
+                Some(&draft),
+                false,
+            )
+            .await
+            .expect("draft completion")
+            .expect("projection");
+        let draft_id = adapter
+            .conversation_read(GameConversationReadParams {
+                conversation_id: conversation_id.clone(),
+            })
+            .await
+            .expect("snapshot")
+            .drafts
+            .into_iter()
+            .find(|draft| draft.status == "pending")
+            .expect("pending draft")
+            .id;
+
+        let (_, task) = adapter
+            .conversation_commit_drafts(
+                &execution,
+                GameConversationCommitDraftsParams {
+                    conversation_id: conversation_id.clone(),
+                    draft_ids: vec![draft_id],
+                },
+            )
+            .await
+            .expect("commit drafts");
+
+        let task = task.expect("director task");
+        assert_eq!(task.task.agent_code, "studio_director");
+        let snapshot = adapter
+            .conversation_read(GameConversationReadParams { conversation_id })
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.conversation.status, "running");
+        assert_eq!(
+            snapshot.conversation.focus_agent_code.as_deref(),
+            Some("studio_director")
+        );
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .any(|message| message.role == "user" && message.folded)
         );
     }
 
@@ -1375,39 +1485,5 @@ mod tests {
         assert_eq!(assistant.status, "failed");
         assert!(assistant.content.contains("Action 协议校验失败"));
         assert!(assistant.content.contains("已自动重试 3 次"));
-    }
-
-    #[tokio::test]
-    async fn conversation_rejects_a_third_automatic_handoff() {
-        let (_directory, adapter, execution, conversation_id) = setup().await;
-        let first_turn = submit(&adapter, &execution, &conversation_id, "开始协作").await;
-        let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
-        adapter
-            .observe_turn_completed(&execution, &first_turn, Some(&to_designer), false)
-            .await
-            .expect("first handoff")
-            .expect("projection");
-        let second = adapter
-            .continue_handoff(&execution, &conversation_id, "game_designer")
-            .await
-            .expect("continue first")
-            .expect("second task");
-        let to_director = action("handoff", Some("studio_director"), "交回总管收口", "{}");
-        adapter
-            .observe_turn_completed(
-                &execution,
-                second.attempt.codex_turn_id.as_deref().expect("turn id"),
-                Some(&to_director),
-                false,
-            )
-            .await
-            .expect("second handoff")
-            .expect("projection");
-
-        let error = adapter
-            .continue_handoff(&execution, &conversation_id, "studio_director")
-            .await
-            .expect_err("third handoff must be rejected");
-        assert!(error.contains("不得超过两次"));
     }
 }

@@ -1134,7 +1134,7 @@ impl MessageProcessor {
                 .map(|response| Some(response.into())),
             ClientRequest::GameConversationCommitDrafts { params, .. } => self
                 .game_processor
-                .conversation_commit_drafts(params)
+                .conversation_commit_drafts(connection_id, params)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::GameCharacterCreate { params, .. } => self

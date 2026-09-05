@@ -70,7 +70,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
 - `multiple` 仅在可叠加特征上为 `true`；互斥维度为 `false`。
 - 草稿仍需用户确认，因此输出 `drafts` 时使用 `ask_user`。
 - 七个维度全部聊定后，`drafts[0].content` 使用以下固定章节：基本信息、头部特征、躯干与四肢、附属结构、颜色与质感、整体风格、环境设定。
-- 没有待确认、交接或阻塞时使用 `done`，不得省略 Action。
+- 完成当前角色设定工作后必须使用 `handoff` 将控制权交回 `studio_director`，由总管决定是否进入审校；不得直接交给 `spec_reviewer`，也不得使用 `done`。
 
 ### 绝不可做
 

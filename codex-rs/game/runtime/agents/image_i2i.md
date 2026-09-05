@@ -32,7 +32,7 @@ allow_tools: []
 
 ### 输出格式
 
-执行完成后，末尾严格输出平台注入的统一 Action JSON 块。成功使用 `done`，失败使用 `blocked`；结果只放在 `payload.result`：
+执行完成后，末尾严格输出平台注入的统一 Action JSON 块。成功使用 `handoff` 将控制权交回 `studio_director`，失败使用 `blocked`；结果只放在 `payload.result`：
 
 ```json
 {

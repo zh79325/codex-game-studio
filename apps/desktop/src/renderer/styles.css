@@ -75,16 +75,10 @@ textarea {
 }
 
 .brand-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border: 1px solid rgba(112, 214, 164, 0.5);
-  border-radius: 10px;
-  color: #70d6a4;
-  background: rgba(112, 214, 164, 0.1);
-  font-size: 12px;
-  letter-spacing: 0.08em;
+  display: block;
+  width: 40px;
+  height: 40px;
+  filter: drop-shadow(0 4px 12px rgba(32, 207, 193, 0.2));
 }
 
 .main-menu {

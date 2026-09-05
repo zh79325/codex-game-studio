@@ -85,7 +85,13 @@ export function useConversation(target: ConversationTarget, enabled = true) {
         const isWorking = params.status === "working";
         const turnId =
           typeof params.turnId === "string" ? params.turnId : undefined;
+        const startsNewTurn =
+          isWorking && turnId && turnId !== activeTurnIdRef.current;
         activeTurnIdRef.current = isWorking ? turnId : undefined;
+        if (startsNewTurn) {
+          setStreamingText("");
+          setThinkingText("");
+        }
         setWorkingAgentCode(
           isWorking && typeof params.agentCode === "string"
             ? params.agentCode

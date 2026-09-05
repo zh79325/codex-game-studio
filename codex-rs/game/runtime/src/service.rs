@@ -96,6 +96,21 @@ pub struct CompletedTaskAttempt {
     pub action: Option<AgentAction>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionProtocolViolation {
+    pub codex_turn_id: String,
+    pub assistant_message_id: String,
+    pub message: String,
+    pub context: codex_game_store::TurnAttemptContext,
+    pub store: Arc<ProjectStore>,
+}
+
+#[derive(Debug)]
+pub enum TurnOutputCompletion {
+    Completed(Option<CompletedTaskAttempt>),
+    ActionProtocolViolation(ActionProtocolViolation),
+}
+
 #[derive(Debug, Error)]
 pub enum GameServiceError {
     #[error("game runtime state is unavailable")]
@@ -501,7 +516,7 @@ impl GameService {
         &self,
         codex_turn_id: &str,
         output: Option<&str>,
-    ) -> Result<Option<CompletedTaskAttempt>, GameServiceError> {
+    ) -> Result<TurnOutputCompletion, GameServiceError> {
         for store in self.writable_stores()? {
             let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
                 continue;
@@ -559,29 +574,15 @@ impl GameService {
             let parsed = match parsed {
                 Ok(parsed) => parsed,
                 Err(error) => {
-                    let message = format!("Action 协议校验失败：{error}");
-                    let completion = store
-                        .fail_action_turn(
-                            codex_turn_id,
-                            &assistant_message_id,
-                            &message,
-                            MessageStatus::Failed,
-                            now(),
-                        )
-                        .await?;
-                    self.apply_failed_message(
-                        &context.conversation_id,
-                        &assistant_message_id,
-                        message,
-                    )?;
-                    return Ok(completion.map(|completion| CompletedTaskAttempt {
-                        attempt_id: completion.attempt_id,
-                        task_id: completion.task_id,
-                        conversation_id: completion.conversation_id,
-                        status: TaskAttemptStatus::Failed,
-                        agent_code: Some(context.agent_code),
-                        action: None,
-                    }));
+                    return Ok(TurnOutputCompletion::ActionProtocolViolation(
+                        ActionProtocolViolation {
+                            codex_turn_id: codex_turn_id.to_string(),
+                            assistant_message_id,
+                            message: format!("Action 协议校验失败：{error}"),
+                            context,
+                            store,
+                        },
+                    ));
                 }
             };
             let (generations, updated_character) = match self
@@ -605,14 +606,16 @@ impl GameService {
                         &assistant_message_id,
                         message,
                     )?;
-                    return Ok(completion.map(|completion| CompletedTaskAttempt {
-                        attempt_id: completion.attempt_id,
-                        task_id: completion.task_id,
-                        conversation_id: completion.conversation_id,
-                        status: TaskAttemptStatus::Failed,
-                        agent_code: Some(context.agent_code),
-                        action: None,
-                    }));
+                    return Ok(TurnOutputCompletion::Completed(completion.map(
+                        |completion| CompletedTaskAttempt {
+                            attempt_id: completion.attempt_id,
+                            task_id: completion.task_id,
+                            conversation_id: completion.conversation_id,
+                            status: TaskAttemptStatus::Failed,
+                            agent_code: Some(context.agent_code),
+                            action: None,
+                        },
+                    )));
                 }
             };
             let meta_backup = if let Some(character) = updated_character.as_ref() {
@@ -637,14 +640,16 @@ impl GameService {
                         &assistant_message_id,
                         message,
                     )?;
-                    return Ok(completion.map(|completion| CompletedTaskAttempt {
-                        attempt_id: completion.attempt_id,
-                        task_id: completion.task_id,
-                        conversation_id: completion.conversation_id,
-                        status: TaskAttemptStatus::Failed,
-                        agent_code: Some(context.agent_code),
-                        action: None,
-                    }));
+                    return Ok(TurnOutputCompletion::Completed(completion.map(
+                        |completion| CompletedTaskAttempt {
+                            attempt_id: completion.attempt_id,
+                            task_id: completion.task_id,
+                            conversation_id: completion.conversation_id,
+                            status: TaskAttemptStatus::Failed,
+                            agent_code: Some(context.agent_code),
+                            action: None,
+                        },
+                    )));
                 }
                 Some((path, previous))
             } else {
@@ -712,16 +717,61 @@ impl GameService {
                 snapshot.memories = memories;
                 snapshot.handoffs = handoffs;
             }
-            return Ok(Some(CompletedTaskAttempt {
-                attempt_id: completion.attempt_id,
-                task_id: completion.task_id,
-                conversation_id: completion.conversation_id,
-                status: TaskAttemptStatus::Succeeded,
-                agent_code: Some(context.agent_code),
-                action: Some(parsed.action),
-            }));
+            return Ok(TurnOutputCompletion::Completed(Some(
+                CompletedTaskAttempt {
+                    attempt_id: completion.attempt_id,
+                    task_id: completion.task_id,
+                    conversation_id: completion.conversation_id,
+                    status: TaskAttemptStatus::Succeeded,
+                    agent_code: Some(context.agent_code),
+                    action: Some(parsed.action),
+                },
+            )));
         }
-        Ok(None)
+        Ok(TurnOutputCompletion::Completed(None))
+    }
+
+    pub async fn fail_action_protocol_violation(
+        &self,
+        violation: ActionProtocolViolation,
+        retry_start_error: Option<&str>,
+    ) -> Result<Option<CompletedTaskAttempt>, GameServiceError> {
+        let final_message = if violation.context.attempt_no > 1 {
+            format!(
+                "{}（已自动重试 {} 次）",
+                violation.message,
+                violation.context.attempt_no - 1
+            )
+        } else {
+            violation.message.clone()
+        };
+        let message = retry_start_error.map_or_else(
+            || final_message.clone(),
+            |error| format!("{final_message}；自动重试启动失败：{error}"),
+        );
+        let completion = violation
+            .store
+            .fail_action_turn(
+                &violation.codex_turn_id,
+                &violation.assistant_message_id,
+                &message,
+                MessageStatus::Failed,
+                now(),
+            )
+            .await?;
+        self.apply_failed_message(
+            &violation.context.conversation_id,
+            &violation.assistant_message_id,
+            message,
+        )?;
+        Ok(completion.map(|completion| CompletedTaskAttempt {
+            attempt_id: completion.attempt_id,
+            task_id: completion.task_id,
+            conversation_id: completion.conversation_id,
+            status: TaskAttemptStatus::Failed,
+            agent_code: Some(violation.context.agent_code),
+            action: None,
+        }))
     }
 
     async fn prepare_action_generations(

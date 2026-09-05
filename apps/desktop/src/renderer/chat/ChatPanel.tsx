@@ -63,9 +63,7 @@ export default function ChatPanel(props: ChatPanelProps) {
     enabled: props.canWrite && !props.busy && Boolean(props.snapshot),
     onCompleted: (text) =>
       setContent((current) =>
-        current && !/\s$/.test(current)
-          ? `${current} ${text}`
-          : `${current}${text}`,
+        current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`,
       ),
     onError: (error) => message.error(error),
   });
@@ -426,9 +424,7 @@ export function Composer({
           danger={busy}
           icon={busy ? <StopOutlined /> : <SendOutlined />}
           loading={busy && interrupting}
-          disabled={
-            disabled || interrupting || voiceMode || (!busy && !value.trim())
-          }
+          disabled={disabled || interrupting || voiceMode || (!busy && !value.trim())}
           onClick={busy ? onInterrupt : onSend}
         >
           {busy ? "中断会话" : "发送"}

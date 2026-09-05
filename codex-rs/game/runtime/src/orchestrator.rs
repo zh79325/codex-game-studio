@@ -77,6 +77,17 @@ pub struct TaskExecution {
     pub binding: ConversationCodexThread,
 }
 
+pub const MAX_ACTION_CONTRACT_RETRIES: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionContractRetry {
+    pub attempt_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
+    pub agent_code: String,
+    pub turn_id: String,
+}
+
 #[derive(Debug, Error)]
 pub enum OrchestrationError {
     #[error("context package exceeds the configured bounds")]
@@ -271,6 +282,84 @@ impl TaskOrchestrator {
             task,
             attempt,
             binding,
+        })
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serializes contract retries per conversation+agent"
+    )]
+    pub async fn retry_action_contract<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        store: &ProjectStore,
+        context: &codex_game_store::TurnAttemptContext,
+        mut audit_context: TurnAuditContext,
+        validation_error: &str,
+    ) -> Result<ActionContractRetry, OrchestrationError> {
+        let lock = self
+            .binding_lock(&context.conversation_id, &context.agent_code)
+            .await;
+        let _guard = lock.lock().await;
+        let retry_attempt = TaskAttempt {
+            id: TaskAttemptId::new(Uuid::now_v7().to_string()),
+            task_id: TaskId::new(context.task_id.clone()),
+            attempt_no: context.attempt_no + 1,
+            conversation_codex_thread_id: ConversationCodexThreadId::new(
+                context.conversation_codex_thread_id.clone(),
+            ),
+            codex_turn_id: None,
+            output_artifact_id: None,
+            status: TaskAttemptStatus::Pending,
+        };
+        audit_context.attempt_id = retry_attempt.id.as_str().to_string();
+        let request = StartTurnRequest {
+            thread_id: context.codex_thread_id.clone(),
+            attempt_id: retry_attempt.id.as_str().to_string(),
+            agent_definition: bundled_agent_definition(&context.agent_code)
+                .ok_or_else(|| {
+                    ExecutionError::InvalidRequest(format!(
+                        "unknown game agent: {}",
+                        context.agent_code
+                    ))
+                })?
+                .to_string(),
+            prompt: format!(
+                "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是第 {} 次自动重试。请根据校验错误修正输出，重新给出完整回复，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
+                retry_attempt.attempt_no - 1
+            ),
+            context: context.context.clone(),
+            audit_context: Some(audit_context.clone()),
+        };
+        store
+            .begin_action_contract_retry(&context.attempt_id, &retry_attempt)
+            .await?;
+        let turn = match execution.start_turn(request).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                if let Err(audit_error) =
+                    append_turn_audit_start_error(&audit_context, &error.to_string())
+                {
+                    tracing::warn!(
+                        path = %audit_context.target_dir.display(),
+                        "failed to write game contract retry audit error: {audit_error}"
+                    );
+                }
+                store
+                    .rollback_action_contract_retry(&context.attempt_id, retry_attempt.id.as_str())
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        store
+            .bind_turn_to_attempt(retry_attempt.id.as_str(), &turn.turn_id, now())
+            .await?;
+        Ok(ActionContractRetry {
+            attempt_id: retry_attempt.id.as_str().to_string(),
+            task_id: context.task_id.clone(),
+            conversation_id: context.conversation_id.clone(),
+            agent_code: context.agent_code.clone(),
+            turn_id: turn.turn_id,
         })
     }
 

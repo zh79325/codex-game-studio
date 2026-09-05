@@ -152,6 +152,7 @@ pub(crate) fn spawn_game_event_observer(
                 EventMsg::TurnComplete(completed) => {
                     adapter
                         .observe_turn_completed(
+                            execution.as_ref(),
                             &completed.turn_id,
                             completed.last_agent_message.as_deref(),
                             completed.error.is_some(),
@@ -164,13 +165,18 @@ pub(crate) fn spawn_game_event_observer(
             match result {
                 Ok(Some(projection)) => {
                     let conversation_id = projection.conversation_id.clone();
+                    let notification_turn_id = projection
+                        .turn_id
+                        .clone()
+                        .unwrap_or_else(|| turn_id.to_string());
+                    let is_running = projection.status == "running";
                     outgoing
                         .send_server_notification(ServerNotification::GameAttemptUpdated(
                             GameAttemptUpdatedNotification {
                                 conversation_id: conversation_id.clone(),
                                 task_id: projection.task_id.clone(),
                                 attempt_id: projection.attempt_id,
-                                turn_id: Some(turn_id.to_string()),
+                                turn_id: Some(notification_turn_id.clone()),
                                 status: projection.status.clone(),
                             },
                         ))
@@ -197,9 +203,9 @@ pub(crate) fn spawn_game_event_observer(
                             .send_server_notification(ServerNotification::GameConversationActor(
                                 GameConversationActorNotification {
                                     conversation_id: conversation_id.clone(),
-                                    turn_id: Some(turn_id.to_string()),
+                                    turn_id: Some(notification_turn_id.clone()),
                                     agent_code: agent_code.clone(),
-                                    status: "idle".to_string(),
+                                    status: if is_running { "working" } else { "idle" }.to_string(),
                                 },
                             ))
                             .await;

@@ -22,11 +22,13 @@ use codex_game_runtime::ExecuteTaskRequest;
 use codex_game_runtime::GAME_PROTOCOL_VERSION;
 use codex_game_runtime::GameRuntime;
 use codex_game_runtime::GameServiceError;
+use codex_game_runtime::MAX_ACTION_CONTRACT_RETRIES;
 use codex_game_runtime::PreparedConversationTurn;
 use codex_game_runtime::RouteCandidate;
 use codex_game_runtime::RouteFailureKind;
 use codex_game_runtime::RouteOutcome;
 use codex_game_runtime::TaskExecution;
+use codex_game_runtime::TurnOutputCompletion;
 use codex_game_runtime::bundled_agent_definitions;
 use std::fs;
 use std::path::Path;
@@ -41,6 +43,7 @@ pub struct GameTurnProjection {
     pub attempt_id: String,
     pub task_id: String,
     pub conversation_id: String,
+    pub turn_id: Option<String>,
     pub status: String,
     pub agent_code: Option<String>,
     pub handoff_target: Option<String>,
@@ -108,8 +111,9 @@ impl GameAppServerAdapter {
         self.runtime.service().turn_audit_context(turn_id).await
     }
 
-    pub async fn observe_turn_completed(
+    pub async fn observe_turn_completed<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         turn_id: &str,
         output: Option<&str>,
         failed: bool,
@@ -120,10 +124,61 @@ impl GameAppServerAdapter {
                 .complete_turn(turn_id, TaskAttemptStatus::Failed)
                 .await?
         } else {
-            self.runtime
+            match self
+                .runtime
                 .service()
                 .complete_turn_output(turn_id, output)
                 .await?
+            {
+                TurnOutputCompletion::Completed(completion) => completion,
+                TurnOutputCompletion::ActionProtocolViolation(violation) => {
+                    let retry_error = if violation.context.attempt_no <= MAX_ACTION_CONTRACT_RETRIES
+                    {
+                        match self.runtime.service().turn_audit_context(turn_id).await? {
+                            Some(audit_context) => self
+                                .runtime
+                                .orchestrator()
+                                .retry_action_contract(
+                                    execution,
+                                    violation.store.as_ref(),
+                                    &violation.context,
+                                    audit_context,
+                                    &violation.message,
+                                )
+                                .await
+                                .map_err(|error| error.to_string()),
+                            None => Err("无法构建 Action 契约重试审计上下文".to_string()),
+                        }
+                    } else {
+                        Err(String::new())
+                    };
+                    match retry_error {
+                        Ok(retry) => {
+                            return Ok(Some(GameTurnProjection {
+                                attempt_id: retry.attempt_id,
+                                task_id: retry.task_id,
+                                conversation_id: retry.conversation_id,
+                                turn_id: Some(retry.turn_id),
+                                status: "running".to_string(),
+                                agent_code: Some(retry.agent_code),
+                                handoff_target: None,
+                                handoff_reason: None,
+                                character: None,
+                                generations: Vec::new(),
+                            }));
+                        }
+                        Err(error) => {
+                            self.runtime
+                                .service()
+                                .fail_action_protocol_violation(
+                                    violation,
+                                    (!error.is_empty()).then_some(error.as_str()),
+                                )
+                                .await?
+                        }
+                    }
+                }
+            }
         };
         if failed && let Some(completion) = &completion {
             self.runtime
@@ -784,6 +839,7 @@ fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> Game
         attempt_id: completion.attempt_id,
         task_id: completion.task_id,
         conversation_id: completion.conversation_id,
+        turn_id: None,
         status: format!("{:?}", completion.status).to_lowercase(),
         agent_code: completion.agent_code,
         handoff_target,
@@ -1008,6 +1064,7 @@ mod tests {
     use codex_game_runtime::StartedThread;
     use codex_game_runtime::StartedTurn;
     use codex_game_runtime::SteerTurnRequest;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use tempfile::tempdir;
@@ -1016,6 +1073,7 @@ mod tests {
     struct FakeExecution {
         threads: AtomicUsize,
         turns: AtomicUsize,
+        turn_requests: Mutex<Vec<StartTurnRequest>>,
     }
 
     impl CodexExecutionPort for FakeExecution {
@@ -1036,8 +1094,12 @@ mod tests {
 
         async fn start_turn(
             &self,
-            _request: StartTurnRequest,
+            request: StartTurnRequest,
         ) -> Result<StartedTurn, ExecutionError> {
+            self.turn_requests
+                .lock()
+                .expect("turn request lock")
+                .push(request);
             let number = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(StartedTurn {
                 turn_id: format!("turn-{number}"),
@@ -1144,7 +1206,7 @@ mod tests {
             r#"{"choices":[{"item":"风格","options":["写实","卡通"],"recommended":["卡通"],"multiple":false}]}"#,
         );
         adapter
-            .observe_turn_completed(&first_turn, Some(&ask_user), false)
+            .observe_turn_completed(&execution, &first_turn, Some(&ask_user), false)
             .await
             .expect("ask user completion")
             .expect("projection");
@@ -1152,7 +1214,7 @@ mod tests {
         let second_turn = submit(&adapter, &execution, &conversation_id, "选择卡通").await;
         let handoff = action("handoff", Some("game_designer"), "交给美术设计师细化", "{}");
         adapter
-            .observe_turn_completed(&second_turn, Some(&handoff), false)
+            .observe_turn_completed(&execution, &second_turn, Some(&handoff), false)
             .await
             .expect("handoff completion")
             .expect("projection");
@@ -1164,6 +1226,7 @@ mod tests {
         let done = action("done", None, "美术基调已完成", "{}");
         adapter
             .observe_turn_completed(
+                &execution,
                 third.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&done),
                 false,
@@ -1190,12 +1253,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn action_contract_retry_can_recover_with_a_valid_output() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let retry = adapter
+            .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), false)
+            .await
+            .expect("contract retry")
+            .expect("retry projection");
+        let valid = action("done", None, "美术基调已完成", "{}");
+
+        let completion = adapter
+            .observe_turn_completed(
+                &execution,
+                retry.turn_id.as_deref().expect("retry turn id"),
+                Some(&valid),
+                false,
+            )
+            .await
+            .expect("valid retry completion")
+            .expect("completion projection");
+        assert_eq!(completion.status, "succeeded");
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 2);
+
+        let snapshot = adapter
+            .conversation_read(GameConversationReadParams { conversation_id })
+            .await
+            .expect("snapshot");
+        let assistant = snapshot.messages.last().expect("assistant message");
+        assert_eq!(assistant.status, "completed");
+        assert_eq!(assistant.content, "正文");
+    }
+
+    #[tokio::test]
+    async fn action_contract_failure_retries_three_times_before_failing() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let mut turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+
+        for retry_number in 1..=MAX_ACTION_CONTRACT_RETRIES {
+            let projection = adapter
+                .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), false)
+                .await
+                .expect("contract retry")
+                .expect("retry projection");
+            assert_eq!(projection.status, "running");
+            turn_id = projection.turn_id.expect("retry turn id");
+            let requests = execution.turn_requests.lock().expect("turn request lock");
+            let prompt = &requests[retry_number as usize].prompt;
+            assert!(prompt.contains("Action 契约校验"));
+            assert!(prompt.contains(&format!("第 {retry_number} 次自动重试")));
+        }
+
+        let retrying_snapshot = adapter
+            .conversation_read(GameConversationReadParams {
+                conversation_id: conversation_id.clone(),
+            })
+            .await
+            .expect("retrying snapshot");
+        let retrying_assistant = retrying_snapshot
+            .messages
+            .last()
+            .expect("retrying assistant message");
+        assert_eq!(retrying_assistant.status, "thinking");
+        assert!(retrying_assistant.content.is_empty());
+
+        let projection = adapter
+            .observe_turn_completed(&execution, &turn_id, Some("仍然格式错误"), false)
+            .await
+            .expect("final contract failure")
+            .expect("failed projection");
+        assert_eq!(projection.status, "failed");
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 4);
+
+        let snapshot = adapter
+            .conversation_read(GameConversationReadParams { conversation_id })
+            .await
+            .expect("snapshot");
+        let assistant = snapshot.messages.last().expect("assistant message");
+        assert_eq!(assistant.status, "failed");
+        assert!(assistant.content.contains("Action 协议校验失败"));
+        assert!(assistant.content.contains("已自动重试 3 次"));
+    }
+
+    #[tokio::test]
     async fn conversation_rejects_a_third_automatic_handoff() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let first_turn = submit(&adapter, &execution, &conversation_id, "开始协作").await;
         let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
         adapter
-            .observe_turn_completed(&first_turn, Some(&to_designer), false)
+            .observe_turn_completed(&execution, &first_turn, Some(&to_designer), false)
             .await
             .expect("first handoff")
             .expect("projection");
@@ -1207,6 +1353,7 @@ mod tests {
         let to_director = action("handoff", Some("studio_director"), "交回总管收口", "{}");
         adapter
             .observe_turn_completed(
+                &execution,
                 second.attempt.codex_turn_id.as_deref().expect("turn id"),
                 Some(&to_director),
                 false,

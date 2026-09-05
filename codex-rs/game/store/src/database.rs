@@ -290,6 +290,7 @@ pub struct TurnAttemptCompletion {
 pub struct TurnAttemptContext {
     pub attempt_id: String,
     pub task_id: String,
+    pub attempt_no: u32,
     pub conversation_id: String,
     pub turn: u64,
     pub target_id: String,
@@ -297,6 +298,9 @@ pub struct TurnAttemptContext {
     pub agent_code: String,
     pub input_version: u64,
     pub contract_version: u64,
+    pub conversation_codex_thread_id: String,
+    pub codex_thread_id: String,
+    pub context: ContextPackage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1464,6 +1468,91 @@ impl ProjectStore {
         Ok(())
     }
 
+    pub async fn begin_action_contract_retry(
+        &self,
+        current_attempt_id: &str,
+        retry_attempt: &TaskAttempt,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT task_id, attempt_no, conversation_codex_thread_id FROM task_attempts WHERE id = ? AND status = 'running'",
+        )
+        .bind(current_attempt_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| StoreError::Conflict("Action 契约重试的原始尝试已结束".to_string()))?;
+        let task_id: String = row.try_get("task_id")?;
+        let attempt_no = row.try_get::<i64, _>("attempt_no")? as u32;
+        let binding_id: String = row.try_get("conversation_codex_thread_id")?;
+        if retry_attempt.task_id.as_str() != task_id
+            || retry_attempt.attempt_no != attempt_no + 1
+            || retry_attempt.conversation_codex_thread_id.as_str() != binding_id
+        {
+            return Err(StoreError::Conflict(
+                "Action 契约重试上下文与原始尝试不一致".to_string(),
+            ));
+        }
+        sqlx::query("UPDATE task_attempts SET status = 'failed' WHERE id = ?")
+            .bind(current_attempt_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, status) VALUES (?, ?, ?, ?, 'pending')",
+        )
+        .bind(retry_attempt.id.as_str())
+        .bind(retry_attempt.task_id.as_str())
+        .bind(retry_attempt.attempt_no as i64)
+        .bind(retry_attempt.conversation_codex_thread_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE tasks SET status = 'running' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback_action_contract_retry(
+        &self,
+        current_attempt_id: &str,
+        retry_attempt_id: &str,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let deleted = sqlx::query(
+            "DELETE FROM task_attempts WHERE id = ? AND status = 'pending' AND codex_turn_id IS NULL",
+        )
+        .bind(retry_attempt_id)
+        .execute(&mut *transaction)
+        .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(StoreError::Conflict(
+                "Action 契约重试已经开始，无法回滚".to_string(),
+            ));
+        }
+        let restored = sqlx::query(
+            "UPDATE task_attempts SET status = 'running' WHERE id = ? AND status = 'failed'",
+        )
+        .bind(current_attempt_id)
+        .execute(&mut *transaction)
+        .await?;
+        if restored.rows_affected() != 1 {
+            return Err(StoreError::Conflict(
+                "Action 契约重试的原始尝试无法恢复".to_string(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE tasks SET status = 'running' WHERE id = (SELECT task_id FROM task_attempts WHERE id = ?)",
+        )
+        .bind(current_attempt_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn list_tasks(&self, conversation_id: &str) -> Result<Vec<Task>, StoreError> {
         let rows = sqlx::query(
             "SELECT t.id, t.interaction_id, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version, t.status FROM tasks t JOIN interactions i ON i.id = t.interaction_id WHERE i.conversation_id = ? ORDER BY i.created_at, t.id",
@@ -1581,15 +1670,17 @@ impl ProjectStore {
         codex_turn_id: &str,
     ) -> Result<Option<TurnAttemptContext>, StoreError> {
         let row = sqlx::query(
-            "SELECT ta.id AS attempt_id, ta.task_id, i.conversation_id, m.turn, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id JOIN messages m ON m.id = i.idempotency_key WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
+            "SELECT ta.id AS attempt_id, ta.task_id, ta.attempt_no, ta.conversation_codex_thread_id, ct.codex_thread_id, i.conversation_id, m.turn, t.target_id, t.stage, t.agent_code, t.input_version, t.contract_version, t.context_json FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id JOIN messages m ON m.id = i.idempotency_key JOIN conversation_codex_threads ct ON ct.id = ta.conversation_codex_thread_id WHERE ta.codex_turn_id = ? AND ta.status IN ('pending', 'running')",
         )
         .bind(codex_turn_id)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {
+            let context_json: String = row.try_get("context_json")?;
             Ok(TurnAttemptContext {
                 attempt_id: row.try_get("attempt_id")?,
                 task_id: row.try_get("task_id")?,
+                attempt_no: row.try_get::<i64, _>("attempt_no")? as u32,
                 conversation_id: row.try_get("conversation_id")?,
                 turn: row.try_get::<i64, _>("turn")? as u64,
                 target_id: row.try_get("target_id")?,
@@ -1597,6 +1688,9 @@ impl ProjectStore {
                 agent_code: row.try_get("agent_code")?,
                 input_version: row.try_get::<i64, _>("input_version")? as u64,
                 contract_version: row.try_get::<i64, _>("contract_version")? as u64,
+                conversation_codex_thread_id: row.try_get("conversation_codex_thread_id")?,
+                codex_thread_id: row.try_get("codex_thread_id")?,
+                context: serde_json::from_str(&context_json)?,
             })
         })
         .transpose()

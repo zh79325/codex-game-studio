@@ -49,6 +49,7 @@ pub struct GameTurnProjection {
     pub agent_code: Option<String>,
     pub handoff_target: Option<String>,
     pub handoff_reason: Option<String>,
+    pub director_resume_reason: Option<String>,
     pub character: Option<GameCharacter>,
     pub generations: Vec<GameGeneration>,
 }
@@ -164,6 +165,7 @@ impl GameAppServerAdapter {
                                 agent_code: Some(retry.agent_code),
                                 handoff_target: None,
                                 handoff_reason: None,
+                                director_resume_reason: None,
                                 character: None,
                                 generations: Vec::new(),
                             }));
@@ -593,6 +595,24 @@ impl GameAppServerAdapter {
         Ok(GameConversationInterruptResponse {})
     }
 
+    pub async fn resume_director<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        conversation_id: &str,
+        reason: String,
+    ) -> Result<Option<TaskExecution>, String> {
+        let prepared = self
+            .runtime
+            .service()
+            .prepare_director_resume_turn_if_idle(conversation_id, reason)
+            .await
+            .map_err(|error| error.to_string())?;
+        match prepared {
+            Some(prepared) => self.execute_prepared(execution, &prepared).await,
+            None => Ok(None),
+        }
+    }
+
     pub async fn conversation_commit_drafts<E: CodexExecutionPort>(
         &self,
         execution: &E,
@@ -726,21 +746,64 @@ impl GameAppServerAdapter {
                         status: step.status,
                     })
                     .collect(),
+                needs_resume: workflow_progress.needs_resume,
+                continuation_key: workflow_progress.continuation_key,
             },
         })
     }
 
-    pub async fn character_confirm_spec(
+    async fn character_response_with_resume<E: CodexExecutionPort>(
         &self,
+        execution: &E,
+        character: Character,
+        reason: String,
+        resume: bool,
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let task = if resume {
+            let prepared = self
+                .runtime
+                .service()
+                .prepare_character_director_resume_turn_if_idle(
+                    &character.project_id,
+                    &character.id,
+                    reason,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            match prepared {
+                Some(prepared) => self.execute_prepared(execution, &prepared).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok((
+            GameCharacterResponse {
+                character: character_dto(character),
+                execution_started: task.is_some(),
+            },
+            task,
+        ))
+    }
+
+    pub async fn character_confirm_spec<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
         params: GameCharacterConfirmSpecParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let character = self
+            .runtime
             .service()
             .confirm_character_spec(&params.project_id, &params.character_id, &params.draft_id)
             .await
-            .map(|character| GameCharacterResponse {
-                character: character_dto(character),
-            })
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(
+            execution,
+            character,
+            "用户已确认角色设定，请根据最新工作流继续生成效果图。".to_string(),
+            true,
+        )
+        .await
     }
 
     pub async fn generation_register(
@@ -781,29 +844,39 @@ impl GameAppServerAdapter {
             })
     }
 
-    pub async fn character_reject_spec(
+    pub async fn character_reject_spec<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameCharacterRejectSpecParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let reason = params.reason;
+        let character = self
+            .runtime
             .service()
             .reject_character_stage(
                 &params.project_id,
                 &params.character_id,
                 "spec",
-                params.reason,
+                reason.clone(),
             )
             .await
-            .map(|character| GameCharacterResponse {
-                character: character_dto(character),
-            })
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(
+            execution,
+            character,
+            format!("用户补充了角色设定修改要求：{reason}。请根据最新工作流继续处理。"),
+            true,
+        )
+        .await
     }
 
-    pub async fn character_confirm_render(
+    pub async fn character_confirm_render<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameCharacterConfirmRenderParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let character = self
+            .runtime
             .service()
             .confirm_character_render(
                 &params.project_id,
@@ -811,34 +884,49 @@ impl GameAppServerAdapter {
                 &params.generation_id,
             )
             .await
-            .map(|character| GameCharacterResponse {
-                character: character_dto(character),
-            })
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(
+            execution,
+            character,
+            "用户已确认角色效果图，请根据最新工作流继续生成四视图。".to_string(),
+            true,
+        )
+        .await
     }
 
-    pub async fn character_reject_render(
+    pub async fn character_reject_render<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameCharacterRejectRenderParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let reason = params.reason;
+        let character = self
+            .runtime
             .service()
             .reject_character_stage(
                 &params.project_id,
                 &params.character_id,
                 "render",
-                params.reason,
+                reason.clone(),
             )
             .await
-            .map(|character| GameCharacterResponse {
-                character: character_dto(character),
-            })
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(
+            execution,
+            character,
+            format!("用户补充了效果图修改要求：{reason}。请根据最新工作流继续处理。"),
+            true,
+        )
+        .await
     }
 
-    pub async fn character_confirm_views(
+    pub async fn character_confirm_views<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameCharacterConfirmViewsParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let character = self
+            .runtime
             .service()
             .confirm_character_views(
                 &params.project_id,
@@ -846,27 +934,69 @@ impl GameAppServerAdapter {
                 &params.generation_ids,
             )
             .await
-            .map(|character| GameCharacterResponse {
-                character: character_dto(character),
-            })
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(execution, character, String::new(), false)
+            .await
     }
 
-    pub async fn character_reject_views(
+    pub async fn character_reject_views<E: CodexExecutionPort>(
         &self,
+        execution: &E,
         params: GameCharacterRejectViewsParams,
-    ) -> Result<GameCharacterResponse, GameServiceError> {
-        self.runtime
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let reason = params.reason;
+        let character = self
+            .runtime
             .service()
             .reject_character_stage(
                 &params.project_id,
                 &params.character_id,
                 "views",
-                params.reason,
+                reason.clone(),
             )
             .await
-            .map(|character| GameCharacterResponse {
+            .map_err(|error| error.to_string())?;
+        self.character_response_with_resume(
+            execution,
+            character,
+            format!("用户补充了四视图修改要求：{reason}。请根据最新工作流继续处理。"),
+            true,
+        )
+        .await
+    }
+
+    pub async fn character_resume<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        params: GameCharacterResumeParams,
+    ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
+        let prepared = self
+            .runtime
+            .service()
+            .prepare_character_resume_if_needed(
+                &params.project_id,
+                &params.character_id,
+                &params.continuation_key,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let task = match prepared {
+            Some(prepared) => self.execute_prepared(execution, &prepared).await?,
+            None => None,
+        };
+        let character = self
+            .runtime
+            .service()
+            .read_character(&params.project_id, &params.character_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((
+            GameCharacterResponse {
                 character: character_dto(character),
-            })
+                execution_started: task.is_some(),
+            },
+            task,
+        ))
     }
 
     pub async fn task_list(
@@ -928,6 +1058,17 @@ fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> Game
         .filter(|action| action.action == AgentActionKind::Handoff)
         .map(|action| (action.target_agent.clone(), Some(action.reason.clone())))
         .unwrap_or((None, None));
+    let director_resume_reason = (completion.agent_code.as_deref() == Some("spec_writer"))
+        .then_some(completion.action.as_ref())
+        .flatten()
+        .filter(|action| action.action == AgentActionKind::AskUser)
+        .and_then(|action| action.payload.drafts.as_ref())
+        .is_some_and(|drafts| {
+            drafts
+                .iter()
+                .any(|draft| draft.target_path == "docs/角色定稿.md")
+        })
+        .then(|| "角色设计师已提交待审角色设定草稿，请根据当前工作流继续派单。".to_string());
     GameTurnProjection {
         attempt_id: completion.attempt_id,
         task_id: completion.task_id,
@@ -937,6 +1078,7 @@ fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> Game
         agent_code: completion.agent_code,
         handoff_target,
         handoff_reason,
+        director_resume_reason,
         character: None,
         generations: Vec::new(),
     }
@@ -1286,6 +1428,59 @@ mod tests {
             codex_game_domain::ACTION_START,
             codex_game_domain::ACTION_END,
         )
+    }
+
+    #[test]
+    fn spec_writer_draft_completion_requests_director_resume() {
+        let completion = codex_game_runtime::CompletedTaskAttempt {
+            attempt_id: "attempt-1".to_string(),
+            task_id: "task-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            status: TaskAttemptStatus::Succeeded,
+            agent_code: Some("spec_writer".to_string()),
+            action: Some(codex_game_domain::AgentAction {
+                action: AgentActionKind::AskUser,
+                target_agent: None,
+                reason: "请确认角色设定".to_string(),
+                payload: codex_game_domain::AgentActionPayload {
+                    drafts: Some(vec![codex_game_domain::ArtifactDraft {
+                        target_path: "docs/角色定稿.md".to_string(),
+                        content: "# 角色设定".to_string(),
+                        based_on_hash: None,
+                    }]),
+                    ..codex_game_domain::AgentActionPayload::default()
+                },
+            }),
+        };
+
+        let projection = turn_projection(completion);
+
+        assert!(projection.handoff_target.is_none());
+        assert!(projection.director_resume_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn director_resume_is_a_noop_while_the_conversation_is_running() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let _turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+
+        let resumed = adapter
+            .resume_director(
+                &execution,
+                &conversation_id,
+                "继续处理当前工作流".to_string(),
+            )
+            .await
+            .expect("resume should be idempotent");
+
+        assert!(resumed.is_none());
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 1);
+        let snapshot = adapter
+            .conversation_read(GameConversationReadParams { conversation_id })
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.conversation.turn, 1);
+        assert_eq!(snapshot.messages.len(), 2);
     }
 
     #[tokio::test]

@@ -89,6 +89,7 @@ pub struct VerdictConstraint {
 #[serde(deny_unknown_fields)]
 pub struct AgentVerdict {
     pub token: String,
+    pub subject_id: String,
     pub decision: String,
     pub sections: BTreeMap<String, Vec<Value>>,
     #[serde(default)]

@@ -34,6 +34,7 @@ export type AgentAction = {
     asset_specs?: unknown[];
     verdict?: {
       token: "SPEC-CHECK" | "VIEW-CHECK";
+      subject_id: string;
       decision: "APPROVE" | "CONCERNS" | "REJECT";
       sections: Record<string, unknown[]>;
       constraints: Array<{ item: string; value: string }>;
@@ -149,6 +150,8 @@ export type CharacterWorkflowProgress = {
     label: string;
     status: "wait" | "process" | "finish" | "error";
   }>;
+  needsResume: boolean;
+  continuationKey: string | null;
 };
 
 export type Generation = {

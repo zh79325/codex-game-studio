@@ -122,6 +122,8 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             stage: "planning".to_string(),
             art_bible: None,
             character_context: None,
+            workflow_context: None,
+            review_subject: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "json".to_string(),

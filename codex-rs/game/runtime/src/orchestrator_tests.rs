@@ -72,6 +72,8 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             stage: "project".to_string(),
             art_bible: None,
             character_context: None,
+            workflow_context: None,
+            review_subject: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "strict action".to_string(),

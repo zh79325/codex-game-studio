@@ -11,7 +11,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
@@ -36,6 +36,7 @@ export default function CharacterPage() {
   const { canWrite, setActiveProject } = useStudio();
   const [selectedRender, setSelectedRender] = useState<string>();
   const [selectedViews, setSelectedViews] = useState<string[]>([]);
+  const resumedContinuationKeys = useRef(new Set<string>());
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -167,16 +168,40 @@ export default function CharacterPage() {
     (item) => item.id === selectedRender,
   );
 
-  const continueAfterConfirmation = async (
-    stage: "spec" | "render" | "views",
-  ) => {
-    const stageLabel =
-      stage === "spec" ? "角色设定" : stage === "render" ? "效果图" : "四视图";
-    await conversation.send(
-      `用户已确认当前角色的${stageLabel}。请根据已确认结果决定并推进下一步。`,
-      "studio_director",
-    );
-  };
+  useEffect(() => {
+    const workflowProgress = detail.data?.workflowProgress;
+    const continuationKey = workflowProgress?.continuationKey;
+    if (!canWrite || !workflowProgress?.needsResume || !continuationKey) return;
+    const resumeKey = `${projectId}:${characterId}:${continuationKey}`;
+    if (resumedContinuationKeys.current.has(resumeKey)) return;
+    resumedContinuationKeys.current.add(resumeKey);
+    void charactersApi
+      .resume(projectId, characterId, continuationKey)
+      .then(async () => {
+        await Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: ["character", projectId, characterId],
+          }),
+          queryClient.invalidateQueries({ queryKey: ["characters", projectId] }),
+          conversation.refresh(),
+        ]);
+      })
+      .catch((error: unknown) => {
+        resumedContinuationKeys.current.delete(resumeKey);
+        message.error(
+          error instanceof Error ? error.message : "自动恢复角色工作流失败",
+        );
+      });
+  }, [
+    canWrite,
+    characterId,
+    conversation,
+    detail.data?.workflowProgress,
+    message,
+    projectId,
+    queryClient,
+  ]);
+
   const confirmSpecDraft = async (draft: ArtifactDraft) => {
     if (
       character?.state !== "S0_spec_drafting" ||
@@ -185,7 +210,6 @@ export default function CharacterPage() {
       throw new Error("当前草稿不是待确认的角色设定");
     }
     await action.mutateAsync({ type: "spec", draftId: draft.id });
-    await continueAfterConfirmation("spec");
   };
   const confirmRender = async () => {
     if (!selectedRender || !hasRenderSelection) {
@@ -195,7 +219,6 @@ export default function CharacterPage() {
       type: "render",
       generationId: selectedRender,
     });
-    await continueAfterConfirmation("render");
   };
   const confirmViews = async () => {
     if (!hasCompleteViewSelection) {
@@ -205,7 +228,6 @@ export default function CharacterPage() {
       type: "views",
       generationIds: selectedViews,
     });
-    await continueAfterConfirmation("views");
   };
   const requestRevision = async (
     stage: "spec" | "render" | "views",
@@ -231,10 +253,6 @@ export default function CharacterPage() {
       setSelectedViews([]);
     }
     await refresh();
-    await conversation.send(
-      `用户对当前角色${stage === "spec" ? "设定" : stage === "render" ? "效果图" : "四视图"}有以下补充要求：${content}`,
-      "studio_director",
-    );
   };
 
   return (

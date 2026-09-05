@@ -189,6 +189,32 @@ pub struct ArtBibleVersion {
 
 pub const MAX_CONTEXT_SUMMARIES: usize = 32;
 pub const MAX_CONTEXT_SUMMARY_BYTES: usize = 8 * 1024;
+pub const MAX_REVIEW_SUBJECT_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowVerdictSummary {
+    pub token: String,
+    pub subject_id: String,
+    pub decision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowContext {
+    pub phase: String,
+    pub pending_draft_id: Option<String>,
+    pub review_status: String,
+    pub latest_verdict: Option<WorkflowVerdictSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSubject {
+    pub id: String,
+    pub target_path: String,
+    pub content: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +234,10 @@ pub struct ContextPackage {
     pub art_bible: Option<String>,
     #[serde(default)]
     pub character_context: Option<String>,
+    #[serde(default)]
+    pub workflow_context: Option<WorkflowContext>,
+    #[serde(default)]
+    pub review_subject: Option<ReviewSubject>,
     #[serde(default)]
     pub memories: Vec<String>,
     #[serde(default)]
@@ -233,6 +263,48 @@ impl ContextPackage {
                 .character_context
                 .as_ref()
                 .is_none_or(|value| value.len() <= 32 * 1024)
+            && self.review_subject.as_ref().is_none_or(|subject| {
+                subject.id.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && subject.target_path.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && subject.content.len() <= MAX_REVIEW_SUBJECT_BYTES
+            })
             && self.action_protocol.len() <= MAX_CONTEXT_SUMMARY_BYTES
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context_with_review_subject(content: String) -> ContextPackage {
+        ContextPackage {
+            conversation_history: Vec::new(),
+            context_version: 1,
+            contract_version: 1,
+            agent_definition_version: "1".to_string(),
+            output_schema: String::new(),
+            target_kind: "character".to_string(),
+            target_ref: Some("character-1".to_string()),
+            stage: "spec".to_string(),
+            art_bible: None,
+            character_context: None,
+            workflow_context: None,
+            review_subject: Some(ReviewSubject {
+                id: "draft-1".to_string(),
+                target_path: "docs/角色定稿.md".to_string(),
+                content,
+            }),
+            memories: Vec::new(),
+            allowed_handoffs: Vec::new(),
+            action_protocol: String::new(),
+        }
+    }
+
+    #[test]
+    fn review_subject_is_limited_to_32_kib() {
+        assert!(context_with_review_subject("x".repeat(MAX_REVIEW_SUBJECT_BYTES)).is_bounded());
+        assert!(
+            !context_with_review_subject("x".repeat(MAX_REVIEW_SUBJECT_BYTES + 1)).is_bounded()
+        );
     }
 }

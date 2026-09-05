@@ -355,7 +355,9 @@ game_dto!(GameCharacterWorkflowStep {
 });
 game_dto!(GameCharacterWorkflowProgress {
     status_label: String,
-    steps: Vec<GameCharacterWorkflowStep>
+    steps: Vec<GameCharacterWorkflowStep>,
+    needs_resume: bool,
+    continuation_key: Option<String>
 });
 game_dto!(GameCharacterReadResponse {
     character: GameCharacter,
@@ -388,8 +390,14 @@ game_dto!(GameCharacterRejectViewsParams {
     character_id: String,
     reason: String
 });
+game_dto!(GameCharacterResumeParams {
+    project_id: String,
+    character_id: String,
+    continuation_key: String
+});
 game_dto!(GameCharacterResponse {
-    character: GameCharacter
+    character: GameCharacter,
+    execution_started: bool
 });
 game_dto!(GameGenerationRegisterParams { project_id: String, character_id: String, stage: String, variant: Option<String>, file_path: String, source: String, asset_spec: serde_json::Value });
 game_dto!(GameGenerationRegisterResponse {

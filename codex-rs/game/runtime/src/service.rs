@@ -4,6 +4,7 @@ use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentActionPayload;
 use codex_game_domain::AgentHandoff;
+use codex_game_domain::AgentVerdict;
 use codex_game_domain::ArtBibleVersion;
 use codex_game_domain::ArtBibleVersionId;
 use codex_game_domain::ArtifactDraftRecord;
@@ -21,9 +22,14 @@ use codex_game_domain::MAX_HANDOFFS;
 use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
+use codex_game_domain::ProjectMemory;
 use codex_game_domain::ProjectState;
+use codex_game_domain::ReviewSubject;
+use codex_game_domain::Task;
 use codex_game_domain::TaskAttemptStatus;
 use codex_game_domain::TaskStatus;
+use codex_game_domain::WorkflowContext;
+use codex_game_domain::WorkflowVerdictSummary;
 use codex_game_store::ProjectAccess;
 use codex_game_store::ProjectStore;
 use codex_game_store::StoreError;
@@ -52,6 +58,8 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 use uuid::Uuid;
+
+const CONVERSATION_ALREADY_RUNNING: &str = "该会话已有一轮正在运行";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +114,45 @@ pub struct CharacterWorkflowStep {
 pub struct CharacterWorkflowProgress {
     pub status_label: String,
     pub steps: Vec<CharacterWorkflowStep>,
+    pub needs_resume: bool,
+    pub continuation_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecReviewStatus {
+    AwaitingDraft,
+    Pending,
+    Approved,
+    Concerns,
+    Rejected,
+    Error,
+}
+
+impl SpecReviewStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingDraft => "awaiting_draft",
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Concerns => "concerns",
+            Self::Rejected => "rejected",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CharacterWorkflowFacts {
+    pending_spec: Option<ArtifactDraftRecord>,
+    spec_review_status: SpecReviewStatus,
+    latest_spec_verdict: Option<AgentVerdict>,
+    latest_spec_rejection_id: Option<String>,
+    render_rejection_id: Option<String>,
+    views_rejection_id: Option<String>,
+    render_rejected_after_generation: bool,
+    views_rejected_after_generation: bool,
+    failed_design_stage: Option<String>,
+    has_running_task: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -564,19 +611,8 @@ impl GameService {
                     .ok_or_else(|| {
                         GameServiceError::InvalidAction("找不到本轮待完成的 Agent 消息".to_string())
                     })?;
-                let handoff_count = snapshot
-                    .handoffs
-                    .iter()
-                    .filter(|handoff| handoff.turn == snapshot.conversation.turn)
-                    .count();
                 let director = snapshot.conversation.director_agent_code.clone();
-                let allowed = allowed_handoffs_for(
-                    snapshot.conversation.target_kind.as_str(),
-                    &context.stage,
-                    &context.agent_code,
-                    &director,
-                    handoff_count,
-                );
+                let allowed = context.context.allowed_handoffs.clone();
                 (assistant.id.clone(), director, allowed)
             };
             let parsed = output
@@ -604,6 +640,30 @@ impl GameService {
                     ));
                 }
             };
+            if context.agent_code == "spec_reviewer"
+                && parsed.action.action == AgentActionKind::Handoff
+            {
+                let expected_subject = context.context.review_subject.as_ref().map(|item| &item.id);
+                let verdict = parsed.action.payload.verdict.as_ref();
+                if expected_subject.is_none()
+                    || verdict.is_none_or(|verdict| {
+                        verdict.token != "SPEC-CHECK"
+                            || Some(&verdict.subject_id) != expected_subject
+                    })
+                {
+                    return Ok(TurnOutputCompletion::ActionProtocolViolation(
+                        ActionProtocolViolation {
+                            codex_turn_id: codex_turn_id.to_string(),
+                            assistant_message_id,
+                            message:
+                                "Action 协议校验失败：SPEC-CHECK subject_id 必须匹配当前待审草稿"
+                                    .to_string(),
+                            context,
+                            store,
+                        },
+                    ));
+                }
+            }
             let (generations, updated_character) = match self
                 .prepare_action_generations(&context, &parsed.action)
                 .await
@@ -1112,6 +1172,36 @@ impl GameService {
         .await
     }
 
+    pub async fn prepare_character_director_resume_turn(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        content: String,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        self.prepare_director_resume_turn(conversation.id.as_str(), content)
+            .await
+    }
+
+    pub async fn prepare_character_director_resume_turn_if_idle(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        content: String,
+    ) -> Result<Option<PreparedConversationTurn>, GameServiceError> {
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        self.prepare_director_resume_turn_if_idle(conversation.id.as_str(), content)
+            .await
+    }
+
     pub async fn prepare_director_resume_turn(
         &self,
         conversation_id: &str,
@@ -1129,6 +1219,25 @@ impl GameService {
             true,
         )
         .await
+    }
+
+    pub async fn prepare_director_resume_turn_if_idle(
+        &self,
+        conversation_id: &str,
+        content: String,
+    ) -> Result<Option<PreparedConversationTurn>, GameServiceError> {
+        match self
+            .prepare_director_resume_turn(conversation_id, content)
+            .await
+        {
+            Ok(prepared) => Ok(Some(prepared)),
+            Err(GameServiceError::InvalidAction(message))
+                if message == CONVERSATION_ALREADY_RUNNING =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn prepare_conversation_turn_with_visibility(
@@ -1166,7 +1275,7 @@ impl GameService {
         };
         if status == ConversationStatus::Running {
             return Err(GameServiceError::InvalidAction(
-                "该会话已有一轮正在运行".to_string(),
+                CONVERSATION_ALREADY_RUNNING.to_string(),
             ));
         }
         let stage = match target_kind {
@@ -1208,6 +1317,11 @@ impl GameService {
                 .ok_or_else(|| {
                     GameServiceError::ConversationNotFound(conversation_id.to_string())
                 })?;
+            if snapshot.conversation.status == ConversationStatus::Running {
+                return Err(GameServiceError::InvalidAction(
+                    CONVERSATION_ALREADY_RUNNING.to_string(),
+                ));
+            }
             snapshot.conversation.turn += 1;
             snapshot.conversation.focus_agent_code = Some(agent_code.clone());
             snapshot.conversation.status = ConversationStatus::Running;
@@ -1504,23 +1618,81 @@ impl GameService {
             .await?;
         let art_bible_path = Path::new(&prepared.project.root).join("art-bible.md");
         let art_bible = fs::read_to_string(art_bible_path).ok();
-        let character_context = if prepared.conversation.target_kind
-            == ConversationTargetKind::Character
-        {
+        let character = if prepared.conversation.target_kind == ConversationTargetKind::Character {
             let character_id = prepared.conversation.target_ref.as_deref().ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("角色会话缺少 targetRef".to_string())
             })?;
             Some(
-                serde_json::to_string(
-                    &self
-                        .read_character(prepared.project.id.as_str(), character_id)
-                        .await?,
-                )
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                self.read_character(prepared.project.id.as_str(), character_id)
+                    .await?,
             )
         } else {
             None
         };
+        let character_context = character
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let project_memories = prepared
+            .store
+            .list_project_memories(
+                prepared.project.id.as_str(),
+                prepared.conversation.target_ref.as_deref(),
+            )
+            .await?;
+        let workflow_facts = if let Some(character) = character.as_ref() {
+            let tasks = prepared
+                .store
+                .list_tasks(prepared.conversation.id.as_str())
+                .await?;
+            let generations = prepared
+                .store
+                .list_generations(
+                    prepared.project.id.as_str(),
+                    "character",
+                    character.id.as_str(),
+                    None,
+                )
+                .await?;
+            Some(character_workflow_facts(
+                character,
+                &snapshot.messages,
+                &snapshot.drafts,
+                &tasks,
+                &generations,
+                &project_memories,
+            ))
+        } else {
+            None
+        };
+        let workflow_context =
+            character
+                .as_ref()
+                .zip(workflow_facts.as_ref())
+                .map(|(character, facts)| WorkflowContext {
+                    phase: serde_json::to_value(character.state)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_else(|| character.state.stage().to_string()),
+                    pending_draft_id: facts.pending_spec.as_ref().map(|draft| draft.id.clone()),
+                    review_status: facts.spec_review_status.as_str().to_string(),
+                    latest_verdict: facts.latest_spec_verdict.as_ref().map(|verdict| {
+                        WorkflowVerdictSummary {
+                            token: verdict.token.clone(),
+                            subject_id: verdict.subject_id.clone(),
+                            decision: verdict.decision.clone(),
+                        }
+                    }),
+                });
+        let review_subject = (prepared.agent_code == "spec_reviewer")
+            .then(|| workflow_facts.as_ref()?.pending_spec.as_ref())
+            .flatten()
+            .map(|draft| ReviewSubject {
+                id: draft.id.clone(),
+                target_path: draft.target_path.clone(),
+                content: draft.content.clone(),
+            });
         let handoff_count = snapshot
             .handoffs
             .iter()
@@ -1532,6 +1704,8 @@ impl GameService {
             &prepared.agent_code,
             &prepared.conversation.director_agent_code,
             handoff_count,
+            character.as_ref(),
+            workflow_facts.as_ref(),
         );
         let conversation_history = snapshot
             .messages
@@ -1546,13 +1720,7 @@ impl GameService {
                 )
             })
             .collect();
-        let memories = prepared
-            .store
-            .list_project_memories(
-                prepared.project.id.as_str(),
-                prepared.conversation.target_ref.as_deref(),
-            )
-            .await?
+        let memories = project_memories
             .into_iter()
             .map(|memory| format!("{}:{}", memory.kind, memory.content))
             .collect();
@@ -1568,6 +1736,8 @@ impl GameService {
             stage: prepared.stage.clone(),
             art_bible,
             character_context,
+            workflow_context,
+            review_subject,
             memories,
             allowed_handoffs,
             action_protocol: action_protocol_instruction(
@@ -1948,89 +2118,101 @@ impl GameService {
         let memories = store
             .list_project_memories(project_id, Some(character_id))
             .await?;
-        let (drafts, tasks) = if let Some(conversation) = conversation {
+        let conversation_running = conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.status == ConversationStatus::Running);
+        let (messages, drafts, tasks) = if let Some(conversation) = conversation {
+            let snapshot = self.read_conversation(conversation.id.as_str()).await?;
             (
+                snapshot.messages,
                 store.list_drafts(conversation.id.as_str()).await?,
                 store.list_tasks(conversation.id.as_str()).await?,
             )
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
-
-        let latest_pending_spec = drafts
-            .iter()
-            .filter(|draft| draft.status == "pending" && draft.target_path == "docs/角色定稿.md")
-            .max_by_key(|draft| (draft.created_at, draft.id.as_str()));
-        let latest_spec_rejection = memories
-            .iter()
-            .filter(|memory| {
-                memory.character_ref.as_deref() == Some(character_id)
-                    && memory.kind == "spec_rejection"
-            })
-            .max_by_key(|memory| (memory.updated_at, memory.id.as_str()));
-        let has_fresh_pending_spec = latest_pending_spec.is_some_and(|draft| {
-            latest_spec_rejection.is_none_or(|rejection| {
-                (draft.created_at, draft.id.as_str())
-                    > (rejection.updated_at, rejection.id.as_str())
-            })
-        });
-        let spec_review_succeeded = tasks
-            .iter()
-            .rev()
-            .find(|task| {
-                task.target_id == character_id
-                    && task.stage == "spec"
-                    && matches!(task.agent_code.as_str(), "spec_writer" | "spec_reviewer")
-            })
-            .is_some_and(|task| {
-                task.agent_code == "spec_reviewer" && task.status == TaskStatus::Succeeded
-            });
-        let rejected_after = |stage: &str| {
-            let latest_generation = generations
-                .iter()
-                .filter(|generation| generation.stage == stage)
-                .max_by_key(|generation| (generation.created_at, generation.id.as_str()));
-            let latest_rejection = memories
-                .iter()
-                .filter(|memory| {
-                    memory.character_ref.as_deref() == Some(character_id)
-                        && memory.kind == format!("{stage}_rejection")
-                })
-                .max_by_key(|memory| (memory.updated_at, memory.id.as_str()));
-            matches!(
-                (latest_rejection, latest_generation),
-                (Some(rejected), Some(generated))
-                    if (rejected.updated_at, rejected.id.as_str())
-                        > (generated.created_at, generated.id.as_str())
-            )
+        let facts = character_workflow_facts(
+            &character,
+            &messages,
+            &drafts,
+            &tasks,
+            &generations,
+            &memories,
+        );
+        let spec_confirmation_ready = matches!(
+            facts.spec_review_status,
+            SpecReviewStatus::Approved | SpecReviewStatus::Concerns
+        );
+        let spec_review_failed = facts.spec_review_status == SpecReviewStatus::Error;
+        let continuation_key = if conversation_running || facts.has_running_task {
+            None
+        } else {
+            match character.state {
+                CharacterState::S0SpecDrafting => match facts.spec_review_status {
+                    SpecReviewStatus::Pending | SpecReviewStatus::Rejected => facts
+                        .pending_spec
+                        .as_ref()
+                        .map(|draft| format!("spec:{}", draft.id)),
+                    SpecReviewStatus::AwaitingDraft => facts
+                        .latest_spec_rejection_id
+                        .as_ref()
+                        .map(|id| format!("spec-rewrite:{id}")),
+                    SpecReviewStatus::Approved
+                    | SpecReviewStatus::Concerns
+                    | SpecReviewStatus::Error => None,
+                },
+                CharacterState::S1SpecConfirmed => character
+                    .gate_spec_confirmed_at
+                    .map(|timestamp| format!("render:{timestamp}")),
+                CharacterState::S2RenderGenerated => facts
+                    .render_rejection_id
+                    .as_ref()
+                    .map(|id| format!("render-retry:{id}")),
+                CharacterState::S3RenderConfirmed => character
+                    .gate_render_confirmed_at
+                    .map(|timestamp| format!("views:{timestamp}")),
+                CharacterState::S4ViewsGenerated => facts
+                    .views_rejection_id
+                    .as_ref()
+                    .map(|id| format!("views-retry:{id}")),
+                CharacterState::S5ViewsConfirmed => None,
+            }
         };
-        let render_rejected_after_generation = rejected_after("render");
-        let views_rejected_after_generation = rejected_after("views");
-        let current_design_stage = match character.state {
-            CharacterState::S0SpecDrafting => Some("spec"),
-            CharacterState::S1SpecConfirmed => Some("render"),
-            CharacterState::S2RenderGenerated if render_rejected_after_generation => Some("render"),
-            CharacterState::S3RenderConfirmed => Some("views"),
-            CharacterState::S4ViewsGenerated if views_rejected_after_generation => Some("views"),
-            CharacterState::S2RenderGenerated
-            | CharacterState::S4ViewsGenerated
-            | CharacterState::S5ViewsConfirmed => None,
-        };
-        let failed_design_stage = current_design_stage.filter(|stage| {
-            tasks
-                .iter()
-                .rev()
-                .find(|task| task.target_id == character_id && task.stage == *stage)
-                .is_some_and(|task| task.status == TaskStatus::Failed)
-        });
 
         Ok(build_character_workflow_progress(
             character.state,
-            has_fresh_pending_spec && spec_review_succeeded,
-            render_rejected_after_generation,
-            views_rejected_after_generation,
-            failed_design_stage,
+            spec_confirmation_ready,
+            spec_review_failed,
+            facts.render_rejected_after_generation,
+            facts.views_rejected_after_generation,
+            facts.failed_design_stage.as_deref(),
+            continuation_key,
         ))
+    }
+
+    pub async fn prepare_character_resume_if_needed(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        continuation_key: &str,
+    ) -> Result<Option<PreparedConversationTurn>, GameServiceError> {
+        let progress = self
+            .character_workflow_progress(project_id, character_id)
+            .await?;
+        let Some(current_key) = progress.continuation_key else {
+            return Ok(None);
+        };
+        if current_key != continuation_key {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "续跑标识已过期，请刷新角色状态".to_string(),
+            ));
+        }
+        self.prepare_character_director_resume_turn_if_idle(
+            project_id,
+            character_id,
+            format!("检测到角色工作流待续跑（{current_key}），请根据当前状态继续处理。"),
+        )
+        .await
     }
 
     pub async fn remove_character(
@@ -2169,7 +2351,7 @@ impl GameService {
             ));
         }
         let constraints = self
-            .collect_verdict_constraints(project_id, character_id, "SPEC-CHECK", draft.created_at)
+            .collect_verdict_constraints(project_id, character_id, "SPEC-CHECK", &draft.id)
             .await?;
         let relative = PathBuf::from(&character.dir_name).join(&draft.target_path);
         let path = Path::new(&project.root).join(&relative);
@@ -2314,13 +2496,6 @@ impl GameService {
             .ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("渲染记录不存在".to_string())
             })?;
-        self.collect_verdict_constraints(
-            project_id,
-            character_id,
-            "VIEW-CHECK",
-            generation.created_at,
-        )
-        .await?;
         let source = safe_project_path(&project.root, &generation.file_path)?;
         if !source.is_file() {
             return Err(GameServiceError::InvalidCharacterOperation(
@@ -2404,13 +2579,6 @@ impl GameService {
                 "四视图候选必须是完整的 2×2 四宫格".to_string(),
             ));
         }
-        self.collect_verdict_constraints(
-            project_id,
-            character_id,
-            "VIEW-CHECK",
-            generation.created_at,
-        )
-        .await?;
         let source = safe_project_path(&project.root, &generation.file_path)?;
         if !source.is_file() {
             return Err(GameServiceError::InvalidCharacterOperation(format!(
@@ -2505,7 +2673,7 @@ impl GameService {
         project_id: &str,
         character_id: &str,
         token: &str,
-        not_before: i64,
+        subject_id: &str,
     ) -> Result<Vec<serde_json::Value>, GameServiceError> {
         let conversation = self.find_target_conversation(
             project_id,
@@ -2513,16 +2681,22 @@ impl GameService {
             Some(character_id),
         )?;
         let snapshot = self.read_conversation(conversation.id.as_str()).await?;
-        let Some(verdict) = snapshot
+        let verdict = snapshot
             .messages
             .iter()
             .rev()
-            .filter(|message| message.created_at >= not_before)
             .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
-            .find(|verdict| verdict.token == token && verdict.decision == "APPROVE")
-        else {
-            return Ok(Vec::new());
-        };
+            .find(|verdict| verdict.token == token && verdict.subject_id == subject_id)
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(
+                    "缺少与当前角色设定草稿匹配的审校结论".to_string(),
+                )
+            })?;
+        if !matches!(verdict.decision.as_str(), "APPROVE" | "CONCERNS") {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "当前角色设定草稿未通过审校，不能确认".to_string(),
+            ));
+        }
         verdict
             .constraints
             .iter()
@@ -2668,12 +2842,136 @@ fn validate_draft_baseline(path: &Path, expected: Option<&str>) -> Result<(), Ga
     Ok(())
 }
 
+fn character_workflow_facts(
+    character: &Character,
+    messages: &[ConversationMessage],
+    drafts: &[ArtifactDraftRecord],
+    tasks: &[Task],
+    generations: &[Generation],
+    memories: &[ProjectMemory],
+) -> CharacterWorkflowFacts {
+    let latest_spec_rejection = memories
+        .iter()
+        .filter(|memory| {
+            memory.character_ref.as_deref() == Some(character.id.as_str())
+                && memory.kind == "spec_rejection"
+        })
+        .max_by_key(|memory| (memory.updated_at, memory.id.as_str()));
+    let pending_spec = drafts
+        .iter()
+        .filter(|draft| draft.status == "pending" && draft.target_path == "docs/角色定稿.md")
+        .filter(|draft| {
+            latest_spec_rejection.is_none_or(|rejection| {
+                (draft.created_at, draft.id.as_str())
+                    > (rejection.updated_at, rejection.id.as_str())
+            })
+        })
+        .max_by_key(|draft| (draft.created_at, draft.id.as_str()))
+        .cloned();
+    let latest_spec_verdict = messages
+        .iter()
+        .rev()
+        .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
+        .find(|verdict| verdict.token == "SPEC-CHECK")
+        .cloned();
+    let matching_verdict = pending_spec.as_ref().and_then(|draft| {
+        messages
+            .iter()
+            .rev()
+            .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
+            .find(|verdict| verdict.token == "SPEC-CHECK" && verdict.subject_id == draft.id)
+    });
+    let latest_spec_task = tasks.iter().rev().find(|task| {
+        task.target_id == character.id
+            && task.stage == "spec"
+            && matches!(task.agent_code.as_str(), "spec_writer" | "spec_reviewer")
+    });
+    let spec_review_status = if pending_spec.is_none() {
+        SpecReviewStatus::AwaitingDraft
+    } else if let Some(verdict) = matching_verdict {
+        match verdict.decision.as_str() {
+            "APPROVE" => SpecReviewStatus::Approved,
+            "CONCERNS" => SpecReviewStatus::Concerns,
+            "REJECT" => SpecReviewStatus::Rejected,
+            _ => SpecReviewStatus::Error,
+        }
+    } else if latest_spec_task.is_some_and(|task| task.agent_code == "spec_reviewer") {
+        match latest_spec_task.map(|task| task.status) {
+            Some(TaskStatus::Pending | TaskStatus::Running) => SpecReviewStatus::Pending,
+            Some(TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled) | None => {
+                SpecReviewStatus::Error
+            }
+        }
+    } else {
+        SpecReviewStatus::Pending
+    };
+    let rejection_after_generation = |stage: &str| {
+        let latest_generation = generations
+            .iter()
+            .filter(|generation| generation.stage == stage)
+            .max_by_key(|generation| (generation.created_at, generation.id.as_str()));
+        memories
+            .iter()
+            .filter(|memory| {
+                memory.character_ref.as_deref() == Some(character.id.as_str())
+                    && memory.kind == format!("{stage}_rejection")
+            })
+            .max_by_key(|memory| (memory.updated_at, memory.id.as_str()))
+            .filter(|rejected| {
+                latest_generation.is_some_and(|generated| {
+                    (rejected.updated_at, rejected.id.as_str())
+                        > (generated.created_at, generated.id.as_str())
+                })
+            })
+    };
+    let render_rejection = rejection_after_generation("render");
+    let views_rejection = rejection_after_generation("views");
+    let render_rejected_after_generation = render_rejection.is_some();
+    let views_rejected_after_generation = views_rejection.is_some();
+    let current_design_stage = match character.state {
+        CharacterState::S0SpecDrafting => Some("spec"),
+        CharacterState::S1SpecConfirmed => Some("render"),
+        CharacterState::S2RenderGenerated if render_rejected_after_generation => Some("render"),
+        CharacterState::S3RenderConfirmed => Some("views"),
+        CharacterState::S4ViewsGenerated if views_rejected_after_generation => Some("views"),
+        CharacterState::S2RenderGenerated
+        | CharacterState::S4ViewsGenerated
+        | CharacterState::S5ViewsConfirmed => None,
+    };
+    let failed_design_stage = current_design_stage
+        .filter(|stage| {
+            tasks
+                .iter()
+                .rev()
+                .find(|task| task.target_id == character.id && task.stage == *stage)
+                .is_some_and(|task| task.status == TaskStatus::Failed)
+        })
+        .map(str::to_string);
+
+    CharacterWorkflowFacts {
+        pending_spec,
+        spec_review_status,
+        latest_spec_verdict,
+        latest_spec_rejection_id: latest_spec_rejection.map(|memory| memory.id.clone()),
+        render_rejection_id: render_rejection.map(|memory| memory.id.clone()),
+        views_rejection_id: views_rejection.map(|memory| memory.id.clone()),
+        render_rejected_after_generation,
+        views_rejected_after_generation,
+        failed_design_stage,
+        has_running_task: tasks
+            .iter()
+            .any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)),
+    }
+}
+
 fn build_character_workflow_progress(
     state: CharacterState,
     spec_confirmation_ready: bool,
+    spec_review_failed: bool,
     render_rejected_after_generation: bool,
     views_rejected_after_generation: bool,
     failed_design_stage: Option<&str>,
+    continuation_key: Option<String>,
 ) -> CharacterWorkflowProgress {
     let mut statuses = ["wait"; 6];
     let current_design = match state {
@@ -2729,6 +3027,9 @@ fn build_character_workflow_progress(
     {
         statuses[index] = "error";
     }
+    if state == CharacterState::S0SpecDrafting && spec_review_failed {
+        statuses[0] = "error";
+    }
     let labels = [
         ("spec_design", "角色设定"),
         ("spec_confirm", "确认设定"),
@@ -2757,6 +3058,8 @@ fn build_character_workflow_progress(
                 status: status.to_string(),
             })
             .collect(),
+        needs_resume: continuation_key.is_some(),
+        continuation_key,
     }
 }
 
@@ -2853,6 +3156,8 @@ fn allowed_handoffs_for(
     current_agent: &str,
     director_agent: &str,
     handoff_count: usize,
+    character: Option<&Character>,
+    workflow: Option<&CharacterWorkflowFacts>,
 ) -> Vec<String> {
     if handoff_count >= MAX_HANDOFFS {
         return Vec::new();
@@ -2860,11 +3165,36 @@ fn allowed_handoffs_for(
     if current_agent != director_agent {
         return vec![director_agent.to_string()];
     }
-    codex_game_domain::agents_for_stage(target_kind, stage)
-        .iter()
-        .filter(|agent| **agent != director_agent)
-        .map(|agent| (*agent).to_string())
-        .collect()
+    if target_kind != "character" {
+        return codex_game_domain::agents_for_stage(target_kind, stage)
+            .iter()
+            .filter(|agent| **agent != director_agent)
+            .map(|agent| (*agent).to_string())
+            .collect();
+    }
+    let (Some(character), Some(workflow)) = (character, workflow) else {
+        return Vec::new();
+    };
+    let target = match character.state {
+        CharacterState::S0SpecDrafting => match workflow.spec_review_status {
+            SpecReviewStatus::AwaitingDraft | SpecReviewStatus::Rejected => Some("spec_writer"),
+            SpecReviewStatus::Pending | SpecReviewStatus::Error => Some("spec_reviewer"),
+            SpecReviewStatus::Approved | SpecReviewStatus::Concerns => None,
+        },
+        CharacterState::S1SpecConfirmed | CharacterState::S3RenderConfirmed => {
+            Some("visual_designer")
+        }
+        CharacterState::S2RenderGenerated if workflow.render_rejected_after_generation => {
+            Some("visual_designer")
+        }
+        CharacterState::S4ViewsGenerated if workflow.views_rejected_after_generation => {
+            Some("visual_designer")
+        }
+        CharacterState::S2RenderGenerated
+        | CharacterState::S4ViewsGenerated
+        | CharacterState::S5ViewsConfirmed => None,
+    };
+    target.into_iter().map(str::to_string).collect()
 }
 
 fn action_protocol_instruction(current_agent: &str, director_agent: &str) -> String {
@@ -2924,6 +3254,43 @@ mod tests {
                     status: status.to_string(),
                 })
                 .collect(),
+            needs_resume: false,
+            continuation_key: None,
+        }
+    }
+
+    fn test_character(state: CharacterState) -> Character {
+        Character {
+            id: "character-1".to_string(),
+            project_id: "project-1".to_string(),
+            name: "角色".to_string(),
+            group: None,
+            dir_name: "character-1".to_string(),
+            state,
+            spec_path: None,
+            render_path: None,
+            view_paths: BTreeMap::new(),
+            hard_constraints: Vec::new(),
+            gate_spec_confirmed_at: None,
+            gate_render_confirmed_at: None,
+            gate_views_confirmed_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_workflow_facts(spec_review_status: SpecReviewStatus) -> CharacterWorkflowFacts {
+        CharacterWorkflowFacts {
+            pending_spec: None,
+            spec_review_status,
+            latest_spec_verdict: None,
+            latest_spec_rejection_id: None,
+            render_rejection_id: None,
+            views_rejection_id: None,
+            render_rejected_after_generation: false,
+            views_rejected_after_generation: false,
+            failed_design_stage: None,
+            has_running_task: false,
         }
     }
 
@@ -2981,6 +3348,8 @@ mod tests {
                     spec_confirmation_ready,
                     false,
                     false,
+                    false,
+                    None,
                     None,
                 ),
                 expected_workflow(status_label, statuses)
@@ -2989,14 +3358,190 @@ mod tests {
     }
 
     #[test]
+    fn character_handoffs_follow_review_and_gate_state() {
+        let character = test_character(CharacterState::S0SpecDrafting);
+        let cases = [
+            (SpecReviewStatus::AwaitingDraft, vec!["spec_writer"]),
+            (SpecReviewStatus::Pending, vec!["spec_reviewer"]),
+            (SpecReviewStatus::Error, vec!["spec_reviewer"]),
+            (SpecReviewStatus::Rejected, vec!["spec_writer"]),
+            (SpecReviewStatus::Approved, Vec::new()),
+            (SpecReviewStatus::Concerns, Vec::new()),
+        ];
+        for (status, expected) in cases {
+            let facts = test_workflow_facts(status);
+            assert_eq!(
+                allowed_handoffs_for(
+                    "character",
+                    "spec",
+                    "studio_director",
+                    "studio_director",
+                    0,
+                    Some(&character),
+                    Some(&facts),
+                ),
+                expected
+            );
+        }
+
+        let mut character = test_character(CharacterState::S2RenderGenerated);
+        let mut facts = test_workflow_facts(SpecReviewStatus::Approved);
+        assert!(
+            allowed_handoffs_for(
+                "character",
+                "render",
+                "studio_director",
+                "studio_director",
+                0,
+                Some(&character),
+                Some(&facts),
+            )
+            .is_empty()
+        );
+        facts.render_rejected_after_generation = true;
+        assert_eq!(
+            allowed_handoffs_for(
+                "character",
+                "render",
+                "studio_director",
+                "studio_director",
+                0,
+                Some(&character),
+                Some(&facts),
+            ),
+            vec!["visual_designer"]
+        );
+        character.state = CharacterState::S5ViewsConfirmed;
+        assert!(
+            allowed_handoffs_for(
+                "character",
+                "views",
+                "studio_director",
+                "studio_director",
+                0,
+                Some(&character),
+                Some(&facts),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn spec_review_verdict_matches_the_pending_draft_id() {
+        let character = test_character(CharacterState::S0SpecDrafting);
+        let draft = ArtifactDraftRecord {
+            id: "draft-current".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            target_path: "docs/角色定稿.md".to_string(),
+            content: "# 角色设定".to_string(),
+            based_on_hash: None,
+            status: "pending".to_string(),
+            created_at: 2,
+        };
+        let verdict_message =
+            |id: &str, subject_id: &str, decision: &str, created_at| ConversationMessage {
+                id: id.to_string(),
+                conversation_id: ConversationId::new("conversation-1"),
+                turn: 1,
+                role: "assistant".to_string(),
+                content: String::new(),
+                agent_code: "spec_reviewer".to_string(),
+                recipient_agent_code: None,
+                status: MessageStatus::Completed,
+                token_count: 0,
+                folded: false,
+                attachments: Vec::new(),
+                action: Some(AgentAction {
+                    action: AgentActionKind::Handoff,
+                    target_agent: Some("studio_director".to_string()),
+                    reason: "审校完成".to_string(),
+                    payload: AgentActionPayload {
+                        verdict: Some(AgentVerdict {
+                            token: "SPEC-CHECK".to_string(),
+                            subject_id: subject_id.to_string(),
+                            decision: decision.to_string(),
+                            sections: BTreeMap::new(),
+                            constraints: Vec::new(),
+                        }),
+                        ..AgentActionPayload::default()
+                    },
+                }),
+                created_at,
+            };
+        let messages = vec![
+            verdict_message("matching", "draft-current", "CONCERNS", 3),
+            verdict_message("stale", "draft-old", "REJECT", 4),
+        ];
+
+        let facts = character_workflow_facts(&character, &messages, &[draft], &[], &[], &[]);
+
+        assert_eq!(facts.spec_review_status, SpecReviewStatus::Concerns);
+        assert_eq!(
+            facts
+                .pending_spec
+                .as_ref()
+                .map(|pending| pending.id.as_str()),
+            Some("draft-current")
+        );
+        assert_eq!(
+            facts
+                .latest_spec_verdict
+                .as_ref()
+                .map(|verdict| verdict.subject_id.as_str()),
+            Some("draft-old")
+        );
+    }
+
+    #[test]
+    fn workflow_progress_reports_resume_and_review_failure() {
+        let resumable = build_character_workflow_progress(
+            CharacterState::S1SpecConfirmed,
+            false,
+            false,
+            false,
+            false,
+            None,
+            Some("render:1".to_string()),
+        );
+        assert!(resumable.needs_resume);
+        assert_eq!(resumable.continuation_key.as_deref(), Some("render:1"));
+
+        let review_failed = build_character_workflow_progress(
+            CharacterState::S0SpecDrafting,
+            false,
+            true,
+            false,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(review_failed.steps[0].status, "error");
+        assert!(!review_failed.needs_resume);
+
+        let terminal = build_character_workflow_progress(
+            CharacterState::S5ViewsConfirmed,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
+        assert!(!terminal.needs_resume);
+        assert!(terminal.continuation_key.is_none());
+    }
+
+    #[test]
     fn character_workflow_returns_to_design_after_rejection_and_marks_failures() {
         assert_eq!(
             build_character_workflow_progress(
                 CharacterState::S2RenderGenerated,
                 false,
+                false,
                 true,
                 false,
                 Some("render"),
+                None,
             ),
             expected_workflow(
                 "效果图设计",
@@ -3008,7 +3553,9 @@ mod tests {
                 CharacterState::S4ViewsGenerated,
                 false,
                 false,
+                false,
                 true,
+                None,
                 None,
             ),
             expected_workflow(

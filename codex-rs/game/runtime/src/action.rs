@@ -5,6 +5,7 @@ use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentResultStatus;
 use codex_game_domain::AgentTurnOutput;
 use codex_game_domain::MAX_CHOICE_GROUPS;
+use codex_game_domain::MAX_REVIEW_SUBJECT_BYTES;
 use serde::Deserialize;
 use serde::de::MapAccess;
 use serde::de::SeqAccess;
@@ -158,7 +159,9 @@ fn validate_payload(
     let payload = &action.payload;
     if payload.drafts.as_ref().is_some_and(|drafts| {
         drafts.iter().any(|draft| {
-            draft.content.trim().is_empty() || !is_safe_relative_path(&draft.target_path)
+            draft.content.trim().is_empty()
+                || draft.content.len() > MAX_REVIEW_SUBJECT_BYTES
+                || !is_safe_relative_path(&draft.target_path)
         })
     }) {
         return Err(ActionProtocolError::InvalidPayload(
@@ -215,6 +218,7 @@ fn validate_payload(
     }
     if let Some(verdict) = &payload.verdict
         && (!matches!(verdict.token.as_str(), "SPEC-CHECK" | "VIEW-CHECK")
+            || verdict.subject_id.trim().is_empty()
             || !matches!(verdict.decision.as_str(), "APPROVE" | "CONCERNS" | "REJECT")
             || verdict.sections.is_empty()
             || verdict
@@ -545,6 +549,7 @@ mod tests {
             "payload": {
                 "verdict": {
                     "token": "SPEC-CHECK",
+                    "subject_id": "draft-1",
                     "decision": "CONCERNS",
                     "sections": { "模糊表述": ["需要补充材质数值"] },
                     "constraints": []
@@ -652,6 +657,53 @@ mod tests {
                     .to_string()
             ))
         );
+    }
+
+    #[test]
+    fn verdict_requires_subject_id_and_drafts_are_bounded() {
+        let missing_subject = output(json!({
+            "action": "handoff",
+            "target_agent": "studio_director",
+            "reason": "审校完成",
+            "payload": {
+                "verdict": {
+                    "token": "SPEC-CHECK",
+                    "decision": "APPROVE",
+                    "sections": { "缺失维度": [] },
+                    "constraints": []
+                }
+            }
+        }));
+        assert!(matches!(
+            parse_agent_turn(
+                &missing_subject,
+                "spec_reviewer",
+                "studio_director",
+                &["studio_director".to_string()],
+            ),
+            Err(ActionProtocolError::InvalidJson(_))
+        ));
+
+        let oversized_draft = output(json!({
+            "action": "ask_user",
+            "target_agent": null,
+            "reason": "请确认角色设定",
+            "payload": {
+                "drafts": [{
+                    "target_path": "docs/角色定稿.md",
+                    "content": "x".repeat(MAX_REVIEW_SUBJECT_BYTES + 1)
+                }]
+            }
+        }));
+        assert!(matches!(
+            parse_agent_turn(
+                &oversized_draft,
+                "spec_writer",
+                "studio_director",
+                &["studio_director".to_string()],
+            ),
+            Err(ActionProtocolError::InvalidPayload(_))
+        ));
     }
 
     #[test]

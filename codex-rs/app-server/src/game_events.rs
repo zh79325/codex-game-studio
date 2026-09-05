@@ -170,6 +170,7 @@ pub(crate) fn spawn_game_event_observer(
                         .clone()
                         .unwrap_or_else(|| turn_id.to_string());
                     let is_running = projection.status == "running";
+                    let director_resume_reason = projection.director_resume_reason.clone();
                     outgoing
                         .send_server_notification(ServerNotification::GameAttemptUpdated(
                             GameAttemptUpdatedNotification {
@@ -323,7 +324,7 @@ pub(crate) fn spawn_game_event_observer(
                                     .send_server_notification(
                                         ServerNotification::GameConversationFocus(
                                             GameConversationFocusNotification {
-                                                conversation_id,
+                                                conversation_id: conversation_id.clone(),
                                                 agent_code,
                                             },
                                         ),
@@ -335,7 +336,7 @@ pub(crate) fn spawn_game_event_observer(
                                     .send_server_notification(
                                         ServerNotification::GameConversationTurn(
                                             GameConversationTurnNotification {
-                                                conversation_id,
+                                                conversation_id: conversation_id.clone(),
                                                 status: "blocked".to_string(),
                                             },
                                         ),
@@ -351,7 +352,99 @@ pub(crate) fn spawn_game_event_observer(
                                     .send_server_notification(
                                         ServerNotification::GameConversationError(
                                             GameConversationErrorNotification {
-                                                conversation_id,
+                                                conversation_id: conversation_id.clone(),
+                                                turn_id: Some(turn_id.to_string()),
+                                                message: error,
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    if let Some(reason) = director_resume_reason {
+                        let Some(connection_id) = observed.connection_ids.first().copied() else {
+                            tracing::warn!(
+                                thread_id = %observed.thread_id,
+                                "cannot resume game director without a subscribed connection"
+                            );
+                            continue;
+                        };
+                        let scoped_execution = execution.scoped(connection_id);
+                        match adapter
+                            .resume_director(&scoped_execution, &conversation_id, reason)
+                            .await
+                        {
+                            Ok(Some(started)) => {
+                                let task_id = started.task.id.as_str().to_string();
+                                let agent_code = started.task.agent_code;
+                                let resumed_turn_id = started.attempt.codex_turn_id;
+                                outgoing
+                                    .send_server_notification(ServerNotification::GameTaskUpdated(
+                                        GameTaskUpdatedNotification {
+                                            conversation_id: conversation_id.clone(),
+                                            task_id: task_id.clone(),
+                                            status: "running".to_string(),
+                                        },
+                                    ))
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameAttemptUpdated(
+                                            GameAttemptUpdatedNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                task_id,
+                                                attempt_id: started.attempt.id.as_str().to_string(),
+                                                turn_id: resumed_turn_id.clone(),
+                                                status: "running".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationTurn(
+                                            GameConversationTurnNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                status: "running".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationActor(
+                                            GameConversationActorNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                turn_id: resumed_turn_id,
+                                                agent_code: agent_code.clone(),
+                                                status: "working".to_string(),
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationFocus(
+                                            GameConversationFocusNotification {
+                                                conversation_id: conversation_id.clone(),
+                                                agent_code,
+                                            },
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %observed.thread_id,
+                                    "failed to resume game director: {error}"
+                                );
+                                outgoing
+                                    .send_server_notification(
+                                        ServerNotification::GameConversationError(
+                                            GameConversationErrorNotification {
+                                                conversation_id: conversation_id.clone(),
                                                 turn_id: Some(turn_id.to_string()),
                                                 message: error,
                                             },

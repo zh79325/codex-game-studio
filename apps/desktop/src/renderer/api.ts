@@ -169,6 +169,15 @@ export const charactersApi = {
         characterId,
       },
     ),
+  resume: (
+    projectId: string,
+    characterId: string,
+    continuationKey: string,
+  ) =>
+    rpc<{ character: Character; executionStarted: boolean }>(
+      "game/character/resume",
+      { projectId, characterId, continuationKey },
+    ),
   confirmSpec: async (
     projectId: string,
     characterId: string,

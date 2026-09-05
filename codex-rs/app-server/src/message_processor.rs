@@ -1164,34 +1164,39 @@ impl MessageProcessor {
                 .map(|response| Some(response.into())),
             ClientRequest::GameCharacterConfirmSpec { params, .. } => self
                 .game_processor
-                .character_confirm_spec(params)
+                .character_confirm_spec(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterConfirmSpec(response))),
             ClientRequest::GameCharacterRejectSpec { params, .. } => self
                 .game_processor
-                .character_reject_spec(params)
+                .character_reject_spec(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterRejectSpec(response))),
             ClientRequest::GameCharacterConfirmRender { params, .. } => self
                 .game_processor
-                .character_confirm_render(params)
+                .character_confirm_render(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterConfirmRender(response))),
             ClientRequest::GameCharacterRejectRender { params, .. } => self
                 .game_processor
-                .character_reject_render(params)
+                .character_reject_render(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterRejectRender(response))),
             ClientRequest::GameCharacterConfirmViews { params, .. } => self
                 .game_processor
-                .character_confirm_views(params)
+                .character_confirm_views(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterConfirmViews(response))),
             ClientRequest::GameCharacterRejectViews { params, .. } => self
                 .game_processor
-                .character_reject_views(params)
+                .character_reject_views(connection_id, params)
                 .await
                 .map(|response| Some(ClientResponsePayload::GameCharacterRejectViews(response))),
+            ClientRequest::GameCharacterResume { params, .. } => self
+                .game_processor
+                .character_resume(connection_id, params)
+                .await
+                .map(|response| Some(ClientResponsePayload::GameCharacterResume(response))),
             ClientRequest::GameGenerationRegister { params, .. } => self
                 .game_processor
                 .generation_register(params)

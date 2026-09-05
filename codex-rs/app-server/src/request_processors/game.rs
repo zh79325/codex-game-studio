@@ -394,88 +394,116 @@ impl GameRequestProcessor {
             .map_err(game_error)
     }
 
-    pub(crate) async fn character_confirm_spec(
+    pub(crate) async fn character_resume(
         &self,
-        params: GameCharacterConfirmSpecParams,
+        connection_id: ConnectionId,
+        params: GameCharacterResumeParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_confirm_spec(params)
+            .character_resume(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
+    }
+
+    pub(crate) async fn character_confirm_spec(
+        &self,
+        connection_id: ConnectionId,
+        params: GameCharacterConfirmSpecParams,
+    ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
+            .adapter
+            .character_confirm_spec(&execution, params)
+            .await
+            .map_err(game_error)?;
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn character_reject_spec(
         &self,
+        connection_id: ConnectionId,
         params: GameCharacterRejectSpecParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_reject_spec(params)
+            .character_reject_spec(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn character_confirm_render(
         &self,
+        connection_id: ConnectionId,
         params: GameCharacterConfirmRenderParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_confirm_render(params)
+            .character_confirm_render(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn character_reject_render(
         &self,
+        connection_id: ConnectionId,
         params: GameCharacterRejectRenderParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_reject_render(params)
+            .character_reject_render(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn character_confirm_views(
         &self,
+        connection_id: ConnectionId,
         params: GameCharacterConfirmViewsParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_confirm_views(params)
+            .character_confirm_views(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn character_reject_views(
         &self,
+        connection_id: ConnectionId,
         params: GameCharacterRejectViewsParams,
     ) -> std::result::Result<GameCharacterResponse, JSONRPCErrorError> {
-        let response = self
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
             .adapter
-            .character_reject_views(params)
+            .character_reject_views(&execution, params)
             .await
             .map_err(game_error)?;
-        self.notify_character_updated(response.character.clone())
-            .await;
-        Ok(response)
+        Ok(self
+            .finish_character_command(response, task_execution)
+            .await)
     }
 
     pub(crate) async fn generation_register(
@@ -673,6 +701,21 @@ impl GameRequestProcessor {
             .ai_config_import(params)
             .await
             .map_err(game_error)
+    }
+
+    async fn finish_character_command(
+        &self,
+        response: GameCharacterResponse,
+        task_execution: Option<codex_game_runtime::TaskExecution>,
+    ) -> GameCharacterResponse {
+        self.notify_character_updated(response.character.clone())
+            .await;
+        if let Some(task_execution) = task_execution {
+            let conversation_id = task_execution.binding.conversation_id.as_str().to_string();
+            self.notify_task_started(&conversation_id, task_execution)
+                .await;
+        }
+        response
     }
 
     async fn notify_task_started(

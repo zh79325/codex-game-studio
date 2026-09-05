@@ -699,6 +699,13 @@ client_request_definitions! {
         manual_payload_conversion: manual,
         response: v2::GameCharacterResponse,
     },
+    #[experimental("game/character/resume")]
+    GameCharacterResume => "game/character/resume" {
+        params: v2::GameCharacterResumeParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameCharacterResponse,
+    },
     #[experimental("game/generation/register")]
     GameGenerationRegister => "game/generation/register" {
         params: v2::GameGenerationRegisterParams,

@@ -67,7 +67,16 @@ export default function ChatPanel(props: ChatPanelProps) {
     onError: (error) => message.error(error),
   });
   const availableAgents = useMemo(
-    () => props.agents?.filter((agent) => agent.focusable) ?? [],
+    () =>
+      props.agents?.filter(
+        (agent) => agent.focusable && agent.roleType !== "executor",
+      ) ?? [],
+    [props.agents],
+  );
+  const agentRole = useCallback(
+    (agentCode?: string | null) =>
+      props.agents?.find((agent) => agent.agentCode === agentCode)?.role ??
+      "系统角色",
     [props.agents],
   );
   const visibleMessages = useMemo(
@@ -75,7 +84,11 @@ export default function ChatPanel(props: ChatPanelProps) {
     [props.snapshot?.messages],
   );
   const pendingDrafts =
-    props.snapshot?.drafts.filter((draft) => draft.status === "pending") ?? [];
+    props.snapshot?.drafts.filter(
+      (draft) =>
+        draft.status === "pending" &&
+        (draft.targetPath !== "docs/角色定稿.md" || Boolean(props.onConfirmDraft)),
+    ) ?? [];
   const pendingChoice = useMemo(() => {
     if (props.choiceInteractionEnabled === false) return undefined;
     const messages = props.snapshot?.messages ?? [];
@@ -139,12 +152,15 @@ export default function ChatPanel(props: ChatPanelProps) {
             </Tag>
             <Tag color="geekblue">
               对焦{" "}
-              {props.snapshot?.conversation.focusAgentCode ??
-                props.snapshot?.conversation.directorAgentCode ??
-                "studio_director"}
+              {agentRole(
+                props.snapshot?.conversation.focusAgentCode ??
+                  props.snapshot?.conversation.directorAgentCode,
+              )}
             </Tag>
             {props.workingAgentCode && (
-              <Tag color="processing">工作中 {props.workingAgentCode}</Tag>
+              <Tag color="processing">
+                工作中 {agentRole(props.workingAgentCode)}
+              </Tag>
             )}
           </Space>
         }
@@ -156,6 +172,7 @@ export default function ChatPanel(props: ChatPanelProps) {
           )}
           <MessageList
             messages={visibleMessages}
+            agents={props.agents}
             streamingText={props.streamingText}
             thinkingText={props.thinkingText}
             workingAgentCode={props.workingAgentCode}
@@ -251,6 +268,7 @@ function MessageStatus({ status }: { status: ConversationMessage["status"] }) {
 
 export function MessageList({
   messages,
+  agents,
   streamingText,
   thinkingText,
   workingAgentCode,
@@ -260,6 +278,7 @@ export function MessageList({
   onStarter,
 }: {
   messages: ConversationMessage[];
+  agents?: AiAgent[];
   streamingText?: string;
   thinkingText?: string;
   workingAgentCode?: string;
@@ -268,6 +287,10 @@ export function MessageList({
   disabled: boolean;
   onStarter: (content: string) => Promise<unknown>;
 }) {
+  const agentRoles = useMemo(
+    () => new Map(agents?.map((agent) => [agent.agentCode, agent.role]) ?? []),
+    [agents],
+  );
   const scroll = useAutoFollowScroll();
   useLayoutEffect(() => {
     scroll.scrollToLatest();
@@ -311,7 +334,9 @@ export function MessageList({
         >
           <Space className="message-meta" wrap>
             <Typography.Text strong>
-              {item.role === "user" ? "你" : item.agentCode}
+              {item.role === "user"
+                ? "你"
+                : (agentRoles.get(item.agentCode) ?? "系统角色")}
             </Typography.Text>
             <MessageStatus status={item.status} />
           </Space>

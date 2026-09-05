@@ -9,6 +9,7 @@ pub struct StartThreadRequest {
     pub cwd: String,
     pub agent_code: String,
     pub route: RouteDecision,
+    pub image_generation_route: Option<RouteDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

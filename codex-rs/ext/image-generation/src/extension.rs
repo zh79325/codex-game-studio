@@ -27,21 +27,43 @@ struct ImageGenerationExtension {
 
 type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
 
+/// Host-provided image route for threads whose chat model differs from the image executor.
+#[derive(Clone, Debug)]
+pub struct ImageGenerationRouteOverride {
+    pub provider: ModelProviderInfo,
+    pub model: String,
+    pub save_root: Option<AbsolutePathBuf>,
+}
+
 #[derive(Clone)]
 struct ImageGenerationExtensionConfig {
     available: bool,
     provider: ModelProviderInfo,
+    model: String,
     save_root: Option<AbsolutePathBuf>,
 }
 
 impl ImageGenerationExtensionConfig {
-    /// Resolves the image provider and save root for a thread.
-    fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
+    /// Resolves the image provider, model, and save root for a thread.
+    fn from_config(
+        config: &Config,
+        resolve_save_root: &SaveRootResolver,
+        route_override: Option<&ImageGenerationRouteOverride>,
+    ) -> Self {
+        if let Some(route_override) = route_override {
+            return Self {
+                available: true,
+                provider: route_override.provider.clone(),
+                model: route_override.model.clone(),
+                save_root: route_override.save_root.clone(),
+            };
+        }
         Self {
             available: config.model_provider.is_openai()
                 || config.model_provider.requires_openai_auth
                 || config.model_provider.uses_openai_actor_authorization(),
             provider: config.model_provider.clone(),
+            model: "gpt-image-2".to_string(),
             save_root: resolve_save_root(config),
         }
     }
@@ -59,6 +81,10 @@ impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
                 .insert(ImageGenerationExtensionConfig::from_config(
                     input.config,
                     self.resolve_save_root.as_ref(),
+                    input
+                        .thread_store
+                        .get::<ImageGenerationRouteOverride>()
+                        .as_deref(),
                 ));
         })
     }
@@ -76,6 +102,9 @@ impl ConfigContributor<Config> for ImageGenerationExtension {
         thread_store.insert(ImageGenerationExtensionConfig::from_config(
             new_config,
             self.resolve_save_root.as_ref(),
+            thread_store
+                .get::<ImageGenerationRouteOverride>()
+                .as_deref(),
         ));
     }
 }
@@ -103,6 +132,7 @@ impl ToolContributor for ImageGenerationExtension {
             ),
             config.save_root.clone(),
             thread_store.level_id().to_string(),
+            config.model.clone(),
         ))]
     }
 }

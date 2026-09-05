@@ -7,6 +7,7 @@ pub const STUDIO_DIRECTOR_AGENT: &str = "studio_director";
 pub const GAME_DESIGNER_AGENT: &str = "game_designer";
 pub const SPEC_WRITER_AGENT: &str = "spec_writer";
 pub const SPEC_REVIEWER_AGENT: &str = "spec_reviewer";
+pub const VISUAL_DESIGNER_AGENT: &str = "visual_designer";
 pub const PROMPT_SMITH_AGENT: &str = "prompt_smith";
 pub const IMAGE_T2I_AGENT: &str = "image_t2i";
 pub const IMAGE_I2I_AGENT: &str = "image_i2i";
@@ -15,11 +16,12 @@ pub const MODEL3D_AGENT: &str = "model3d";
 pub const VIDEO_GEN_AGENT: &str = "video_gen";
 pub const REALTIME_SPEECH_AGENT: &str = "realtime_speech";
 
-pub const AGENT_CODES: [&str; 11] = [
+pub const AGENT_CODES: [&str; 12] = [
     STUDIO_DIRECTOR_AGENT,
     GAME_DESIGNER_AGENT,
     SPEC_WRITER_AGENT,
     SPEC_REVIEWER_AGENT,
+    VISUAL_DESIGNER_AGENT,
     PROMPT_SMITH_AGENT,
     IMAGE_T2I_AGENT,
     IMAGE_I2I_AGENT,
@@ -56,7 +58,7 @@ struct AgentFrontmatter {
     allow_tools: Vec<String>,
 }
 
-pub const BUNDLED_AGENTS: [BundledAgentDefinition; 11] = [
+pub const BUNDLED_AGENTS: [BundledAgentDefinition; 12] = [
     BundledAgentDefinition {
         code: STUDIO_DIRECTOR_AGENT,
         markdown: include_str!("../agents/studio_director.md"),
@@ -72,6 +74,10 @@ pub const BUNDLED_AGENTS: [BundledAgentDefinition; 11] = [
     BundledAgentDefinition {
         code: SPEC_REVIEWER_AGENT,
         markdown: include_str!("../agents/spec_reviewer.md"),
+    },
+    BundledAgentDefinition {
+        code: VISUAL_DESIGNER_AGENT,
+        markdown: include_str!("../agents/visual_designer.md"),
     },
     BundledAgentDefinition {
         code: PROMPT_SMITH_AGENT,

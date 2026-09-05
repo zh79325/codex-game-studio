@@ -83,19 +83,15 @@ pub fn agents_for_stage(target_kind: &str, stage: &str) -> &'static [&'static st
     match (target_kind, stage) {
         ("project", "project") => &["studio_director", "game_designer"],
         ("character", "spec") => &["studio_director", "spec_writer", "spec_reviewer"],
-        ("character", "render") => &[
-            "studio_director",
-            "prompt_smith",
-            "image_t2i",
-            "image_i2i",
-            "vision_reviewer",
-        ],
-        ("character", "views") => &[
-            "studio_director",
-            "prompt_smith",
-            "image_i2i",
-            "vision_reviewer",
-        ],
+        ("character", "render" | "views") => &["studio_director", "visual_designer"],
+        _ => &[],
+    }
+}
+
+pub fn internal_executors_for_stage(target_kind: &str, stage: &str) -> &'static [&'static str] {
+    match (target_kind, stage) {
+        ("character", "render") => &["image_t2i"],
+        ("character", "views") => &["image_i2i"],
         _ => &[],
     }
 }
@@ -140,6 +136,26 @@ mod tests {
                 CharacterState::S5ViewsConfirmed
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn character_visual_stages_expose_role_and_keep_executors_internal() {
+        for stage in ["render", "views"] {
+            assert_eq!(
+                agents_for_stage("character", stage),
+                &["studio_director", "visual_designer"]
+            );
+            assert!(!agents_for_stage("character", stage).contains(&"image_t2i"));
+            assert!(!agents_for_stage("character", stage).contains(&"image_i2i"));
+        }
+        assert_eq!(
+            internal_executors_for_stage("character", "render"),
+            &["image_t2i"]
+        );
+        assert_eq!(
+            internal_executors_for_stage("character", "views"),
+            &["image_i2i"]
         );
     }
 }

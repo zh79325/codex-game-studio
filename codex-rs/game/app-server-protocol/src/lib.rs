@@ -348,7 +348,20 @@ game_dto!(GameCharacterReadParams {
     project_id: String,
     character_id: String
 });
-game_dto!(GameCharacterReadResponse { character: GameCharacter, generations: Vec<GameGeneration> });
+game_dto!(GameCharacterWorkflowStep {
+    key: String,
+    label: String,
+    status: String
+});
+game_dto!(GameCharacterWorkflowProgress {
+    status_label: String,
+    steps: Vec<GameCharacterWorkflowStep>
+});
+game_dto!(GameCharacterReadResponse {
+    character: GameCharacter,
+    generations: Vec<GameGeneration>,
+    workflow_progress: GameCharacterWorkflowProgress
+});
 game_dto!(GameCharacterConfirmSpecParams {
     project_id: String,
     character_id: String,

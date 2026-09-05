@@ -23,6 +23,7 @@ use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
 use codex_game_domain::ProjectState;
 use codex_game_domain::TaskAttemptStatus;
+use codex_game_domain::TaskStatus;
 use codex_game_store::ProjectAccess;
 use codex_game_store::ProjectStore;
 use codex_game_store::StoreError;
@@ -92,6 +93,19 @@ pub struct ProjectDirState {
 pub struct ListedCharacter {
     pub character: Character,
     pub model_file_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterWorkflowStep {
+    pub key: String,
+    pub label: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterWorkflowProgress {
+    pub status_label: String,
+    pub steps: Vec<CharacterWorkflowStep>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -784,11 +798,11 @@ impl GameService {
         context: &codex_game_store::TurnAttemptContext,
         action: &AgentAction,
     ) -> Result<(Vec<Generation>, Option<Character>), GameServiceError> {
-        if !matches!(context.agent_code.as_str(), "image_t2i" | "image_i2i") {
+        if context.agent_code != "visual_designer" {
             return Ok((Vec::new(), None));
         }
         let result = action.payload.result.as_ref().ok_or_else(|| {
-            GameServiceError::InvalidAction("图片执行 Agent 必须返回 payload.result".to_string())
+            GameServiceError::InvalidAction("视觉设计任务必须返回 payload.result".to_string())
         })?;
         if action.action == AgentActionKind::Blocked {
             return Ok((Vec::new(), None));
@@ -798,11 +812,15 @@ impl GameService {
                 "图片执行成功时必须返回至少一个产物".to_string(),
             ));
         }
-        if !matches!(context.stage.as_str(), "render" | "views") {
-            return Err(GameServiceError::InvalidAction(
-                "图片产物只能登记到 render 或 views 阶段".to_string(),
-            ));
-        }
+        let expected_executor = match context.stage.as_str() {
+            "render" => "image_t2i",
+            "views" => "image_i2i",
+            _ => {
+                return Err(GameServiceError::InvalidAction(
+                    "图片产物只能登记到 render 或 views 阶段".to_string(),
+                ));
+            }
+        };
         let (project, target_kind) = {
             let projects = self
                 .projects
@@ -847,6 +865,18 @@ impl GameService {
         let mut paths = HashSet::new();
         let mut generations = Vec::with_capacity(result.artifacts.len());
         for artifact in &result.artifacts {
+            let executor = artifact
+                .get("executor")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    GameServiceError::InvalidAction("视觉产物缺少内部 executor".to_string())
+                })?;
+            if executor != expected_executor {
+                return Err(GameServiceError::InvalidAction(format!(
+                    "{} 阶段必须使用 {expected_executor} 内部执行器",
+                    context.stage
+                )));
+            }
             let file_path = artifact
                 .get("path")
                 .and_then(serde_json::Value::as_str)
@@ -878,6 +908,16 @@ impl GameService {
                     "生成文件不存在：{file_path}"
                 )));
             }
+            let canonical_root = fs::canonicalize(&project.root)?;
+            let canonical_tmp = fs::canonicalize(Path::new(&project.root).join("tmp"))?;
+            let canonical_path = fs::canonicalize(&path)?;
+            if !canonical_tmp.starts_with(&canonical_root)
+                || !canonical_path.starts_with(&canonical_tmp)
+            {
+                return Err(GameServiceError::InvalidCharacterOperation(
+                    "图片执行产物必须真实位于项目 tmp/ 临时目录".to_string(),
+                ));
+            }
             let variant = artifact
                 .get("variant")
                 .and_then(serde_json::Value::as_str)
@@ -888,6 +928,11 @@ impl GameService {
                     "四视图产物必须是单张 2×2 四宫格（variant=quad）".to_string(),
                 ));
             }
+            let mut asset_spec = artifact.clone();
+            asset_spec.insert(
+                "submitted_by".to_string(),
+                serde_json::Value::String(context.agent_code.clone()),
+            );
             generations.push(Generation {
                 id: Uuid::now_v7().to_string(),
                 project_id: project.id.as_str().to_string(),
@@ -896,11 +941,11 @@ impl GameService {
                 stage: context.stage.clone(),
                 variant,
                 file_path,
-                file_hash: Some(bytes_hash(&fs::read(&path)?)),
+                file_hash: Some(bytes_hash(&fs::read(&canonical_path)?)),
                 is_final: false,
-                source: context.agent_code.clone(),
+                source: expected_executor.to_string(),
                 task_id: Some(context.task_id.clone()),
-                asset_spec: serde_json::to_value(artifact)
+                asset_spec: serde_json::to_value(asset_spec)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 created_at: now(),
             });
@@ -1883,6 +1928,111 @@ impl GameService {
         Ok(character)
     }
 
+    pub async fn character_workflow_progress(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<CharacterWorkflowProgress, GameServiceError> {
+        let character = self.read_character(project_id, character_id).await?;
+        let store = self.project_store(project_id, false)?;
+        let conversation = self
+            .find_target_conversation(
+                project_id,
+                ConversationTargetKind::Character,
+                Some(character_id),
+            )
+            .ok();
+        let generations = store
+            .list_generations(project_id, "character", character_id, None)
+            .await?;
+        let memories = store
+            .list_project_memories(project_id, Some(character_id))
+            .await?;
+        let (drafts, tasks) = if let Some(conversation) = conversation {
+            (
+                store.list_drafts(conversation.id.as_str()).await?,
+                store.list_tasks(conversation.id.as_str()).await?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let latest_pending_spec = drafts
+            .iter()
+            .filter(|draft| draft.status == "pending" && draft.target_path == "docs/角色定稿.md")
+            .max_by_key(|draft| (draft.created_at, draft.id.as_str()));
+        let latest_spec_rejection = memories
+            .iter()
+            .filter(|memory| {
+                memory.character_ref.as_deref() == Some(character_id)
+                    && memory.kind == "spec_rejection"
+            })
+            .max_by_key(|memory| (memory.updated_at, memory.id.as_str()));
+        let has_fresh_pending_spec = latest_pending_spec.is_some_and(|draft| {
+            latest_spec_rejection.is_none_or(|rejection| {
+                (draft.created_at, draft.id.as_str())
+                    > (rejection.updated_at, rejection.id.as_str())
+            })
+        });
+        let spec_review_succeeded = tasks
+            .iter()
+            .rev()
+            .find(|task| {
+                task.target_id == character_id
+                    && task.stage == "spec"
+                    && matches!(task.agent_code.as_str(), "spec_writer" | "spec_reviewer")
+            })
+            .is_some_and(|task| {
+                task.agent_code == "spec_reviewer" && task.status == TaskStatus::Succeeded
+            });
+        let rejected_after = |stage: &str| {
+            let latest_generation = generations
+                .iter()
+                .filter(|generation| generation.stage == stage)
+                .max_by_key(|generation| (generation.created_at, generation.id.as_str()));
+            let latest_rejection = memories
+                .iter()
+                .filter(|memory| {
+                    memory.character_ref.as_deref() == Some(character_id)
+                        && memory.kind == format!("{stage}_rejection")
+                })
+                .max_by_key(|memory| (memory.updated_at, memory.id.as_str()));
+            matches!(
+                (latest_rejection, latest_generation),
+                (Some(rejected), Some(generated))
+                    if (rejected.updated_at, rejected.id.as_str())
+                        > (generated.created_at, generated.id.as_str())
+            )
+        };
+        let render_rejected_after_generation = rejected_after("render");
+        let views_rejected_after_generation = rejected_after("views");
+        let current_design_stage = match character.state {
+            CharacterState::S0SpecDrafting => Some("spec"),
+            CharacterState::S1SpecConfirmed => Some("render"),
+            CharacterState::S2RenderGenerated if render_rejected_after_generation => Some("render"),
+            CharacterState::S3RenderConfirmed => Some("views"),
+            CharacterState::S4ViewsGenerated if views_rejected_after_generation => Some("views"),
+            CharacterState::S2RenderGenerated
+            | CharacterState::S4ViewsGenerated
+            | CharacterState::S5ViewsConfirmed => None,
+        };
+        let failed_design_stage = current_design_stage.filter(|stage| {
+            tasks
+                .iter()
+                .rev()
+                .find(|task| task.target_id == character_id && task.stage == *stage)
+                .is_some_and(|task| task.status == TaskStatus::Failed)
+        });
+
+        Ok(build_character_workflow_progress(
+            character.state,
+            has_fresh_pending_spec && spec_review_succeeded,
+            render_rejected_after_generation,
+            views_rejected_after_generation,
+            failed_design_stage,
+        ))
+    }
+
     pub async fn remove_character(
         &self,
         project_id: &str,
@@ -2518,6 +2668,98 @@ fn validate_draft_baseline(path: &Path, expected: Option<&str>) -> Result<(), Ga
     Ok(())
 }
 
+fn build_character_workflow_progress(
+    state: CharacterState,
+    spec_confirmation_ready: bool,
+    render_rejected_after_generation: bool,
+    views_rejected_after_generation: bool,
+    failed_design_stage: Option<&str>,
+) -> CharacterWorkflowProgress {
+    let mut statuses = ["wait"; 6];
+    let current_design = match state {
+        CharacterState::S0SpecDrafting => {
+            if spec_confirmation_ready {
+                statuses[0] = "finish";
+                statuses[1] = "process";
+                None
+            } else {
+                statuses[0] = "process";
+                Some((0, "spec"))
+            }
+        }
+        CharacterState::S1SpecConfirmed => {
+            statuses[..2].fill("finish");
+            statuses[2] = "process";
+            Some((2, "render"))
+        }
+        CharacterState::S2RenderGenerated => {
+            statuses[..3].fill("finish");
+            statuses[3] = "process";
+            if render_rejected_after_generation {
+                statuses[2] = "process";
+                statuses[3] = "wait";
+                Some((2, "render"))
+            } else {
+                None
+            }
+        }
+        CharacterState::S3RenderConfirmed => {
+            statuses[..4].fill("finish");
+            statuses[4] = "process";
+            Some((4, "views"))
+        }
+        CharacterState::S4ViewsGenerated => {
+            statuses[..5].fill("finish");
+            statuses[5] = "process";
+            if views_rejected_after_generation {
+                statuses[4] = "process";
+                statuses[5] = "wait";
+                Some((4, "views"))
+            } else {
+                None
+            }
+        }
+        CharacterState::S5ViewsConfirmed => {
+            statuses.fill("finish");
+            None
+        }
+    };
+    if let Some((index, stage)) = current_design
+        && failed_design_stage == Some(stage)
+    {
+        statuses[index] = "error";
+    }
+    let labels = [
+        ("spec_design", "角色设定"),
+        ("spec_confirm", "确认设定"),
+        ("render_design", "效果图设计"),
+        ("render_confirm", "确认效果图"),
+        ("views_design", "四视图设计"),
+        ("views_confirm", "确认四视图"),
+    ];
+    CharacterWorkflowProgress {
+        status_label: if state == CharacterState::S5ViewsConfirmed {
+            "角色视觉设计完成".to_string()
+        } else {
+            labels
+                .iter()
+                .zip(statuses)
+                .find(|(_, status)| *status == "process" || *status == "error")
+                .map(|((_, label), _)| (*label).to_string())
+                .unwrap_or_else(|| "角色视觉设计".to_string())
+        },
+        steps: labels
+            .into_iter()
+            .zip(statuses)
+            .map(|((key, label), status)| CharacterWorkflowStep {
+                key: key.to_string(),
+                label: label.to_string(),
+                status: status.to_string(),
+            })
+            .collect(),
+    }
+}
+
 fn content_hash(content: &str) -> String {
     bytes_hash(content.as_bytes())
 }
@@ -2661,6 +2903,120 @@ fn now() -> i64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn expected_workflow(status_label: &str, statuses: [&str; 6]) -> CharacterWorkflowProgress {
+        let labels = [
+            ("spec_design", "角色设定"),
+            ("spec_confirm", "确认设定"),
+            ("render_design", "效果图设计"),
+            ("render_confirm", "确认效果图"),
+            ("views_design", "四视图设计"),
+            ("views_confirm", "确认四视图"),
+        ];
+        CharacterWorkflowProgress {
+            status_label: status_label.to_string(),
+            steps: labels
+                .into_iter()
+                .zip(statuses)
+                .map(|((key, label), status)| CharacterWorkflowStep {
+                    key: key.to_string(),
+                    label: label.to_string(),
+                    status: status.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn character_workflow_maps_persistent_states_to_six_business_steps() {
+        let cases = [
+            (
+                CharacterState::S0SpecDrafting,
+                false,
+                "角色设定",
+                ["process", "wait", "wait", "wait", "wait", "wait"],
+            ),
+            (
+                CharacterState::S0SpecDrafting,
+                true,
+                "确认设定",
+                ["finish", "process", "wait", "wait", "wait", "wait"],
+            ),
+            (
+                CharacterState::S1SpecConfirmed,
+                false,
+                "效果图设计",
+                ["finish", "finish", "process", "wait", "wait", "wait"],
+            ),
+            (
+                CharacterState::S2RenderGenerated,
+                false,
+                "确认效果图",
+                ["finish", "finish", "finish", "process", "wait", "wait"],
+            ),
+            (
+                CharacterState::S3RenderConfirmed,
+                false,
+                "四视图设计",
+                ["finish", "finish", "finish", "finish", "process", "wait"],
+            ),
+            (
+                CharacterState::S4ViewsGenerated,
+                false,
+                "确认四视图",
+                ["finish", "finish", "finish", "finish", "finish", "process"],
+            ),
+            (
+                CharacterState::S5ViewsConfirmed,
+                false,
+                "角色视觉设计完成",
+                ["finish", "finish", "finish", "finish", "finish", "finish"],
+            ),
+        ];
+
+        for (state, spec_confirmation_ready, status_label, statuses) in cases {
+            assert_eq!(
+                build_character_workflow_progress(
+                    state,
+                    spec_confirmation_ready,
+                    false,
+                    false,
+                    None,
+                ),
+                expected_workflow(status_label, statuses)
+            );
+        }
+    }
+
+    #[test]
+    fn character_workflow_returns_to_design_after_rejection_and_marks_failures() {
+        assert_eq!(
+            build_character_workflow_progress(
+                CharacterState::S2RenderGenerated,
+                false,
+                true,
+                false,
+                Some("render"),
+            ),
+            expected_workflow(
+                "效果图设计",
+                ["finish", "finish", "error", "wait", "wait", "wait"],
+            )
+        );
+        assert_eq!(
+            build_character_workflow_progress(
+                CharacterState::S4ViewsGenerated,
+                false,
+                false,
+                true,
+                None,
+            ),
+            expected_workflow(
+                "四视图设计",
+                ["finish", "finish", "finish", "finish", "process", "wait"],
+            )
+        );
+    }
 
     #[tokio::test]
     async fn project_gate_blocks_character_creation_before_finalize() {

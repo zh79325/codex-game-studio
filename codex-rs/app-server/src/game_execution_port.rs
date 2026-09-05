@@ -1,5 +1,6 @@
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_extension_api::ExtensionDataInit;
 use codex_game_runtime::CodexExecutionPort;
 use codex_game_runtime::ExecutionError;
 use codex_game_runtime::StartThreadRequest;
@@ -13,6 +14,7 @@ use codex_http_client::StreamResponseAudit;
 use codex_http_client::StreamResponseAuditEvent;
 use codex_http_client::register_stream_response_audit;
 use codex_http_client::unregister_stream_response_audit;
+use codex_image_generation_extension::ImageGenerationRouteOverride;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
 use codex_protocol::turn_input::StartIfIdleSubmission;
@@ -169,12 +171,36 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
                 })?;
             config.model_provider_id = request.route.provider;
         }
+        let mut thread_extension_init = ExtensionDataInit::new();
+        if let Some(route) = request.image_generation_route {
+            let provider = if route.provider.is_empty() {
+                config.model_provider.clone()
+            } else {
+                config
+                    .model_providers
+                    .get(&route.provider)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionError::CapabilityUnavailable(format!(
+                            "image model provider `{}` is not configured",
+                            route.provider
+                        ))
+                    })?
+            };
+            thread_extension_init.insert(ImageGenerationRouteOverride {
+                provider,
+                model: route.model,
+                save_root: Some(cwd.join("tmp")),
+            });
+        }
         config.cwd = cwd.clone();
         config.workspace_roots = vec![cwd];
         config.workspace_roots_explicit = true;
+        let mut options = codex_core::StartThreadOptions::new(config);
+        options.thread_extension_init = thread_extension_init;
         let started = self
             .thread_manager
-            .start_thread(codex_core::StartThreadOptions::new(config))
+            .start_thread(options)
             .await
             .map_err(|error| ExecutionError::Retryable(error.to_string()))?;
         Ok(StartedThread {

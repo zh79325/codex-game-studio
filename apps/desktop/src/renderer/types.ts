@@ -142,6 +142,15 @@ export type ListedCharacter = Character & {
   modelFileExists: boolean;
 };
 
+export type CharacterWorkflowProgress = {
+  statusLabel: string;
+  steps: Array<{
+    key: string;
+    label: string;
+    status: "wait" | "process" | "finish" | "error";
+  }>;
+};
+
 export type Generation = {
   id: string;
   projectId: string;

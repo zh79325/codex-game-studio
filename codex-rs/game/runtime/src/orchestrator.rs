@@ -68,6 +68,8 @@ pub struct ExecuteTaskRequest {
     pub prompt: String,
     pub context: ContextPackage,
     pub capability: Capability,
+    pub internal_executor_code: Option<String>,
+    pub internal_executor_capability: Option<Capability>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +213,17 @@ impl TaskOrchestrator {
             )
             .await?;
         attempt.conversation_codex_thread_id = binding.id.clone();
+        if let (Some(capability), Some(route)) = (
+            request.internal_executor_capability,
+            self.internal_executor_route(&request).await?,
+        ) {
+            self.reserve_request_usage(
+                &route,
+                capability,
+                &format!("{}:internal-image", request.idempotency_key),
+            )
+            .await?;
+        }
         store
             .create_task_attempt(
                 &interaction,
@@ -411,17 +424,20 @@ impl TaskOrchestrator {
         let (route, event) = self
             .select_route(request.capability, &scope, &request.agent_code)
             .await?;
-        if matches!(event, RouteEvent::Selected { .. })
+        if request.internal_executor_code.is_none()
+            && matches!(event, RouteEvent::Selected { .. })
             && let Some(binding) = &previous
             && execution.thread_available(&binding.codex_thread_id).await
         {
             return Ok((binding.clone(), route));
         }
+        let image_generation_route = self.internal_executor_route(request).await?;
         match execution
             .start_thread(StartThreadRequest {
                 cwd: request.project_root.clone(),
                 agent_code: request.agent_code.clone(),
                 route: route.clone(),
+                image_generation_route,
             })
             .await
         {
@@ -466,6 +482,7 @@ impl TaskOrchestrator {
                     cwd: request.project_root.clone(),
                     agent_code: request.agent_code.clone(),
                     route: route.clone(),
+                    image_generation_route: self.internal_executor_route(request).await?,
                 })
                 .await
             {
@@ -528,6 +545,52 @@ impl TaskOrchestrator {
             )
             .await?;
         Ok((binding, route))
+    }
+
+    async fn internal_executor_route(
+        &self,
+        request: &ExecuteTaskRequest,
+    ) -> Result<Option<RouteDecision>, OrchestrationError> {
+        let (Some(agent_code), Some(capability)) = (
+            request.internal_executor_code.as_deref(),
+            request.internal_executor_capability,
+        ) else {
+            if request.internal_executor_code.is_some()
+                || request.internal_executor_capability.is_some()
+            {
+                return Err(ExecutionError::InvalidRequest(
+                    "internal executor code and capability must be configured together".to_string(),
+                )
+                .into());
+            }
+            return Ok(None);
+        };
+        let candidates = if let Some(studio_storage) = &self.studio_storage {
+            let studio = open_studio_store(studio_storage).await?;
+            load_ai_route_models(&studio, agent_code, now())
+                .await?
+                .into_iter()
+                .map(|candidate| RouteCandidate {
+                    account_id: candidate.id,
+                    provider: candidate.provider,
+                    model: candidate.model,
+                    capabilities: candidate
+                        .capabilities
+                        .into_iter()
+                        .map(runtime_capability)
+                        .collect(),
+                    available: candidate.available,
+                })
+                .collect()
+        } else {
+            self.routes.candidates()?
+        };
+        let selector = RouteSelector::new(candidates);
+        let scope = format!(
+            "conversation:{}:internal:{}",
+            request.conversation_id, agent_code
+        );
+        Ok(Some(selector.select(capability, &scope)?.0))
     }
 
     async fn select_route(

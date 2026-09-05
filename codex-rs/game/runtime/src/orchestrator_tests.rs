@@ -77,6 +77,8 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             action_protocol: "strict action".to_string(),
         },
         capability: Capability::TextStructuredOutput,
+        internal_executor_code: None,
+        internal_executor_capability: None,
     }
 }
 

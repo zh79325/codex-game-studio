@@ -20,23 +20,14 @@ import FinalConfirmationActions from "./chat/FinalConfirmationActions";
 import { useConversation } from "./chat/useConversation";
 import type { ArtifactDraft, Generation } from "./types";
 
-const states = [
-  "S0_spec_drafting",
-  "S1_spec_confirmed",
-  "S2_render_generated",
-  "S3_render_confirmed",
-  "S4_views_generated",
-  "S5_views_confirmed",
-] as const;
-
-const labels = [
-  "设定草拟",
-  "设定确认",
-  "效果图候选",
-  "效果图定稿",
-  "四视图候选",
-  "四视图定稿",
-];
+const characterStateLabels: Record<string, string> = {
+  S0_spec_drafting: "角色设定中",
+  S1_spec_confirmed: "角色设定已确认",
+  S2_render_generated: "效果图待确认",
+  S3_render_confirmed: "效果图已确认",
+  S4_views_generated: "四视图待确认",
+  S5_views_confirmed: "角色视觉设计完成",
+};
 
 export default function CharacterPage() {
   const { message } = App.useApp();
@@ -73,6 +64,18 @@ export default function CharacterPage() {
   useEffect(() => {
     if (project.data) setActiveProject(project.data);
   }, [project.data, setActiveProject]);
+
+  useEffect(() => {
+    if (!conversation.snapshot) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["character", projectId, characterId],
+    });
+  }, [
+    characterId,
+    conversation.snapshot?.conversation.updatedAt,
+    projectId,
+    queryClient,
+  ]);
 
   useEffect(
     () =>
@@ -142,9 +145,18 @@ export default function CharacterPage() {
     (item) => item.stage === "render",
   );
   const viewGenerations = generations.filter((item) => item.stage === "views");
-  const currentStep = Math.max(
-    0,
-    states.indexOf(character?.state ?? "S0_spec_drafting"),
+  const workflowSteps = detail.data?.workflowProgress.steps ?? [];
+  const currentStep = workflowSteps.findIndex(
+    (step) => step.status === "process" || step.status === "error",
+  );
+  const isSpecConfirmation = workflowSteps.some(
+    (step) => step.key === "spec_confirm" && step.status === "process",
+  );
+  const isRenderConfirmation = workflowSteps.some(
+    (step) => step.key === "render_confirm" && step.status === "process",
+  );
+  const isViewsConfirmation = workflowSteps.some(
+    (step) => step.key === "views_confirm" && step.status === "process",
   );
   const hasCompleteViewSelection =
     selectedViews.length === 1 &&
@@ -229,8 +241,12 @@ export default function CharacterPage() {
     <div className="page-stack workspace-page">
       <Card className="content-card">
         <Steps
-          current={currentStep}
-          items={labels.map((title) => ({ title }))}
+          current={currentStep < 0 ? workflowSteps.length : currentStep}
+          items={workflowSteps.map((step) => ({
+            key: step.key,
+            title: step.label,
+            status: step.status,
+          }))}
         />
       </Card>
       <Row gutter={[16, 16]} align="stretch">
@@ -250,10 +266,12 @@ export default function CharacterPage() {
             onSend={conversation.send}
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}
-            onConfirmDraft={confirmSpecDraft}
+            onConfirmDraft={isSpecConfirmation ? confirmSpecDraft : undefined}
             confirmingDraft={action.isPending}
-            onSubmitDraftFeedback={(content) =>
-              requestRevision("spec", content)
+            onSubmitDraftFeedback={
+              isSpecConfirmation
+                ? (content) => requestRevision("spec", content)
+                : undefined
             }
           />
         </Col>
@@ -263,7 +281,12 @@ export default function CharacterPage() {
               title="角色状态"
               className="content-card"
               extra={
-                character && <Tag color="processing">{character.state}</Tag>
+                character && (
+                  <Tag color="processing">
+                    {detail.data?.workflowProgress.statusLabel ??
+                      characterStateLabels[character.state]}
+                  </Tag>
+                )
               }
             >
               <StatusRow label="角色" value={character?.name} />
@@ -283,7 +306,7 @@ export default function CharacterPage() {
                 Agent 审校结论仅供参考，只有这里的人工操作会推进状态。
               </Typography.Text>
             </Card>
-            {character?.state === "S2_render_generated" && (
+            {isRenderConfirmation && (
               <GenerationGate
                 title="选择效果图定稿"
                 generations={renderGenerations}
@@ -295,7 +318,7 @@ export default function CharacterPage() {
                 onSupplement={(content) => requestRevision("render", content)}
               />
             )}
-            {character?.state === "S4_views_generated" && (
+            {isViewsConfirmation && (
               <Card title="确认四视图" className="content-card">
                 <Space orientation="vertical" className="workspace-main">
                   {viewGenerations.map((generation) => (

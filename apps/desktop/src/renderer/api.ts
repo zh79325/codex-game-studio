@@ -5,6 +5,7 @@ import type {
   AiModelUsage,
   AiProvider,
   Character,
+  CharacterWorkflowProgress,
   Conversation,
   ConversationSnapshot,
   Generation,
@@ -157,7 +158,11 @@ export const charactersApi = {
       })
     ).character,
   read: (projectId: string, characterId: string) =>
-    rpc<{ character: Character; generations: Generation[] }>(
+    rpc<{
+      character: Character;
+      generations: Generation[];
+      workflowProgress: CharacterWorkflowProgress;
+    }>(
       "game/character/read",
       {
         projectId,

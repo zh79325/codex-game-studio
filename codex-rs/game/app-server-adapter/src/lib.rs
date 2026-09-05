@@ -16,6 +16,7 @@ use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectState;
 use codex_game_domain::TaskAttemptStatus;
+use codex_game_domain::internal_executors_for_stage;
 use codex_game_runtime::Capability;
 use codex_game_runtime::CodexExecutionPort;
 use codex_game_runtime::ExecuteTaskRequest;
@@ -462,6 +463,21 @@ impl GameAppServerAdapter {
                 return Ok(None);
             }
         };
+        let internal_executor = (prepared.agent_code == "visual_designer")
+            .then(|| {
+                internal_executors_for_stage(
+                    prepared.conversation.target_kind.as_str(),
+                    &prepared.stage,
+                )
+                .first()
+                .copied()
+            })
+            .flatten();
+        let internal_executor_capability = match internal_executor {
+            Some("image_t2i") => Some(Capability::ImageTextToImage),
+            Some("image_i2i") => Some(Capability::ImageImageToImage),
+            Some(_) | None => None,
+        };
         let (audit_target, audit_target_dir) = match prepared.conversation.target_kind {
             ConversationTargetKind::Project => {
                 ("project".to_string(), PathBuf::from(&prepared.project.root))
@@ -507,6 +523,8 @@ impl GameAppServerAdapter {
                     prompt: prepared.user_message.content.clone(),
                     context,
                     capability,
+                    internal_executor_code: internal_executor.map(str::to_string),
+                    internal_executor_capability,
                 },
             )
             .await
@@ -689,9 +707,26 @@ impl GameAppServerAdapter {
             .service()
             .list_generations(&params.project_id, &params.character_id, None)
             .await?;
+        let workflow_progress = self
+            .runtime
+            .service()
+            .character_workflow_progress(&params.project_id, &params.character_id)
+            .await?;
         Ok(GameCharacterReadResponse {
             character: character_dto(character),
             generations: generations.into_iter().map(generation_dto).collect(),
+            workflow_progress: GameCharacterWorkflowProgress {
+                status_label: workflow_progress.status_label,
+                steps: workflow_progress
+                    .steps
+                    .into_iter()
+                    .map(|step| GameCharacterWorkflowStep {
+                        key: step.key,
+                        label: step.label,
+                        status: step.status,
+                    })
+                    .collect(),
+            },
         })
     }
 

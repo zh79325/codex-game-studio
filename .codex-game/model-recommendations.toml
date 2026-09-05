@@ -409,8 +409,8 @@ remark = "image-to-3d / rigging / animations / text-to-motion 全链路，按 co
 [[presets]]
 code = "volcengine-asr"
 vendor = "火山引擎"
-plan = "豆包流式输入语音识别 2.0"
-label = "火山引擎 · 豆包流式输入语音识别 2.0"
+plan = "豆包单向流式语音识别 2.0"
+label = "火山引擎 · 豆包单向流式语音识别 2.0"
 base_url = "wss://openspeech.bytedance.com"
 driver = "volcengine_asr"
 auth_style = "x-api-key"
@@ -423,4 +423,4 @@ api_path = "/api/v3/sauc/bigmodel_nostream"
 limit_kind = "duration_seconds"
 default_period = "month"
 params = { resource_id = "volc.seedasr.sauc.duration", sample_rate = 16000, channels = 1, chunk_ms = 200 }
-remark = "豆包流式输入语音识别模型 2.0，使用新版控制台 X-Api-Key，录音结束后提交，按音频时长计量。"
+remark = "豆包单向流式语音识别模型 2.0（bigmodel_nostream）。使用前必须在 https://console.volcengine.com/speech/new/setting/activate?projectName=default 开通‘豆包流式语音识别模型 2.0 小时版’，对应资源 ID 为 volc.seedasr.sauc.duration；仅开通录音文件识别 AUC 或极速版不能使用本模型。API Key 必须按照 https://docs.volcengine.com/docs/6561/2628951?lang=zh 的指引从豆包语音控制台获取，它与火山引擎通用 API Key 不是同一个。录音结束后分片提交，返回整句识别结果，按音频时长计量。"

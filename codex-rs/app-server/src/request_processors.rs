@@ -550,7 +550,6 @@ mod fs_processor;
 mod game;
 mod game_speech;
 mod game_speech_protocol;
-mod game_speech_recording;
 mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;

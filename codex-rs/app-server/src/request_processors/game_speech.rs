@@ -32,8 +32,6 @@ use crate::request_processors::game_speech_protocol::ServerFrame;
 use crate::request_processors::game_speech_protocol::audio_request;
 use crate::request_processors::game_speech_protocol::decode_server_frame;
 use crate::request_processors::game_speech_protocol::full_client_request;
-use crate::request_processors::game_speech_recording::SavedSpeechRecording;
-use crate::request_processors::game_speech_recording::TemporarySpeechRecording;
 
 const FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const PCM_SAMPLE_BYTES: u64 = 2;
@@ -49,11 +47,11 @@ pub(super) struct RealtimeSpeechSessions {
 struct SpeechSessionHandle {
     connection_id: ConnectionId,
     commands: mpsc::Sender<SpeechCommand>,
-    recording: Arc<Mutex<Option<TemporarySpeechRecording>>>,
+    audio: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 enum SpeechCommand {
-    Finish(SavedSpeechRecording),
+    Finish(Vec<u8>),
     Cancel,
 }
 
@@ -82,31 +80,14 @@ impl RealtimeSpeechSessions {
     ) -> Result<GameSpeechStartResponse, String> {
         let route = self.adapter.realtime_speech_route().await?;
         let session_id = Uuid::now_v7().to_string();
-        let recording_directory = std::env::current_dir()
-            .map_err(|error| format!("读取项目目录失败：{error}"))?
-            .join(".codex-game")
-            .join("local")
-            .join("tmp")
-            .join("speech-recordings");
-        let recording = TemporarySpeechRecording::create(
-            &recording_directory,
-            &session_id,
-            route.sample_rate,
-            route.channels,
-        )?;
-        tracing::info!(
-            session_id,
-            path = %recording.path().display(),
-            "saving speech recording to temporary WAV file"
-        );
-        let recording = Arc::new(Mutex::new(Some(recording)));
+        let audio = Arc::new(Mutex::new(Some(Vec::new())));
         let (commands, receiver) = mpsc::channel(1);
         self.sessions.lock().await.insert(
             session_id.clone(),
             SpeechSessionHandle {
                 connection_id,
                 commands,
-                recording,
+                audio,
             },
         );
         let response = GameSpeechStartResponse {
@@ -119,12 +100,7 @@ impl RealtimeSpeechSessions {
         let task_session_id = session_id;
         tokio::spawn(async move {
             let result = sessions
-                .run_session(
-                    connection_id,
-                    &task_session_id,
-                    route.clone(),
-                    receiver,
-                )
+                .run_session(connection_id, &task_session_id, route.clone(), receiver)
                 .await;
             sessions.sessions.lock().await.remove(&task_session_id);
             match result {
@@ -186,11 +162,12 @@ impl RealtimeSpeechSessions {
             return Ok(());
         }
         let handle = self.owned_session(connection_id, session_id).await?;
-        let mut recording = handle.recording.lock().await;
-        recording
+        let mut buffered_audio = handle.audio.lock().await;
+        buffered_audio
             .as_mut()
-            .ok_or_else(|| "语音录音已经保存".to_string())?
-            .append(&audio)
+            .ok_or_else(|| "语音录音已经提交".to_string())?
+            .extend_from_slice(&audio);
+        Ok(())
     }
 
     pub(super) async fn finish(
@@ -199,22 +176,15 @@ impl RealtimeSpeechSessions {
         session_id: &str,
     ) -> Result<(), String> {
         let handle = self.owned_session(connection_id, session_id).await?;
-        let recording = handle
-            .recording
+        let audio = handle
+            .audio
             .lock()
             .await
             .take()
-            .ok_or_else(|| "语音录音已经保存".to_string())?
-            .save()?;
-        tracing::info!(
-            session_id,
-            path = %recording.path.display(),
-            data_bytes = recording.data_bytes,
-            "saved speech recording received by app server"
-        );
+            .ok_or_else(|| "语音录音已经提交".to_string())?;
         handle
             .commands
-            .send(SpeechCommand::Finish(recording))
+            .send(SpeechCommand::Finish(audio))
             .await
             .map_err(|_| "语音识别会话已结束".to_string())
     }
@@ -225,21 +195,7 @@ impl RealtimeSpeechSessions {
         session_id: &str,
     ) -> Result<(), String> {
         let handle = self.take_owned_session(connection_id, session_id).await?;
-        if let Some(recording) = handle.recording.lock().await.take() {
-            match recording.save() {
-                Ok(recording) => tracing::info!(
-                    session_id,
-                    path = %recording.path.display(),
-                    data_bytes = recording.data_bytes,
-                    "saved cancelled speech recording received by app server"
-                ),
-                Err(error) => tracing::warn!(
-                    session_id,
-                    %error,
-                    "failed to save cancelled speech recording"
-                ),
-            }
-        }
+        let _ = handle.audio.lock().await.take();
         handle
             .commands
             .send(SpeechCommand::Cancel)
@@ -289,15 +245,12 @@ impl RealtimeSpeechSessions {
         route: RealtimeSpeechRoute,
         mut commands: mpsc::Receiver<SpeechCommand>,
     ) -> Result<SpeechOutcome, String> {
-        let recording = match commands.recv().await {
-            Some(SpeechCommand::Finish(recording)) => recording,
+        let audio = match commands.recv().await {
+            Some(SpeechCommand::Finish(audio)) => audio,
             Some(SpeechCommand::Cancel) | None => return Ok(SpeechOutcome::Cancelled),
         };
-        let recording_path = recording.path.display().to_string();
-        let total_audio_bytes = recording.data_bytes;
-        let mut socket = connect(&route, session_id)
-            .await
-            .map_err(|error| format!("{error}；录音已保存至 {recording_path}"))?;
+        let total_audio_bytes = u64::try_from(audio.len()).unwrap_or(u64::MAX);
+        let mut socket = connect(&route, session_id).await?;
         let bytes_per_second = u64::from(route.sample_rate)
             .saturating_mul(u64::from(route.channels))
             .saturating_mul(PCM_SAMPLE_BYTES);
@@ -309,7 +262,6 @@ impl RealtimeSpeechSessions {
                 required_seconds,
             )
             .await?;
-        let audio = recording.read_pcm()?;
         let chunk_bytes = usize::try_from(
             bytes_per_second
                 .saturating_mul(u64::from(route.chunk_ms))
@@ -318,19 +270,17 @@ impl RealtimeSpeechSessions {
         .unwrap_or(usize::MAX)
         .max(1);
         for chunk in audio.chunks(chunk_bytes) {
+            let request = audio_request(chunk, false)?;
             socket
-                .send(Message::Binary(audio_request(chunk, false)?.into()))
+                .send(Message::Binary(request.into()))
                 .await
-                .map_err(|error| {
-                    format!("发送语音数据失败：{error}；录音已保存至 {recording_path}")
-                })?;
+                .map_err(|error| format!("发送语音数据失败：{error}"))?;
         }
+        let finish_request = audio_request(&[], true)?;
         socket
-            .send(Message::Binary(audio_request(&[], true)?.into()))
+            .send(Message::Binary(finish_request.into()))
             .await
-            .map_err(|error| {
-                format!("结束语音识别失败：{error}；录音已保存至 {recording_path}")
-            })?;
+            .map_err(|error| format!("结束语音识别失败：{error}"))?;
 
         let mut transcript = String::new();
         tokio::time::timeout(FINAL_RESPONSE_TIMEOUT, async {
@@ -391,6 +341,7 @@ async fn connect(route: &RealtimeSpeechRoute, request_id: &str) -> Result<Speech
     if !headers.contains_key(HOST) {
         return Err("语音识别地址缺少 Host".to_string());
     }
+    let initial_request = full_client_request(route)?;
     ensure_rustls_crypto_provider();
     let (mut socket, response) = connect_async(request)
         .await
@@ -399,7 +350,7 @@ async fn connect(route: &RealtimeSpeechRoute, request_id: &str) -> Result<Speech
         tracing::debug!(request_id, log_id = ?log_id, "connected to Volcengine ASR");
     }
     socket
-        .send(Message::Binary(full_client_request(route)?.into()))
+        .send(Message::Binary(initial_request.into()))
         .await
         .map_err(|error| format!("初始化语音识别失败：{error}"))?;
     Ok(socket)

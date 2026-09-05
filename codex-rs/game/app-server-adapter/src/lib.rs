@@ -135,7 +135,10 @@ impl GameAppServerAdapter {
                     .runtime
                     .orchestrator()
                     .retry_output_length(execution, store.as_ref(), &context, audit_context)
-                    .await { return Ok(Some(retry_projection(retry))) }
+                    .await
+                {
+                    return Ok(Some(retry_projection(retry)));
+                }
             }
             self.runtime
                 .service()

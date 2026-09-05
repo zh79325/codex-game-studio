@@ -32,6 +32,8 @@ use crate::request_processors::game_speech_protocol::ServerFrame;
 use crate::request_processors::game_speech_protocol::audio_request;
 use crate::request_processors::game_speech_protocol::decode_server_frame;
 use crate::request_processors::game_speech_protocol::full_client_request;
+use crate::request_processors::game_speech_recording::SavedSpeechRecording;
+use crate::request_processors::game_speech_recording::TemporarySpeechRecording;
 
 const FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const PCM_SAMPLE_BYTES: u64 = 2;
@@ -47,11 +49,11 @@ pub(super) struct RealtimeSpeechSessions {
 struct SpeechSessionHandle {
     connection_id: ConnectionId,
     commands: mpsc::Sender<SpeechCommand>,
+    recording: Arc<Mutex<Option<TemporarySpeechRecording>>>,
 }
 
 enum SpeechCommand {
-    Audio(Vec<u8>),
-    Finish,
+    Finish(SavedSpeechRecording),
     Cancel,
 }
 
@@ -80,13 +82,31 @@ impl RealtimeSpeechSessions {
     ) -> Result<GameSpeechStartResponse, String> {
         let route = self.adapter.realtime_speech_route().await?;
         let session_id = Uuid::now_v7().to_string();
-        let socket = connect(&route, &session_id).await?;
-        let (commands, receiver) = mpsc::channel(32);
+        let recording_directory = std::env::current_dir()
+            .map_err(|error| format!("读取项目目录失败：{error}"))?
+            .join(".codex-game")
+            .join("local")
+            .join("tmp")
+            .join("speech-recordings");
+        let recording = TemporarySpeechRecording::create(
+            &recording_directory,
+            &session_id,
+            route.sample_rate,
+            route.channels,
+        )?;
+        tracing::info!(
+            session_id,
+            path = %recording.path().display(),
+            "saving speech recording to temporary WAV file"
+        );
+        let recording = Arc::new(Mutex::new(Some(recording)));
+        let (commands, receiver) = mpsc::channel(1);
         self.sessions.lock().await.insert(
             session_id.clone(),
             SpeechSessionHandle {
                 connection_id,
                 commands,
+                recording,
             },
         );
         let response = GameSpeechStartResponse {
@@ -103,7 +123,6 @@ impl RealtimeSpeechSessions {
                     connection_id,
                     &task_session_id,
                     route.clone(),
-                    socket,
                     receiver,
                 )
                 .await;
@@ -166,8 +185,12 @@ impl RealtimeSpeechSessions {
         if audio.is_empty() {
             return Ok(());
         }
-        self.send_command(connection_id, session_id, SpeechCommand::Audio(audio))
-            .await
+        let handle = self.owned_session(connection_id, session_id).await?;
+        let mut recording = handle.recording.lock().await;
+        recording
+            .as_mut()
+            .ok_or_else(|| "语音录音已经保存".to_string())?
+            .append(&audio)
     }
 
     pub(super) async fn finish(
@@ -175,8 +198,25 @@ impl RealtimeSpeechSessions {
         connection_id: ConnectionId,
         session_id: &str,
     ) -> Result<(), String> {
-        self.send_command(connection_id, session_id, SpeechCommand::Finish)
+        let handle = self.owned_session(connection_id, session_id).await?;
+        let recording = handle
+            .recording
+            .lock()
             .await
+            .take()
+            .ok_or_else(|| "语音录音已经保存".to_string())?
+            .save()?;
+        tracing::info!(
+            session_id,
+            path = %recording.path.display(),
+            data_bytes = recording.data_bytes,
+            "saved speech recording received by app server"
+        );
+        handle
+            .commands
+            .send(SpeechCommand::Finish(recording))
+            .await
+            .map_err(|_| "语音识别会话已结束".to_string())
     }
 
     pub(super) async fn cancel(
@@ -185,6 +225,21 @@ impl RealtimeSpeechSessions {
         session_id: &str,
     ) -> Result<(), String> {
         let handle = self.take_owned_session(connection_id, session_id).await?;
+        if let Some(recording) = handle.recording.lock().await.take() {
+            match recording.save() {
+                Ok(recording) => tracing::info!(
+                    session_id,
+                    path = %recording.path.display(),
+                    data_bytes = recording.data_bytes,
+                    "saved cancelled speech recording received by app server"
+                ),
+                Err(error) => tracing::warn!(
+                    session_id,
+                    %error,
+                    "failed to save cancelled speech recording"
+                ),
+            }
+        }
         handle
             .commands
             .send(SpeechCommand::Cancel)
@@ -192,12 +247,11 @@ impl RealtimeSpeechSessions {
             .map_err(|_| "语音识别会话已结束".to_string())
     }
 
-    async fn send_command(
+    async fn owned_session(
         &self,
         connection_id: ConnectionId,
         session_id: &str,
-        command: SpeechCommand,
-    ) -> Result<(), String> {
+    ) -> Result<SpeechSessionHandle, String> {
         let handle = self
             .sessions
             .lock()
@@ -208,11 +262,7 @@ impl RealtimeSpeechSessions {
         if handle.connection_id != connection_id {
             return Err("无权访问该语音识别会话".to_string());
         }
-        handle
-            .commands
-            .send(command)
-            .await
-            .map_err(|_| "语音识别会话已结束".to_string())
+        Ok(handle)
     }
 
     async fn take_owned_session(
@@ -237,67 +287,52 @@ impl RealtimeSpeechSessions {
         connection_id: ConnectionId,
         session_id: &str,
         route: RealtimeSpeechRoute,
-        mut socket: SpeechSocket,
         mut commands: mpsc::Receiver<SpeechCommand>,
     ) -> Result<SpeechOutcome, String> {
-        let mut total_audio_bytes = 0_u64;
-        let mut billed_seconds = 0_u64;
-        let mut transcript = String::new();
-        loop {
-            tokio::select! {
-                command = commands.recv() => match command {
-                    Some(SpeechCommand::Audio(audio)) => {
-                        total_audio_bytes = total_audio_bytes.saturating_add(audio.len() as u64);
-                        let bytes_per_second = u64::from(route.sample_rate)
-                            .saturating_mul(u64::from(route.channels))
-                            .saturating_mul(PCM_SAMPLE_BYTES);
-                        let required_seconds = total_audio_bytes.div_ceil(bytes_per_second.max(1));
-                        if required_seconds > billed_seconds {
-                            let amount = required_seconds - billed_seconds;
-                            self.adapter
-                                .reserve_realtime_speech_usage(
-                                    &route.provider_model_id,
-                                    &format!("speech:{session_id}:{required_seconds}"),
-                                    amount,
-                                )
-                                .await?;
-                            billed_seconds = required_seconds;
-                        }
-                        socket
-                            .send(Message::Binary(audio_request(&audio, false)?.into()))
-                            .await
-                            .map_err(|error| format!("发送语音数据失败：{error}"))?;
-                    }
-                    Some(SpeechCommand::Finish) => {
-                        socket
-                            .send(Message::Binary(audio_request(&[], true)?.into()))
-                            .await
-                            .map_err(|error| format!("结束语音识别失败：{error}"))?;
-                        break;
-                    }
-                    Some(SpeechCommand::Cancel) | None => {
-                        let _ = socket.close(None).await;
-                        return Ok(SpeechOutcome::Cancelled);
-                    }
-                },
-                incoming = socket.next() => {
-                    if handle_incoming(
-                        incoming,
-                        &mut socket,
-                        &self.outgoing,
-                        connection_id,
-                        session_id,
-                        &mut transcript,
-                    ).await? {
-                        return Ok(SpeechOutcome::Completed {
-                            text: transcript,
-                            duration_ms: audio_duration_ms(total_audio_bytes, &route),
-                        });
-                    }
-                }
-            }
+        let recording = match commands.recv().await {
+            Some(SpeechCommand::Finish(recording)) => recording,
+            Some(SpeechCommand::Cancel) | None => return Ok(SpeechOutcome::Cancelled),
+        };
+        let recording_path = recording.path.display().to_string();
+        let total_audio_bytes = recording.data_bytes;
+        let mut socket = connect(&route, session_id)
+            .await
+            .map_err(|error| format!("{error}；录音已保存至 {recording_path}"))?;
+        let bytes_per_second = u64::from(route.sample_rate)
+            .saturating_mul(u64::from(route.channels))
+            .saturating_mul(PCM_SAMPLE_BYTES);
+        let required_seconds = total_audio_bytes.div_ceil(bytes_per_second.max(1));
+        self.adapter
+            .reserve_realtime_speech_usage(
+                &route.provider_model_id,
+                &format!("speech:{session_id}:{required_seconds}"),
+                required_seconds,
+            )
+            .await?;
+        let audio = recording.read_pcm()?;
+        let chunk_bytes = usize::try_from(
+            bytes_per_second
+                .saturating_mul(u64::from(route.chunk_ms))
+                .div_ceil(1_000),
+        )
+        .unwrap_or(usize::MAX)
+        .max(1);
+        for chunk in audio.chunks(chunk_bytes) {
+            socket
+                .send(Message::Binary(audio_request(chunk, false)?.into()))
+                .await
+                .map_err(|error| {
+                    format!("发送语音数据失败：{error}；录音已保存至 {recording_path}")
+                })?;
         }
+        socket
+            .send(Message::Binary(audio_request(&[], true)?.into()))
+            .await
+            .map_err(|error| {
+                format!("结束语音识别失败：{error}；录音已保存至 {recording_path}")
+            })?;
 
+        let mut transcript = String::new();
         tokio::time::timeout(FINAL_RESPONSE_TIMEOUT, async {
             loop {
                 let incoming = socket.next().await;

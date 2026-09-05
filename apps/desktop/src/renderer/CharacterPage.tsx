@@ -146,28 +146,13 @@ export default function CharacterPage() {
     0,
     states.indexOf(character?.state ?? "S0_spec_drafting"),
   );
-  const hasApprovedVerdict = (
-    token: "SPEC-CHECK" | "VIEW-CHECK",
-    notBefore: number,
-  ) =>
-    conversation.snapshot?.messages.some(
-      (item) =>
-        item.createdAt >= notBefore &&
-        item.action?.payload.verdict?.token === token &&
-        item.action.payload.verdict.decision === "APPROVE",
-    ) ?? false;
   const hasCompleteViewSelection =
     selectedViews.length === 1 &&
     viewGenerations.some(
-      (item) =>
-        item.id === selectedViews[0] &&
-        item.variant === "quad" &&
-        hasApprovedVerdict("VIEW-CHECK", item.createdAt),
+      (item) => item.id === selectedViews[0] && item.variant === "quad",
     );
-  const hasApprovedRenderSelection = renderGenerations.some(
-    (item) =>
-      item.id === selectedRender &&
-      hasApprovedVerdict("VIEW-CHECK", item.createdAt),
+  const hasRenderSelection = renderGenerations.some(
+    (item) => item.id === selectedRender,
   );
 
   const continueAfterConfirmation = async (
@@ -190,13 +175,9 @@ export default function CharacterPage() {
     await action.mutateAsync({ type: "spec", draftId: draft.id });
     await continueAfterConfirmation("spec");
   };
-  const canConfirmSpecDraft = (draft: ArtifactDraft) =>
-    character?.state === "S0_spec_drafting" &&
-    draft.targetPath === "docs/角色定稿.md" &&
-    hasApprovedVerdict("SPEC-CHECK", draft.createdAt);
   const confirmRender = async () => {
-    if (!selectedRender || !hasApprovedRenderSelection) {
-      throw new Error("请选择已通过审校的效果图候选");
+    if (!selectedRender || !hasRenderSelection) {
+      throw new Error("请先选择一张效果图候选");
     }
     await action.mutateAsync({
       type: "render",
@@ -206,7 +187,7 @@ export default function CharacterPage() {
   };
   const confirmViews = async () => {
     if (!hasCompleteViewSelection) {
-      throw new Error("请选择已通过审校的完整四视图");
+      throw new Error("请先选择一张完整四视图");
     }
     await action.mutateAsync({
       type: "views",
@@ -270,7 +251,6 @@ export default function CharacterPage() {
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}
             onConfirmDraft={confirmSpecDraft}
-            canConfirmDraft={canConfirmSpecDraft}
             confirmingDraft={action.isPending}
             onSubmitDraftFeedback={(content) =>
               requestRevision("spec", content)
@@ -309,9 +289,6 @@ export default function CharacterPage() {
                 generations={renderGenerations}
                 selectedId={selectedRender}
                 disabled={!canWrite || conversation.isBusy}
-                canSelect={(generation) =>
-                  hasApprovedVerdict("VIEW-CHECK", generation.createdAt)
-                }
                 confirming={action.isPending}
                 onSelect={setSelectedRender}
                 onConfirm={confirmRender}
@@ -328,8 +305,7 @@ export default function CharacterPage() {
                       disabled={
                         !canWrite ||
                         conversation.isBusy ||
-                        generation.variant !== "quad" ||
-                        !hasApprovedVerdict("VIEW-CHECK", generation.createdAt)
+                        generation.variant !== "quad"
                       }
                       onChange={(event) =>
                         setSelectedViews(
@@ -374,7 +350,6 @@ function GenerationGate({
   generations,
   selectedId,
   disabled,
-  canSelect,
   confirming,
   onSelect,
   onConfirm,
@@ -384,7 +359,6 @@ function GenerationGate({
   generations: Generation[];
   selectedId?: string;
   disabled: boolean;
-  canSelect: (generation: Generation) => boolean;
   confirming: boolean;
   onSelect: (id: string) => void;
   onConfirm: () => Promise<unknown>;
@@ -401,10 +375,7 @@ function GenerationGate({
         >
           {generations.map((generation) => (
             <Card size="small" key={generation.id}>
-              <Radio
-                value={generation.id}
-                disabled={!canSelect(generation)}
-              >
+              <Radio value={generation.id}>
                 {generation.variant ?? "候选"}
               </Radio>
               <Typography.Text className="path-text">

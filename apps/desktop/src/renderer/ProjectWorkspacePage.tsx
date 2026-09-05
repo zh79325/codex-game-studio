@@ -185,8 +185,6 @@ export default function ProjectWorkspacePage() {
     }
     await commitArtBible.mutateAsync(draft.id);
   };
-  const canConfirmDraft = (draft: ArtifactDraft) =>
-    draft.targetPath === "art-bible.md" && project.data?.state === "drafting";
   const submitDraftFeedback = async (content: string) => {
     await conversation.send(
       `用户对当前最终确认内容有以下补充要求：${content}`,
@@ -425,7 +423,6 @@ export default function ProjectWorkspacePage() {
             onInterrupt={conversation.interrupt}
             onCommitDrafts={conversation.commitDrafts}
             onConfirmDraft={confirmDraft}
-            canConfirmDraft={canConfirmDraft}
             confirmingDraft={commitArtBible.isPending}
             onSubmitDraftFeedback={submitDraftFeedback}
             choiceInteractionEnabled={project.data?.state !== "ready"}

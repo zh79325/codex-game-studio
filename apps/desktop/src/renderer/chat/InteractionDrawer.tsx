@@ -19,7 +19,6 @@ export default function InteractionDrawer({
   onSubmitFeedback,
   onCommitDrafts,
   onConfirmDraft,
-  canConfirmDraft,
   confirmingDraft = false,
 }: {
   choice?: PendingChoice;
@@ -32,7 +31,6 @@ export default function InteractionDrawer({
   onSubmitFeedback: (content: string) => Promise<boolean>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
   onConfirmDraft?: (draft: ArtifactDraft) => Promise<unknown>;
-  canConfirmDraft?: (draft: ArtifactDraft) => boolean;
   confirmingDraft?: boolean;
 }) {
   const { message } = App.useApp();
@@ -64,9 +62,6 @@ export default function InteractionDrawer({
   const confirmDrafts = async () => {
     if (dedicatedDraft) {
       if (!onConfirmDraft) throw new Error("当前内容缺少确认操作");
-      if (!(canConfirmDraft?.(dedicatedDraft) ?? true)) {
-        throw new Error("当前内容尚未满足确认条件");
-      }
       await onConfirmDraft(dedicatedDraft);
     } else if (onCommitDrafts) {
       await onCommitDrafts(visibleDrafts.map((draft) => draft.id));

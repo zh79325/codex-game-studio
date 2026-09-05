@@ -2019,7 +2019,7 @@ impl GameService {
             ));
         }
         let constraints = self
-            .require_approved_verdict(project_id, character_id, "SPEC-CHECK", draft.created_at)
+            .collect_verdict_constraints(project_id, character_id, "SPEC-CHECK", draft.created_at)
             .await?;
         let relative = PathBuf::from(&character.dir_name).join(&draft.target_path);
         let path = Path::new(&project.root).join(&relative);
@@ -2164,7 +2164,7 @@ impl GameService {
             .ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("渲染记录不存在".to_string())
             })?;
-        self.require_approved_verdict(
+        self.collect_verdict_constraints(
             project_id,
             character_id,
             "VIEW-CHECK",
@@ -2254,7 +2254,7 @@ impl GameService {
                 "四视图候选必须是完整的 2×2 四宫格".to_string(),
             ));
         }
-        self.require_approved_verdict(
+        self.collect_verdict_constraints(
             project_id,
             character_id,
             "VIEW-CHECK",
@@ -2350,7 +2350,7 @@ impl GameService {
         Ok(character)
     }
 
-    async fn require_approved_verdict(
+    async fn collect_verdict_constraints(
         &self,
         project_id: &str,
         character_id: &str,
@@ -2363,24 +2363,16 @@ impl GameService {
             Some(character_id),
         )?;
         let snapshot = self.read_conversation(conversation.id.as_str()).await?;
-        let verdict = snapshot
+        let Some(verdict) = snapshot
             .messages
             .iter()
             .rev()
             .filter(|message| message.created_at >= not_before)
             .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
-            .find(|verdict| verdict.token == token)
-            .ok_or_else(|| {
-                GameServiceError::InvalidCharacterOperation(format!(
-                    "缺少针对当前候选的 {token} 审校结论"
-                ))
-            })?;
-        if verdict.decision != "APPROVE" {
-            return Err(GameServiceError::InvalidCharacterOperation(format!(
-                "最新 {token} 结论为 {}，不能通过人工门禁",
-                verdict.decision
-            )));
-        }
+            .find(|verdict| verdict.token == token && verdict.decision == "APPROVE")
+        else {
+            return Ok(Vec::new());
+        };
         verdict
             .constraints
             .iter()

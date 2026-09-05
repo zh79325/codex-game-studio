@@ -45,7 +45,6 @@ export type ChatPanelProps = {
   onInterrupt: () => Promise<unknown>;
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
   onConfirmDraft?: (draft: ArtifactDraft) => Promise<unknown>;
-  canConfirmDraft?: (draft: ArtifactDraft) => boolean;
   confirmingDraft?: boolean;
   onSubmitDraftFeedback?: (content: string) => Promise<unknown>;
   choiceInteractionEnabled?: boolean;
@@ -197,7 +196,6 @@ export default function ChatPanel(props: ChatPanelProps) {
         onSubmitFeedback={submitDraftFeedback}
         onCommitDrafts={props.onCommitDrafts}
         onConfirmDraft={props.onConfirmDraft}
-        canConfirmDraft={props.canConfirmDraft}
         confirmingDraft={props.confirmingDraft}
       />
     </>

@@ -182,8 +182,8 @@ export default function ChatPanel(props: ChatPanelProps) {
       </Card>
       <InteractionDrawer
         choice={pendingChoice}
-        drafts={pendingDrafts}
-        disabled={!props.canWrite || props.busy}
+        drafts={props.busy ? [] : pendingDrafts}
+        disabled={!props.canWrite || (props.busy && !pendingChoice)}
         onSubmitChoice={submitChoice}
         onSubmitFeedback={send}
         onCommitDrafts={props.onCommitDrafts}

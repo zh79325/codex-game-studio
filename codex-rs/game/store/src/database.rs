@@ -664,6 +664,19 @@ impl ProjectStore {
                 "thinking message {assistant_message_id}"
             )));
         }
+        if action
+            .payload
+            .choices
+            .as_ref()
+            .is_some_and(|choices| !choices.is_empty())
+        {
+            sqlx::query(
+                "UPDATE artifact_drafts SET status = 'superseded' WHERE conversation_id = ? AND status = 'pending'",
+            )
+            .bind(&completion.conversation_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         for draft in action.payload.drafts.as_deref().unwrap_or_default() {
             sqlx::query("UPDATE artifact_drafts SET status = 'superseded' WHERE conversation_id = ? AND target_path = ? AND status = 'pending'")
                 .bind(&completion.conversation_id)
@@ -1072,6 +1085,29 @@ impl ProjectStore {
         Ok(())
     }
 
+    pub async fn upsert_character(&self, character: &Character) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query("INSERT INTO characters(id, project_id, name, group_name, dir_name, state, spec_path, render_path, view_paths_json, hard_constraints_json, gate_spec_confirmed_at, gate_render_confirmed_at, gate_views_confirmed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, name = excluded.name, group_name = excluded.group_name, dir_name = excluded.dir_name, state = excluded.state, spec_path = excluded.spec_path, render_path = excluded.render_path, view_paths_json = excluded.view_paths_json, hard_constraints_json = excluded.hard_constraints_json, gate_spec_confirmed_at = excluded.gate_spec_confirmed_at, gate_render_confirmed_at = excluded.gate_render_confirmed_at, gate_views_confirmed_at = excluded.gate_views_confirmed_at, created_at = excluded.created_at, updated_at = excluded.updated_at")
+            .bind(&character.id)
+            .bind(&character.project_id)
+            .bind(&character.name)
+            .bind(&character.group)
+            .bind(&character.dir_name)
+            .bind(character_state_name(character.state))
+            .bind(&character.spec_path)
+            .bind(&character.render_path)
+            .bind(serde_json::to_string(&character.view_paths)?)
+            .bind(serde_json::to_string(&character.hard_constraints)?)
+            .bind(character.gate_spec_confirmed_at)
+            .bind(character.gate_render_confirmed_at)
+            .bind(character.gate_views_confirmed_at)
+            .bind(character.created_at)
+            .bind(character.updated_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_character(&self, character: &Character) -> Result<(), StoreError> {
         self.require_writable()?;
         sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
@@ -1112,6 +1148,30 @@ impl ProjectStore {
             .fetch_optional(&self.pool)
             .await?;
         row.map(|row| decode_character(project_id, row)).transpose()
+    }
+
+    pub async fn delete_character_record(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM generations WHERE project_id = ? AND target_kind = 'character' AND target_ref = ?")
+            .bind(project_id)
+            .bind(character_id)
+            .execute(&mut *transaction)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM characters WHERE project_id = ? AND id = ?")
+            .bind(project_id)
+            .bind(character_id)
+            .execute(&mut *transaction)
+            .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(StoreError::NotFound(format!("character {character_id}")));
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn insert_generation(&self, generation: &Generation) -> Result<(), StoreError> {
@@ -2372,6 +2432,7 @@ mod tests {
     use codex_game_domain::AgentActionKind;
     use codex_game_domain::AgentActionPayload;
     use codex_game_domain::ArtifactDraft;
+    use codex_game_domain::ChoiceGroup;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
@@ -2487,7 +2548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_draft_supersedes_only_pending_drafts_for_the_same_path() {
+    async fn new_interaction_supersedes_obsolete_pending_drafts() {
         let directory = tempdir().expect("tempdir");
         let store = ProjectStore::open(directory.path())
             .await
@@ -2567,6 +2628,50 @@ mod tests {
                 ),
             ]
         );
+
+        sqlx::query("UPDATE tasks SET status = 'running' WHERE id = 't1'")
+            .execute(store.pool())
+            .await
+            .expect("reset task for choice turn");
+        sqlx::query(
+            "INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, codex_turn_id, status) VALUES ('a2', 't1', 2, 'ct1', 'turn2', 'running')",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed choice attempt");
+        sqlx::query(
+            "INSERT INTO messages(id, conversation_id, role, content, status, created_at) VALUES ('m2', 'c1', 'assistant', '', 'thinking', 3)",
+        )
+        .execute(store.pool())
+        .await
+        .expect("seed choice message");
+        let choice_action = AgentAction {
+            action: AgentActionKind::AskUser,
+            target_agent: None,
+            reason: "请先确认风格".to_string(),
+            payload: AgentActionPayload {
+                choices: Some(vec![ChoiceGroup {
+                    item: "风格".to_string(),
+                    options: vec!["写实".to_string(), "卡通".to_string()],
+                    recommended: vec!["卡通".to_string()],
+                    multiple: false,
+                }]),
+                ..Default::default()
+            },
+        };
+
+        store
+            .commit_action_turn("turn2", "m2", "请选择风格", &choice_action, &[], None, 4)
+            .await
+            .expect("commit choice turn");
+
+        let pending_draft_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifact_drafts WHERE conversation_id = 'c1' AND status = 'pending'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("count pending drafts");
+        assert_eq!(pending_draft_count, 0);
     }
 
     #[tokio::test]

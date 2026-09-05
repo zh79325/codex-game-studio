@@ -219,6 +219,7 @@ export type { GameConversationMemory } from "./GameConversationMemory";
 export type { GameConversationTurnNotification } from "./GameConversationTurnNotification";
 export type { GameGeneration } from "./GameGeneration";
 export type { GameGenerationUpdatedNotification } from "./GameGenerationUpdatedNotification";
+export type { GameListedCharacter } from "./GameListedCharacter";
 export type { GameMessage } from "./GameMessage";
 export type { GameProject } from "./GameProject";
 export type { GameProviderPreset } from "./GameProviderPreset";

@@ -330,11 +330,20 @@ game_dto!(GameCharacterGroupCreateParams {
     name: String
 });
 game_dto!(GameCharacterGroupCreateResponse { group: String });
+game_dto!(GameListedCharacter {
+    character: GameCharacter,
+    model_file_exists: bool
+});
 game_dto!(GameCharacterListParams { project_id: String });
 game_dto!(GameCharacterListResponse {
-    characters: Vec<GameCharacter>,
+    characters: Vec<GameListedCharacter>,
     groups: Vec<String>
 });
+game_dto!(GameCharacterDeleteParams {
+    project_id: String,
+    character_id: String
+});
+empty_params!(GameCharacterDeleteResponse);
 game_dto!(GameCharacterReadParams {
     project_id: String,
     character_id: String

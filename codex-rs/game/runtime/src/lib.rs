@@ -1,6 +1,7 @@
 mod action;
 mod agents;
 mod audit;
+mod character_files;
 mod execution;
 mod orchestrator;
 mod routing;

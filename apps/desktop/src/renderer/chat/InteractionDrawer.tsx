@@ -36,8 +36,8 @@ export default function InteractionDrawer({
 }) {
   const { message } = App.useApp();
   const visibleDrafts = useMemo(
-    () => drafts.filter((draft) => !isJsonDraft(draft)),
-    [drafts],
+    () => (choice ? [] : drafts.filter((draft) => !isJsonDraft(draft))),
+    [choice, drafts],
   );
   const committableDrafts = visibleDrafts.filter(
     (draft) => !isDedicatedGateDraft(draft),

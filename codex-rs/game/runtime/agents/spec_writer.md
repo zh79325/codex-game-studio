@@ -59,9 +59,6 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
       "multiple": false
     }
   ],
-  "drafts": [
-    {"target_path": "docs/角色定稿.md", "content": "# 角色名 — 角色设定\n..."}
-  ],
   "memories": [
     {"scope": "character", "kind": "preference", "content": "用户明确确认的偏好"}
   ]
@@ -69,6 +66,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
 ```
 
 - 有 `choices` 时必须使用 `ask_user`；每项至少两个选项，推荐值必须逐字来自 `options`。
+- 同一轮不得同时输出 `choices` 和 `drafts`。只要还有待用户拍板的问题，本轮就只输出 `choices`；用户完成选择后的下一轮才能输出 `drafts`。
 - `multiple` 仅在可叠加特征上为 `true`；互斥维度为 `false`。
 - 草稿仍需用户确认，因此输出 `drafts` 时使用 `ask_user`。
 - 七个维度全部聊定后，`drafts[0].content` 使用以下固定章节：基本信息、头部特征、躯干与四肢、附属结构、颜色与质感、整体风格、环境设定。

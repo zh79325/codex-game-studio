@@ -1152,6 +1152,11 @@ impl MessageProcessor {
                 .character_list(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterDelete { params, .. } => self
+                .game_processor
+                .character_delete(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::GameCharacterRead { params, .. } => self
                 .game_processor
                 .character_read(params)

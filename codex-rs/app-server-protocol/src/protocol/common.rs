@@ -645,6 +645,12 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameCharacterListResponse,
     },
+    #[experimental("game/character/delete")]
+    GameCharacterDelete => "game/character/delete" {
+        params: v2::GameCharacterDeleteParams,
+        serialization: global("game"),
+        response: v2::GameCharacterDeleteResponse,
+    },
     #[experimental("game/character/read")]
     GameCharacterRead => "game/character/read" {
         params: v2::GameCharacterReadParams,

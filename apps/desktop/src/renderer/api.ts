@@ -8,6 +8,7 @@ import type {
   Conversation,
   ConversationSnapshot,
   Generation,
+  ListedCharacter,
   Project,
   ProviderPreset,
 } from "./types";
@@ -116,9 +117,23 @@ export const workspaceApi = {
 };
 
 export const charactersApi = {
-  list: (projectId: string) =>
-    rpc<{ characters: Character[]; groups: string[] }>("game/character/list", {
+  list: async (projectId: string) => {
+    const response = await rpc<{
+      characters: { character: Character; modelFileExists: boolean }[];
+      groups: string[];
+    }>("game/character/list", { projectId });
+    return {
+      characters: response.characters.map<ListedCharacter>((listed) => ({
+        ...listed.character,
+        modelFileExists: listed.modelFileExists,
+      })),
+      groups: response.groups,
+    };
+  },
+  remove: (projectId: string, characterId: string) =>
+    rpc<Record<string, never>>("game/character/delete", {
       projectId,
+      characterId,
     }),
   createGroup: async (projectId: string, name: string) =>
     (

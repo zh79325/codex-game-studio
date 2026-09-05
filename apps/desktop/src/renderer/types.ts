@@ -138,6 +138,10 @@ export type Character = {
   updatedAt: number;
 };
 
+export type ListedCharacter = Character & {
+  modelFileExists: boolean;
+};
+
 export type Generation = {
   id: string;
   projectId: string;

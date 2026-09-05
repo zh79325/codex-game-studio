@@ -624,15 +624,39 @@ impl GameAppServerAdapter {
             .service()
             .list_characters(&params.project_id)
             .await?;
-        let groups = self
+        let mut groups = self
             .runtime
             .service()
             .list_character_groups(&params.project_id)
             .await?;
+        groups.extend(
+            characters
+                .iter()
+                .filter_map(|listed| listed.character.group.clone()),
+        );
+        groups.sort();
+        groups.dedup();
         Ok(GameCharacterListResponse {
-            characters: characters.into_iter().map(character_dto).collect(),
+            characters: characters
+                .into_iter()
+                .map(|listed| GameListedCharacter {
+                    character: character_dto(listed.character),
+                    model_file_exists: listed.model_file_exists,
+                })
+                .collect(),
             groups,
         })
+    }
+
+    pub async fn character_delete(
+        &self,
+        params: GameCharacterDeleteParams,
+    ) -> Result<GameCharacterDeleteResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .remove_character(&params.project_id, &params.character_id)
+            .await?;
+        Ok(GameCharacterDeleteResponse {})
     }
 
     pub async fn character_read(

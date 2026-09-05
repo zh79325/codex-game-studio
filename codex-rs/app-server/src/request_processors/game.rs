@@ -356,6 +356,16 @@ impl GameRequestProcessor {
             .map_err(game_error)
     }
 
+    pub(crate) async fn character_delete(
+        &self,
+        params: GameCharacterDeleteParams,
+    ) -> std::result::Result<GameCharacterDeleteResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_delete(params)
+            .await
+            .map_err(game_error)
+    }
+
     pub(crate) async fn character_read(
         &self,
         params: GameCharacterReadParams,

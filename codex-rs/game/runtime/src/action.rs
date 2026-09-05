@@ -142,10 +142,9 @@ fn validate_action(
 fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
     let payload = &action.payload;
     if payload.drafts.as_ref().is_some_and(|drafts| {
-        drafts.is_empty()
-            || drafts.iter().any(|draft| {
-                draft.content.trim().is_empty() || !is_safe_relative_path(&draft.target_path)
-            })
+        drafts.iter().any(|draft| {
+            draft.content.trim().is_empty() || !is_safe_relative_path(&draft.target_path)
+        })
     }) {
         return Err(ActionProtocolError::InvalidPayload(
             "drafts 必须包含安全相对路径和非空内容".to_string(),
@@ -258,6 +257,20 @@ fn validate_payload(action: &AgentAction) -> Result<(), ActionProtocolError> {
     if payload.naming.is_some() && (payload.choices.is_some() || payload.drafts.is_some()) {
         return Err(ActionProtocolError::InvalidPayload(
             "naming 不能与 choices 或 drafts 同时出现".to_string(),
+        ));
+    }
+    let has_choices = payload
+        .choices
+        .as_ref()
+        .is_some_and(|choices| !choices.is_empty());
+    let has_drafts = payload
+        .drafts
+        .as_ref()
+        .is_some_and(|drafts| !drafts.is_empty());
+    if has_choices && has_drafts {
+        return Err(ActionProtocolError::InvalidPayload(
+            "choices 与 drafts 不能在同一轮出现；必须先让用户完成选择，下一轮才能输出 drafts"
+                .to_string(),
         ));
     }
     Ok(())
@@ -478,6 +491,51 @@ mod tests {
         assert_eq!(
             parse_agent_turn(&empty_choices, "game_designer", &[]),
             Err(ActionProtocolError::InvalidChoices)
+        );
+    }
+
+    #[test]
+    fn enforces_choice_and_draft_sequence() {
+        let choice_with_empty_drafts = output(json!({
+            "action": "ask_user",
+            "target_agent": null,
+            "reason": "需要用户确认角色设定",
+            "payload": {
+                "choices": [{
+                    "item": "主色",
+                    "options": ["朱砂红", "深靛蓝"],
+                    "recommended": ["朱砂红"],
+                    "multiple": false
+                }],
+                "drafts": []
+            }
+        }));
+        assert!(parse_agent_turn(&choice_with_empty_drafts, "spec_writer", &[]).is_ok());
+
+        let mixed_interaction = output(json!({
+            "action": "ask_user",
+            "target_agent": null,
+            "reason": "需要用户确认角色设定",
+            "payload": {
+                "choices": [{
+                    "item": "主色",
+                    "options": ["朱砂红", "深靛蓝"],
+                    "recommended": ["朱砂红"],
+                    "multiple": false
+                }],
+                "drafts": [{
+                    "target_path": "docs/角色定稿.md",
+                    "content": "# 角色设定"
+                }]
+            }
+        }));
+
+        assert_eq!(
+            parse_agent_turn(&mixed_interaction, "spec_writer", &[]),
+            Err(ActionProtocolError::InvalidPayload(
+                "choices 与 drafts 不能在同一轮出现；必须先让用户完成选择，下一轮才能输出 drafts"
+                    .to_string()
+            ))
         );
     }
 

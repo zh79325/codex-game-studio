@@ -1,3 +1,5 @@
+use crate::character_files::read_project_characters;
+use crate::character_files::write_character_file;
 use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentActionPayload;
@@ -84,6 +86,12 @@ pub struct ProjectDirState {
     pub occupied: bool,
     pub project_id: Option<String>,
     pub supported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListedCharacter {
+    pub character: Character,
+    pub model_file_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -446,12 +454,9 @@ impl GameService {
             let (target, target_dir) = if context.target_id == project.id.as_str() {
                 ("project".to_string(), PathBuf::from(&project.root))
             } else {
-                let character = store
+                let character = self
                     .read_character(project.id.as_str(), &context.target_id)
-                    .await?
-                    .ok_or_else(|| {
-                        GameServiceError::CharacterNotFound(context.target_id.clone())
-                    })?;
+                    .await?;
                 (
                     format!("character:{}", character.id),
                     Path::new(&project.root).join(character.dir_name),
@@ -586,7 +591,7 @@ impl GameService {
                 }
             };
             let (generations, updated_character) = match self
-                .prepare_action_generations(&context, &parsed.action, &store)
+                .prepare_action_generations(&context, &parsed.action)
                 .await
             {
                 Ok(result) => result,
@@ -624,7 +629,7 @@ impl GameService {
                     .join(&character.dir_name)
                     .join(".model.json");
                 let previous = fs::read_to_string(&path).ok();
-                if let Err(error) = write_character_meta(&project, character) {
+                if let Err(error) = write_character_file(&project, character) {
                     let message = format!("Action 产物元数据写入失败：{error}");
                     let completion = store
                         .fail_action_turn(
@@ -778,7 +783,6 @@ impl GameService {
         &self,
         context: &codex_game_store::TurnAttemptContext,
         action: &AgentAction,
-        store: &ProjectStore,
     ) -> Result<(Vec<Generation>, Option<Character>), GameServiceError> {
         if !matches!(context.agent_code.as_str(), "image_t2i" | "image_i2i") {
             return Ok((Vec::new(), None));
@@ -820,10 +824,9 @@ impl GameService {
                 "图片执行 Agent 只能为角色会话登记产物".to_string(),
             ));
         }
-        let mut character = store
+        let mut character = self
             .read_character(project.id.as_str(), &context.target_id)
-            .await?
-            .ok_or_else(|| GameServiceError::CharacterNotFound(context.target_id.clone()))?;
+            .await?;
         let next_state = match (context.stage.as_str(), character.state) {
             ("render", CharacterState::S1SpecConfirmed) => Some(CharacterState::S2RenderGenerated),
             ("render", CharacterState::S2RenderGenerated) => None,
@@ -1094,10 +1097,8 @@ impl GameService {
                         "角色会话缺少 targetRef".to_string(),
                     )
                 })?;
-                store
-                    .read_character(project.id.as_str(), character_id)
+                self.read_character(project.id.as_str(), character_id)
                     .await?
-                    .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?
                     .state
                     .stage()
                     .to_string()
@@ -1326,10 +1327,8 @@ impl GameService {
                             "角色会话缺少 targetRef".to_string(),
                         )
                     })?;
-                store
-                    .read_character(project.id.as_str(), character_id)
+                self.read_character(project.id.as_str(), character_id)
                     .await?
-                    .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?
                     .state
                     .stage()
                     .to_string()
@@ -1415,13 +1414,14 @@ impl GameService {
             let character_id = prepared.conversation.target_ref.as_deref().ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("角色会话缺少 targetRef".to_string())
             })?;
-            prepared
-                .store
-                .read_character(prepared.project.id.as_str(), character_id)
-                .await?
-                .map(|character| serde_json::to_string(&character))
-                .transpose()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            Some(
+                serde_json::to_string(
+                    &self
+                        .read_character(prepared.project.id.as_str(), character_id)
+                        .await?,
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            )
         } else {
             None
         };
@@ -1769,9 +1769,38 @@ impl GameService {
     pub async fn list_characters(
         &self,
         project_id: &str,
-    ) -> Result<Vec<Character>, GameServiceError> {
-        let store = self.project_store(project_id, false)?;
-        store.list_characters(project_id).await.map_err(Into::into)
+    ) -> Result<Vec<ListedCharacter>, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let disk_characters = read_project_characters(&project)?;
+        let disk_ids = disk_characters
+            .iter()
+            .map(|character| character.id.clone())
+            .collect::<HashSet<_>>();
+        let mut characters = disk_characters
+            .into_iter()
+            .map(|character| ListedCharacter {
+                character,
+                model_file_exists: true,
+            })
+            .collect::<Vec<_>>();
+        characters.extend(
+            self.project_store(project_id, false)?
+                .list_characters(project_id)
+                .await?
+                .into_iter()
+                .filter(|character| !disk_ids.contains(&character.id))
+                .map(|character| ListedCharacter {
+                    character,
+                    model_file_exists: false,
+                }),
+        );
+        characters.sort_by(|left, right| {
+            left.character
+                .name
+                .cmp(&right.character.name)
+                .then_with(|| left.character.id.cmp(&right.character.id))
+        });
+        Ok(characters)
     }
 
     pub async fn list_character_groups(
@@ -1790,11 +1819,36 @@ impl GameService {
         project_id: &str,
         character_id: &str,
     ) -> Result<Character, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let character = read_project_characters(&project)?
+            .into_iter()
+            .find(|character| character.id == character_id)
+            .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?;
         let store = self.project_store(project_id, false)?;
-        store
-            .read_character(project_id, character_id)
-            .await?
-            .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))
+        if store.access() == ProjectAccess::ReadWrite {
+            store.upsert_character(&character).await?;
+        }
+        Ok(character)
+    }
+
+    pub async fn remove_character(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<(), GameServiceError> {
+        let project = self.read_project(project_id)?;
+        if read_project_characters(&project)?
+            .iter()
+            .any(|character| character.id == character_id)
+        {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色文件仍然存在，不能移除角色记录".to_string(),
+            ));
+        }
+        self.project_store(project_id, true)?
+            .delete_character_record(project_id, character_id)
+            .await?;
+        Ok(())
     }
 
     pub async fn create_character_group(
@@ -1852,7 +1906,7 @@ impl GameService {
         fs::create_dir_all(character_dir.join("images"))?;
         let timestamp = now();
         let character = Character {
-            id: Uuid::now_v7().to_string(),
+            id: Uuid::new_v4().to_string(),
             project_id: project_id.to_string(),
             name: name.trim().to_string(),
             group,
@@ -1868,7 +1922,7 @@ impl GameService {
             created_at: timestamp,
             updated_at: timestamp,
         };
-        write_character_meta(&project, &character)?;
+        write_character_file(&project, &character)?;
         if let Some(group) = character.group.as_deref() {
             store
                 .insert_character_group(project_id, group, timestamp)
@@ -1935,7 +1989,9 @@ impl GameService {
         ];
         if let Err(error) = write_art_bible(&path, &draft.content)
             .map_err(GameServiceError::from)
-            .and_then(|_| write_character_meta(&project, &character))
+            .and_then(|_| {
+                write_character_file(&project, &character).map_err(GameServiceError::from)
+            })
         {
             restore_files(&backups);
             return Err(error);
@@ -2016,7 +2072,7 @@ impl GameService {
                 .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
             character.updated_at = now();
             store.update_character(&character).await?;
-            write_character_meta(&project, &character)?;
+            write_character_file(&project, &character)?;
         }
         Ok(generation)
     }
@@ -2095,7 +2151,9 @@ impl GameService {
         if let Err(error) = fs::copy(source, &target)
             .map(|_| ())
             .map_err(GameServiceError::from)
-            .and_then(|_| write_character_meta(&project, &character))
+            .and_then(|_| {
+                write_character_file(&project, &character).map_err(GameServiceError::from)
+            })
         {
             restore_files(&backups);
             return Err(error);
@@ -2187,7 +2245,9 @@ impl GameService {
         if let Err(error) = fs::copy(source, &target)
             .map(|_| ())
             .map_err(GameServiceError::from)
-            .and_then(|_| write_character_meta(&project, &character))
+            .and_then(|_| {
+                write_character_file(&project, &character).map_err(GameServiceError::from)
+            })
         {
             restore_files(&backups);
             return Err(error);
@@ -2488,19 +2548,6 @@ fn safe_project_path(root: &str, relative: &str) -> Result<PathBuf, GameServiceE
     Ok(Path::new(root).join(relative))
 }
 
-fn write_character_meta(project: &Project, character: &Character) -> Result<(), GameServiceError> {
-    let path = Path::new(&project.root)
-        .join(&character.dir_name)
-        .join(".model.json");
-    let content = serde_json::to_string_pretty(&serde_json::json!({
-        "schemaVersion": 2,
-        "character": character,
-    }))
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    write_art_bible(&path, &format!("{content}\n"))?;
-    Ok(())
-}
-
 fn append_line_once(path: &Path, line: &str) -> Result<(), io::Error> {
     let mut content = fs::read_to_string(path).unwrap_or_default();
     if content.lines().any(|existing| existing == line) {
@@ -2516,7 +2563,7 @@ fn append_line_once(path: &Path, line: &str) -> Result<(), io::Error> {
 
 fn action_protocol_instruction() -> String {
     format!(
-        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。",
+        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。一次只允许一个待用户完成的交互阶段：payload.choices 与非空 payload.drafts 不得同轮出现；存在待确认问题时只输出 choices，用户完成选择后的下一轮才能输出 drafts 进入最终确认。",
         start = codex_game_domain::ACTION_START,
         end = codex_game_domain::ACTION_END,
     )

@@ -1,5 +1,6 @@
 import {
   CheckCircleOutlined,
+  DeleteOutlined,
   FolderAddOutlined,
   FolderOutlined,
   UserAddOutlined,
@@ -30,7 +31,7 @@ import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChoiceSubmission } from "./chat/ChoiceQuestions";
 import { useConversation } from "./chat/useConversation";
-import type { ArtifactDraft, Character, ChoiceGroup } from "./types";
+import type { ArtifactDraft, ChoiceGroup, ListedCharacter } from "./types";
 
 const projectSteps = [
   { title: "定义美术基调", state: "drafting" },
@@ -39,7 +40,7 @@ const projectSteps = [
 ];
 
 export default function ProjectWorkspacePage() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const { projectId = "" } = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -135,6 +136,17 @@ export default function ProjectWorkspacePage() {
     },
     onError: (error: Error) => message.error(error.message),
   });
+  const removeCharacter = useMutation({
+    mutationFn: (characterId: string) =>
+      charactersApi.remove(projectId, characterId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["characters", projectId],
+      });
+      message.success("已移除失效角色记录");
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
 
   const hasPendingArtBible = conversation.snapshot?.drafts.some(
     (draft) =>
@@ -184,21 +196,52 @@ export default function ProjectWorkspacePage() {
     ) : null;
   const characterList = characters.data?.characters ?? [];
   const characterGroups = characters.data?.groups ?? [];
-  const renderCharacterNode = (character: Character) => (
+  const renderCharacterNode = (character: ListedCharacter) => (
     <div className="character-tree-node">
       <div className="entity-list-content">
         <Typography.Text>{character.name}</Typography.Text>
-        <Typography.Text type="secondary">{character.state}</Typography.Text>
+        {character.modelFileExists ? (
+          <Typography.Text type="secondary">{character.state}</Typography.Text>
+        ) : (
+          <Tag color="error">角色文件不存在</Tag>
+        )}
       </div>
-      <Button
-        type="link"
-        size="small"
-        onClick={() =>
-          navigate(`/projects/${projectId}/characters/${character.id}`)
-        }
-      >
-        进入
-      </Button>
+      {character.modelFileExists ? (
+        <Button
+          type="link"
+          size="small"
+          onClick={() =>
+            navigate(`/projects/${projectId}/characters/${character.id}`)
+          }
+        >
+          进入
+        </Button>
+      ) : (
+        <Button
+          danger
+          type="link"
+          size="small"
+          icon={<DeleteOutlined />}
+          disabled={!canWrite}
+          loading={
+            removeCharacter.isPending &&
+            removeCharacter.variables === character.id
+          }
+          onClick={() =>
+            modal.confirm({
+              title: `移除失效角色“${character.name}”？`,
+              content:
+                "只会移除数据库中的失效角色记录，不会删除磁盘目录或其他文件。",
+              okText: "移除",
+              okButtonProps: { danger: true },
+              cancelText: "取消",
+              onOk: () => removeCharacter.mutateAsync(character.id),
+            })
+          }
+        >
+          移除
+        </Button>
+      )}
     </div>
   );
   const ungroupedCharacters = characterList.filter(

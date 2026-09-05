@@ -296,7 +296,7 @@ export default function CharacterPage() {
           />
         </Col>
         <Col xs={24} xl={9}>
-          <Space direction="vertical" className="workspace-main">
+          <Space orientation="vertical" className="workspace-main">
             <Card title="角色状态" className="content-card">
               <StatusRow label="设定" value={character?.specPath} />
               <StatusRow label="效果图" value={character?.renderPath} />
@@ -328,7 +328,7 @@ export default function CharacterPage() {
             )}
             {character?.state === "S4_views_generated" && (
               <Card title="确认四视图" className="content-card">
-                <Space direction="vertical" className="workspace-main">
+                <Space orientation="vertical" className="workspace-main">
                   {viewGenerations.map((generation) => (
                     <Checkbox
                       key={generation.id}
@@ -425,7 +425,7 @@ function GenerationGate({
 }) {
   return (
     <Card title={title} className="content-card">
-      <Space direction="vertical" className="workspace-main">
+      <Space orientation="vertical" className="workspace-main">
         {generations.map((generation) => (
           <Card
             size="small"

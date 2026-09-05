@@ -128,7 +128,7 @@ export default function ProjectsPage() {
       title: "项目",
       dataIndex: "name",
       render: (name: string, project) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <Typography.Text strong>{name}</Typography.Text>
           <Typography.Text type="secondary" className="path-text">
             {project.root}
@@ -226,7 +226,7 @@ export default function ProjectsPage() {
         onCancel={() => setBootstrapOpen(false)}
         onOk={() => void bootstrap()}
       >
-        <Space direction="vertical" className="workspace-main">
+        <Space orientation="vertical" className="workspace-main">
           <Typography.Text type="secondary">
             此阶段只选择目录，项目名称和代号将在 Art Bible 确认后填写。
           </Typography.Text>

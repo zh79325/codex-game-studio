@@ -456,7 +456,7 @@ export default function ProvidersPage() {
       {
         title: "模型",
         render: (_, model) => (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <Typography.Text strong>{model.displayName}</Typography.Text>
             <Typography.Text type="secondary">{model.modelId}</Typography.Text>
             {unsupportedDrivers.has(model.driver) && (
@@ -579,7 +579,7 @@ export default function ProvidersPage() {
           description={(presets.error as Error).message}
         />
       )}
-      <Space direction="vertical" size="middle" className="workspace-main">
+      <Space orientation="vertical" size="middle" className="workspace-main">
         {(providers.data ?? []).map((provider) => {
           const preset = presets.data?.presets.find(
             (item) =>
@@ -834,7 +834,7 @@ export default function ProvidersPage() {
               </Typography.Paragraph>
               <Form.List name="presetModels">
                 {(fields) => (
-                  <Space direction="vertical" className="workspace-main">
+                  <Space orientation="vertical" className="workspace-main">
                     {fields.map((field, index) => {
                       const row = presetModels[index];
                       if (!row) return null;
@@ -842,7 +842,7 @@ export default function ProvidersPage() {
                         <Card key={field.key} size="small">
                           <Space align="start" wrap>
                             <Space
-                              direction="vertical"
+                              orientation="vertical"
                               size={2}
                               style={{ width: 350 }}
                             >
@@ -1091,7 +1091,7 @@ function LimitFields() {
   return (
     <Form.List name="limits">
       {(fields, { add, remove }) => (
-        <Space direction="vertical" className="workspace-main">
+        <Space orientation="vertical" className="workspace-main">
           {fields.map((field) => (
             <Space key={field.key} align="start" wrap>
               <Form.Item

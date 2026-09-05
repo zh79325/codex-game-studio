@@ -139,6 +139,7 @@ export default function ChatPanel(props: ChatPanelProps) {
           interrupting={props.interrupting}
           disabled={!props.canWrite || !props.snapshot}
           voiceMode={speech.voiceMode}
+          speechStarting={speech.starting}
           recording={speech.recording}
           speechWaiting={speech.waiting}
           speechTranscript={speech.transcript}
@@ -286,6 +287,7 @@ export function Composer({
   interrupting,
   disabled,
   voiceMode,
+  speechStarting,
   recording,
   speechWaiting,
   speechTranscript,
@@ -301,6 +303,7 @@ export function Composer({
   interrupting?: boolean;
   disabled: boolean;
   voiceMode: boolean;
+  speechStarting: boolean;
   recording: boolean;
   speechWaiting: boolean;
   speechTranscript: string;
@@ -333,7 +336,7 @@ export function Composer({
         />
         {voiceMode && (
           <div
-            className={`speech-input ${recording || speechWaiting ? "speech-input-active" : ""} ${recording ? "speech-input-recording" : ""}`}
+            className={`speech-input ${speechStarting || recording || speechWaiting ? "speech-input-active" : ""} ${recording ? "speech-input-recording" : ""}`}
             role="status"
             aria-live="polite"
           >
@@ -348,7 +351,9 @@ export function Composer({
                   ? "正在识别整句…"
                   : recording
                     ? "正在录音，松开空格键发送语音"
-                    : "长按空格键开始进行语音输入")}
+                    : speechStarting
+                      ? "正在准备麦克风…"
+                      : "长按空格键开始进行语音输入")}
             </Typography.Text>
           </div>
         )}
@@ -360,7 +365,11 @@ export function Composer({
           danger={recording}
           icon={voiceMode ? <CloseOutlined /> : <AudioOutlined />}
           disabled={disabled || busy}
-          onClick={voiceMode ? onLeaveVoice : onEnterVoice}
+          onClick={(event) => {
+            event.currentTarget.blur();
+            if (voiceMode) onLeaveVoice();
+            else onEnterVoice();
+          }}
         />
         <Button
           type={busy ? "default" : "primary"}

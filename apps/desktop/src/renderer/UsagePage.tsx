@@ -60,7 +60,7 @@ export default function UsagePage() {
       title: "Provider / 模型",
       width: 250,
       render: (_, item) => (
-        <Space direction="vertical" size={1}>
+        <Space orientation="vertical" size={1}>
           <Space>
             <Typography.Text strong>{item.providerName}</Typography.Text>
             <Tag>{item.providerCode}</Tag>
@@ -99,7 +99,7 @@ export default function UsagePage() {
       title: "额度窗口",
       render: (_, item) =>
         item.budgets.length ? (
-          <Space direction="vertical" className="budget-list">
+          <Space orientation="vertical" className="budget-list">
             {item.budgets.map((budget) => (
               <BudgetBar
                 key={`${budget.limitKind}:${budget.groupName}`}
@@ -123,7 +123,7 @@ export default function UsagePage() {
       width: 210,
       render: (_, item) =>
         item.breaker ? (
-          <Space direction="vertical" size={2}>
+          <Space orientation="vertical" size={2}>
             <Tag color={item.breaker.openedAt ? "error" : "warning"}>
               连续失败 {item.breaker.failureCount}
             </Tag>

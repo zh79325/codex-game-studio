@@ -26,6 +26,7 @@ export function useRealtimeSpeech({
   onError,
 }: UseRealtimeSpeechOptions) {
   const [voiceMode, setVoiceMode] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -99,6 +100,7 @@ export function useRealtimeSpeech({
       recordedSamplesRef.current = [];
       voiceModeRef.current = false;
       waitingRef.current = false;
+      setStarting(false);
       setWaiting(false);
       setVoiceMode(false);
       onErrorRef.current(error instanceof Error ? error.message : String(error));
@@ -180,6 +182,7 @@ export function useRealtimeSpeech({
       return;
     }
     startingRef.current = true;
+    setStarting(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -213,7 +216,8 @@ export function useRealtimeSpeech({
       const source = context.createMediaStreamSource(stream);
       const processor = new AudioWorkletNode(context, "speech-recorder", {
         numberOfInputs: 1,
-        numberOfOutputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
       });
       captureSampleRateRef.current = context.sampleRate;
       sourceRef.current = source;
@@ -228,6 +232,7 @@ export function useRealtimeSpeech({
         flushResolverRef.current?.();
       };
       source.connect(processor);
+      processor.connect(context.destination);
       recordingRef.current = true;
       setRecording(true);
       setTranscript("");
@@ -236,6 +241,7 @@ export function useRealtimeSpeech({
       fail(error);
     } finally {
       startingRef.current = false;
+      if (mountedRef.current) setStarting(false);
     }
   }, [enabled, fail, finishRecording, stopCapture]);
 
@@ -247,6 +253,7 @@ export function useRealtimeSpeech({
     recordedSamplesRef.current = [];
     voiceModeRef.current = false;
     waitingRef.current = false;
+    setStarting(false);
     setWaiting(false);
     setVoiceMode(false);
     setTranscript("");
@@ -269,14 +276,17 @@ export function useRealtimeSpeech({
   useEffect(() => {
     if (!voiceMode) return;
     const keyDown = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.repeat) return;
+      if (event.code !== "Space") return;
       event.preventDefault();
+      event.stopPropagation();
+      if (spaceDownRef.current) return;
       spaceDownRef.current = true;
       void beginRecording();
     };
     const keyUp = (event: KeyboardEvent) => {
       if (event.code !== "Space") return;
       event.preventDefault();
+      event.stopPropagation();
       spaceDownRef.current = false;
       void finishRecording();
     };
@@ -285,12 +295,12 @@ export function useRealtimeSpeech({
       spaceDownRef.current = false;
       void finishRecording();
     };
-    window.addEventListener("keydown", keyDown);
-    window.addEventListener("keyup", keyUp);
+    window.addEventListener("keydown", keyDown, true);
+    window.addEventListener("keyup", keyUp, true);
     window.addEventListener("blur", blur);
     return () => {
-      window.removeEventListener("keydown", keyDown);
-      window.removeEventListener("keyup", keyUp);
+      window.removeEventListener("keydown", keyDown, true);
+      window.removeEventListener("keyup", keyUp, true);
       window.removeEventListener("blur", blur);
     };
   }, [beginRecording, finishRecording, voiceMode]);
@@ -345,6 +355,7 @@ export function useRealtimeSpeech({
 
   return {
     voiceMode,
+    starting,
     recording,
     waiting,
     transcript,

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -8,7 +9,7 @@ pub const ACTION_END: &str = "<-------- ACTION-END------->";
 pub const MAX_CHOICE_GROUPS: usize = 4;
 pub const MAX_HANDOFFS: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActionKind {
     AskUser,
@@ -17,7 +18,7 @@ pub enum AgentActionKind {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChoiceGroup {
     pub item: String,
@@ -26,7 +27,7 @@ pub struct ChoiceGroup {
     pub multiple: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProgress {
     #[serde(default)]
@@ -36,16 +37,51 @@ pub struct AgentProgress {
     pub next_step: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSlot {
+    ProjectArtBible,
+    ProjectManifest,
+    CharacterSpec,
+}
+
+impl ArtifactSlot {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectArtBible => "project_art_bible",
+            Self::ProjectManifest => "project_manifest",
+            Self::CharacterSpec => "character_spec",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "project_art_bible" => Some(Self::ProjectArtBible),
+            "project_manifest" => Some(Self::ProjectManifest),
+            "character_spec" => Some(Self::CharacterSpec),
+            _ => None,
+        }
+    }
+
+    pub fn target_path(self) -> &'static str {
+        match self {
+            Self::ProjectArtBible => "art-bible.md",
+            Self::ProjectManifest => "project.json",
+            Self::CharacterSpec => "docs/角色定稿.md",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactDraft {
-    pub target_path: String,
+    pub artifact_slot: ArtifactSlot,
     pub content: String,
     #[serde(default)]
     pub based_on_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationMemoryInput {
     pub scope: String,
@@ -53,7 +89,7 @@ pub struct ConversationMemoryInput {
     pub content: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectNamingSuggestion {
     pub name: String,
@@ -61,7 +97,7 @@ pub struct ProjectNamingSuggestion {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssetSpec {
     pub code: String,
@@ -78,14 +114,23 @@ pub struct AssetSpec {
     pub negative_prompt: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictConstraintScope {
+    Identity,
+    Render,
+    Views,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerdictConstraint {
+    pub scope: VerdictConstraintScope,
     pub item: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentVerdict {
     pub token: String,
@@ -96,24 +141,25 @@ pub struct AgentVerdict {
     pub constraints: Vec<VerdictConstraint>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentResultStatus {
     Success,
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VisualRevisionScope {
     Render,
     Views,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResult {
     pub status: AgentResultStatus,
+    #[serde(default)]
     pub artifacts: Vec<BTreeMap<String, Value>>,
     pub error: Option<String>,
     #[serde(default)]
@@ -122,7 +168,7 @@ pub struct AgentResult {
     pub focus_changes_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AgentActionPayload {
     #[serde(default)]
@@ -143,7 +189,7 @@ pub struct AgentActionPayload {
     pub result: Option<AgentResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAction {
     pub action: AgentActionKind,

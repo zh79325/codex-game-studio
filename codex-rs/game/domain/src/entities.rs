@@ -263,6 +263,10 @@ pub struct ContextPackage {
     pub agent_definition_version: String,
     pub output_schema: String,
     #[serde(default)]
+    pub action_schema: String,
+    #[serde(default)]
+    pub action_examples: String,
+    #[serde(default)]
     pub target_kind: String,
     #[serde(default)]
     pub target_ref: Option<String>,
@@ -342,6 +346,8 @@ impl ContextPackage {
                     })
             })
             && self.action_protocol.len() <= MAX_CONTEXT_SUMMARY_BYTES
+            && self.action_schema.len() <= 64 * 1024
+            && self.action_examples.len() <= 16 * 1024
     }
 }
 
@@ -356,6 +362,8 @@ mod tests {
             contract_version: 1,
             agent_definition_version: "1".to_string(),
             output_schema: String::new(),
+            action_schema: String::new(),
+            action_examples: String::new(),
             target_kind: "character".to_string(),
             target_ref: Some("character-1".to_string()),
             stage: "spec".to_string(),

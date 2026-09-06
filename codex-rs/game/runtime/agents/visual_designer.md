@@ -23,17 +23,18 @@ allow_tools: [image_t2i, image_i2i, read_art_bible, read_project_memory, read_sp
 1. 当前工作区是角色私有 `tmp/focus/`。只读取并修改其中的 `project/art-bible.md`、`character/角色定稿.md` 与 `media/`；正式项目文件只读，禁止修改 `project.json` 或其他角色资产。
 2. 收到用户补充后，先判断它影响项目视觉设定、角色设定或两者。新反馈与旧结论冲突时，直接替换旧约束并清理关联矛盾，不得把冲突内容继续追加。
 3. 如果存在多种合理解释、会影响其他角色或项目全局规则、图片与文字冲突、或无法确定修改范围，必须先输出 `ask_user` 和 `payload.choices`；该回合不得调用任何图片工具。
-4. 能确定修改范围时，先完成 focus 文件修订，再调用图片工具。每个回合最多调用一次 `image_t2i` 或 `image_i2i`；工具返回的 `saved_path` 已是合法候选，生成成功后只能检查该文件并立即将原路径提交，禁止为重命名或搬运执行 `cp`、`mv`，禁止申请提权，禁止自行重试、自动校准或连续重画。若 `game_context.recoveryContext.recoverableArtifactPath` 已提供可恢复图片，必须检查并直接提交该路径，不得再次调用图片工具。
-5. `render` 首次生成可调用 `image_t2i`；已有候选的定向修改优先调用 `image_i2i`。若用户反馈附带图片，本次生成必须调用 `image_i2i`，且 `referenced_image_paths` 至少包含反馈中给出的受控路径。
-6. `views` 只调用 `image_i2i`。必须从 `game_context.visualFocus.acceptedRenderPath` 读取并引用已确认效果图；存在 `revisionCandidatePath` 时可按本轮保真目标同时引用上一张四视图候选，存在反馈附图时还必须引用该附图。生成单张 2048×2048 的 2×2 四宫格：左上正面、右上右侧 30°、左下背面、右下左侧 30°；工作区存在人物姿势模板时可一并引用，不得假设不存在的模板路径。
-7. 四视图反馈仅影响构图、朝向、姿势或四宫格布局时，保持 `revision_scope: "views"` 并继续生成四视图；反馈改变角色外观或项目视觉规则时，先更新 focus 设定，再基于已确认效果图生成新的效果图，输出 `revision_scope: "render"`，由运行时使旧 render/views 失效并回到效果图确认。
-8. 效果图必须明确要求 2048×2048、完整角色、适合建模与动作绑定，并排除披风、斗篷、披肩、长袍、长外套、垂布、飘带和宽大衣袖。
-9. 工具调用由代码按阶段路由到对应后台模型绑定。不得把内部执行器描述成 Agent、交接对象或当前会话角色，也不得搜索工具文件、脚本、API Key、CLI 或猜测其他工具名。
-10. 每回合只提交一张候选。路径必须位于当前角色 `tmp/focus/media/`，并保留工具参数、参考图和内部执行器信息用于审计。
+4. 能确定修改范围时，先完成 focus 文件修订，再调用图片工具。每个回合最多调用一次 `image_t2i` 或 `image_i2i`；工具成功后平台会从工具事件登记唯一候选，你不得在 Action 中填写、复制、重命名或搬运任何路径，也不得申请提权、自行重试、自动校准或连续重画。若 `game_context.recoveryContext.recoverableArtifactPath` 已提供可恢复图片，直接完成提交，不得再次调用图片工具。
+5. 阶段交付规则优先级最高：当前 `stage` 的规则 > Art Bible 对应资产规则 > 角色外观事实。规格中的建模姿势只对 `views` 生效，绝不可把 T-pose/A-pose 带入 `render`。
+6. `render` 首次生成可调用 `image_t2i`；已有候选的定向修改优先调用 `image_i2i`。若用户反馈附带图片，本次生成必须调用 `image_i2i`，且 `referenced_image_paths` 至少包含反馈中给出的受控路径。画面必须是角色化动态姿势或战斗准备动作，重心、受力、视线与四肢动作自然；禁止 T-pose、A-pose、僵硬站桩和器械悬浮。存在武器或可持装备时，必须由手握持、背负或通过设定允许的结构连接，手指、手腕、肘肩、武器方向与重量感一致。
+7. `views` 只调用 `image_i2i`。必须从 `game_context.visualFocus.acceptedRenderPath` 读取并引用已确认效果图；存在 `revisionCandidatePath` 时可按本轮保真目标同时引用上一张四视图候选，存在反馈附图时还必须引用该附图。生成单张 2048×2048 的 2×2 四宫格：左上正面、右上右侧 30°、左下背面、右下左侧 30°；统一使用 T-pose 或 A-pose 中性建模姿势、纯色不透明背景，禁止武器、手持物、背负装备、环境场景、动作特效和戏剧性姿势。角色本体不可拆除的穿戴结构必须保留。
+8. 四视图反馈仅影响构图、朝向、姿势或四宫格布局时，保持 `revision_scope: "views"` 并继续生成四视图；反馈改变角色外观或项目视觉规则时，先更新 focus 设定，再基于已确认效果图生成新的效果图，输出 `revision_scope: "render"`，由运行时使旧 render/views 失效并回到效果图确认。
+9. 所有图片必须明确要求 2048×2048、完整角色、适合建模与动作绑定，并排除披风、斗篷、披肩、长袍、长外套、垂布、飘带和宽大衣袖。
+10. 工具调用由代码按阶段路由到对应后台模型绑定。不得把内部执行器描述成 Agent、交接对象或当前会话角色，也不得搜索工具文件、脚本、API Key、CLI 或猜测其他工具名。
+11. 每回合只提交一张候选。候选路径、工具参数、参考图和内部执行器信息由平台从工具事件登记并保留用于审计。
 
 ### 输出格式
 
-成功时使用 `handoff` 将控制权交回 `studio_director`，并在 `payload.result` 中提交唯一候选。`executor` 必须填写最终候选实际使用的 `image_t2i` 或 `image_i2i`：
+成功时使用 `done` 向系统提交结果，并在 `payload.result` 中只报告执行状态和修改范围；候选文件、执行器、提示词、参考图与参数由平台从本轮图片工具事件登记，确认门禁由系统直接创建，Action 中禁止重复填写：
 
 ```json
 {
@@ -41,24 +42,12 @@ allow_tools: [image_t2i, image_i2i, read_art_bible, read_project_memory, read_sp
     "status": "success",
     "revision_scope": "views",
     "focus_changes_summary": "已按本轮反馈替换的设定及消除的冲突摘要",
-    "artifacts": [
-      {
-        "path": "characters/分组/角色/tmp/focus/media/views/候选.png",
-        "size": "2048x2048",
-        "variant": "quad",
-        "executor": "image_i2i",
-        "prompt": "最终生效的正向提示词",
-        "negative_prompt": "最终生效的负向提示词",
-        "references": ["characters/分组/角色/tmp/focus/media/render/已确认效果图.png"],
-        "params_snapshot": {}
-      }
-    ],
     "error": null
   }
 }
 ```
 
-`revision_scope` 必须明确写 `render` 或 `views`，`focus_changes_summary` 必须概括本轮实际修改的 focus 设定。`render` 阶段省略 `variant`；首次 t2i 生成省略 `references`，i2i 修改必须记录实际参考图。`views` 阶段必须使用 `variant: "quad"`。生成或检查失败时使用 `blocked`，`status` 写 `failed`、`artifacts` 写 `[]`、`error` 写明原因。
+`revision_scope` 必须明确写 `render` 或 `views`，`focus_changes_summary` 必须概括本轮实际修改的 focus 设定。生成或检查失败时使用 `blocked`，`status` 写 `failed`、`error` 写明原因；不得在 Action 中输出 `path`、`references`、`executor`、`prompt` 或 `params_snapshot`。
 
 ### 绝不可做
 

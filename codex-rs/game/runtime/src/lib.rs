@@ -1,4 +1,5 @@
 mod action;
+mod action_contract;
 mod agents;
 mod audit;
 mod character_files;
@@ -9,6 +10,7 @@ mod routing;
 mod service;
 
 pub use action::*;
+pub use action_contract::*;
 pub use agents::*;
 pub use audit::*;
 pub use execution::*;

@@ -93,8 +93,8 @@ allow_tools: [read_project, read_art_bible, read_project_memory, write_draft]
 ```json
 {
   "drafts": [
-    {"target_path": "art-bible.md", "content": "# 项目视觉规范（Art Bible）\n..."},
-    {"target_path": "project.json", "content": "{\"style\":{},\"defaults\":{},\"review_mode\":\"lean\"}"}
+    {"artifact_slot": "project_art_bible", "content": "# 项目视觉规范（Art Bible）\n..."},
+    {"artifact_slot": "project_manifest", "content": "{\"style\":{},\"defaults\":{},\"review_mode\":\"lean\"}"}
   ],
   "memories": [
     {"scope": "project", "kind": "preference", "content": "用户明确确认的偏好"}
@@ -116,7 +116,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, write_draft]
 - 不得无视上下文里的当前定稿去改已有项目设定。
 - 不得替用户做创作决策；意见分歧时列出取舍交给用户。
 - 不得把立项聊成素材规划或游戏策划：不追问玩法、剧情、目标平台、镜头视角，不问、也不替用户列具体的角色/怪物/地图清单与数量，不评判玩法好不好玩、市场能不能成。立项只定风格。
-- 不得写单个角色的设定文档，那是 `spec_writer` 的活。你能落盘的只有项目根上的 `art-bible.md` 与 `project.json` 两份，写到其他位置会被平台拒掉。
+- 不得写单个角色的设定文档，那是 `spec_writer` 的活。你只能提交 `project_art_bible` 与 `project_manifest` 两个草稿槽位，实际落盘位置由平台决定。
 - 不得输出具体的生图 prompt，那是 `prompt_smith` 的活。
 - 不得把透明背景、透明通道或棋盘格写成 AIGC 资产交付要求。
 - 不得凭空编造用户没说过的偏好写进项目记忆。

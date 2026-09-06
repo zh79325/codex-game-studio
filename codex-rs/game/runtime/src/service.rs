@@ -1,3 +1,4 @@
+use crate::action_contract_profile;
 use crate::character_files::read_project_characters;
 use crate::character_files::write_character_file;
 use crate::focus;
@@ -5,10 +6,12 @@ use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentActionPayload;
 use codex_game_domain::AgentHandoff;
+use codex_game_domain::AgentResultStatus;
 use codex_game_domain::AgentVerdict;
 use codex_game_domain::ArtBibleVersion;
 use codex_game_domain::ArtBibleVersionId;
 use codex_game_domain::ArtifactDraftRecord;
+use codex_game_domain::ArtifactSlot;
 use codex_game_domain::Character;
 use codex_game_domain::CharacterState;
 use codex_game_domain::ContextPackage;
@@ -18,7 +21,6 @@ use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
 use codex_game_domain::ConversationStatus;
 use codex_game_domain::ConversationTargetKind;
-use codex_game_domain::FeedbackImageAttachment;
 use codex_game_domain::Generation;
 use codex_game_domain::GenerationReviewStatus;
 use codex_game_domain::MAX_HANDOFFS;
@@ -54,7 +56,6 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -148,6 +149,7 @@ enum SpecReviewStatus {
     Concerns,
     Rejected,
     Error,
+    Confirmed,
 }
 
 impl SpecReviewStatus {
@@ -159,6 +161,7 @@ impl SpecReviewStatus {
             Self::Concerns => "concerns",
             Self::Rejected => "rejected",
             Self::Error => "error",
+            Self::Confirmed => "confirmed",
         }
     }
 }
@@ -784,7 +787,7 @@ impl GameService {
                     )
                     .map_err(|error| error.to_string())
                 });
-            let parsed = match parsed {
+            let mut parsed = match parsed {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     self.record_turn_event(
@@ -823,7 +826,7 @@ impl GameService {
             )
             .await?;
             if context.agent_code == "spec_reviewer"
-                && parsed.action.action == AgentActionKind::Handoff
+                && parsed.action.action != AgentActionKind::Blocked
             {
                 let expected_subject = context.context.review_subject.as_ref().map(|item| &item.id);
                 let verdict = parsed.action.payload.verdict.as_ref();
@@ -846,6 +849,7 @@ impl GameService {
                     ));
                 }
             }
+            apply_deterministic_transition(&context.agent_code, &mut parsed.action);
             if context.agent_code == "visual_designer" {
                 self.record_turn_event(
                     codex_turn_id,
@@ -859,7 +863,7 @@ impl GameService {
                 .await?;
             }
             let (generations, updated_character) = match self
-                .prepare_action_generations(&context, &parsed.action)
+                .prepare_action_generations(store.as_ref(), &context, &parsed.action)
                 .await
             {
                 Ok(result) => result,
@@ -1104,6 +1108,7 @@ impl GameService {
 
     async fn prepare_action_generations(
         &self,
+        store: &ProjectStore,
         context: &codex_game_store::TurnAttemptContext,
         action: &AgentAction,
     ) -> Result<(Vec<Generation>, Option<Character>), GameServiceError> {
@@ -1115,11 +1120,6 @@ impl GameService {
         })?;
         if action.action == AgentActionKind::Blocked {
             return Ok((Vec::new(), None));
-        }
-        if result.artifacts.is_empty() {
-            return Err(GameServiceError::InvalidAction(
-                "图片执行成功时必须返回至少一个产物".to_string(),
-            ));
         }
         let revision_scope = result.revision_scope.ok_or_else(|| {
             GameServiceError::InvalidAction("视觉结果必须声明 revision_scope".to_string())
@@ -1157,7 +1157,7 @@ impl GameService {
                 ));
             }
         };
-        let (project, target_kind, feedback_image_paths) = {
+        let (project, target_kind) = {
             let projects = self
                 .projects
                 .lock()
@@ -1168,19 +1168,12 @@ impl GameService {
                 .ok_or_else(|| {
                     GameServiceError::ConversationNotFound(context.conversation_id.clone())
                 })?;
-            let snapshot = &session.conversations[&context.conversation_id];
-            let target_kind = snapshot.conversation.target_kind;
-            let feedback_image_paths = snapshot
-                .messages
-                .iter()
-                .filter(|message| message.turn == context.turn && message.role == "user")
-                .flat_map(|message| &message.attachments)
-                .filter_map(|attachment| {
-                    serde_json::from_value::<FeedbackImageAttachment>(attachment.clone()).ok()
-                })
-                .map(|attachment| attachment.path)
-                .collect::<Vec<_>>();
-            (session.project.clone(), target_kind, feedback_image_paths)
+            (
+                session.project.clone(),
+                session.conversations[&context.conversation_id]
+                    .conversation
+                    .target_kind,
+            )
         };
         if target_kind != ConversationTargetKind::Character {
             return Err(GameServiceError::InvalidAction(
@@ -1191,19 +1184,14 @@ impl GameService {
             .read_character(project.id.as_str(), &context.target_id)
             .await?;
         let manifest = focus::ensure(&project, &character, now())?;
-        let required_feedback_refs = feedback_image_paths
-            .iter()
-            .map(|path| focus::validate_media_path(&project, &character, path))
-            .collect::<Result<Vec<_>, _>>()?;
-        let required_render_ref = if effective_stage == "views" {
+        if effective_stage == "views" {
             let generation_id = manifest
                 .accepted_render_generation_id
                 .as_deref()
                 .ok_or_else(|| {
                     GameServiceError::InvalidAction("生成四视图前必须先确认角色效果图".to_string())
                 })?;
-            let render = self
-                .project_store(project.id.as_str(), false)?
+            self.project_store(project.id.as_str(), false)?
                 .read_generation(generation_id)
                 .await?
                 .filter(|generation| {
@@ -1216,155 +1204,95 @@ impl GameService {
                 .ok_or_else(|| {
                     GameServiceError::InvalidAction("四视图引用的已确认效果图记录无效".to_string())
                 })?;
-            Some(
-                focus::validate_stage_media_path(&project, &character, "render", &render.file_path)
-                    .map_err(|error| {
-                        GameServiceError::InvalidAction(format!(
-                            "四视图引用的已确认效果图路径无效：{error}"
-                        ))
-                    })?,
-            )
-        } else {
-            None
-        };
-        apply_generation_stage_transition(&mut character, effective_stage, now())?;
-        if result.artifacts.len() != 1 {
-            return Err(GameServiceError::InvalidAction(
-                "角色图片 Agent 每次必须且只能返回一张 2048x2048 图片".to_string(),
-            ));
         }
-        let mut paths = HashSet::new();
-        let mut generations = Vec::with_capacity(result.artifacts.len());
-        for artifact in &result.artifacts {
-            let executor = artifact
-                .get("executor")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    GameServiceError::InvalidAction("视觉产物缺少内部 executor".to_string())
-                })?;
-            if !allowed_executors.contains(&executor) {
-                return Err(GameServiceError::InvalidAction(format!(
-                    "{effective_stage} 阶段只允许使用 {} 内部执行器",
-                    allowed_executors.join(" 或 ")
-                )));
-            }
-            if required_render_ref.is_some() || !required_feedback_refs.is_empty() {
-                if executor != "image_i2i" {
-                    return Err(GameServiceError::InvalidAction(
-                        "四视图及包含反馈图片的视觉任务必须使用 image_i2i".to_string(),
-                    ));
-                }
-                let references = artifact
-                    .get("references")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| {
-                        GameServiceError::InvalidAction(
-                            "image_i2i 视觉产物必须记录 references".to_string(),
-                        )
-                    })?;
-                let referenced_paths = references
-                    .iter()
-                    .map(|reference| {
-                        let path = reference.as_str().ok_or_else(|| {
-                            GameServiceError::InvalidAction(
-                                "视觉产物 references 必须是路径字符串".to_string(),
-                            )
-                        })?;
-                        focus::validate_media_path(&project, &character, path).map_err(|error| {
-                            GameServiceError::InvalidAction(format!(
-                                "视觉产物引用路径无效：{error}"
-                            ))
-                        })
-                    })
-                    .collect::<Result<HashSet<_>, _>>()?;
-                if required_feedback_refs
-                    .iter()
-                    .any(|path| !referenced_paths.contains(path))
-                {
-                    return Err(GameServiceError::InvalidAction(
-                        "image_i2i 必须引用本轮反馈图片".to_string(),
-                    ));
-                }
-                if required_render_ref
-                    .as_ref()
-                    .is_some_and(|path| !referenced_paths.contains(path))
-                {
-                    return Err(GameServiceError::InvalidAction(
-                        "四视图必须引用已确认的效果图".to_string(),
-                    ));
-                }
-            }
-            let file_path = artifact
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .filter(|path| !path.trim().is_empty())
-                .ok_or_else(|| GameServiceError::InvalidAction("图片产物缺少 path".to_string()))?
-                .to_string();
-            if !paths.insert(file_path.clone()) {
-                return Err(GameServiceError::InvalidAction(
-                    "图片产物路径不能重复".to_string(),
-                ));
-            }
-            let size = artifact
-                .get("size")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if size != "2048x2048" {
-                return Err(GameServiceError::InvalidAction(
-                    "角色图片产物尺寸必须为 2048x2048".to_string(),
-                ));
-            }
-            let (archived_path, file_hash) =
-                focus::import_generation_media(&project, &character, effective_stage, &file_path)
-                    .map_err(|error| {
+        let mut image_events = if let Some(recovery) = context.context.recovery_context.as_ref() {
+            store.list_task_events(&recovery.source_task_id).await?
+        } else {
+            Vec::new()
+        };
+        image_events.extend(store.list_task_events(&context.task_id).await?);
+        let event = image_events
+            .into_iter()
+            .rev()
+            .find(|event| event.event == "image_generation_succeeded")
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("视觉任务没有可登记的图片工具成功记录".to_string())
+            })?;
+        let executor = event
+            .payload
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("图片工具成功记录缺少 tool".to_string())
+            })?;
+        if !allowed_executors.contains(&executor) {
+            return Err(GameServiceError::InvalidAction(format!(
+                "{effective_stage} 阶段只允许使用 {} 内部执行器",
+                allowed_executors.join(" 或 ")
+            )));
+        }
+        let file_path = event
+            .payload
+            .get("savedPath")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction("图片工具成功记录缺少 savedPath".to_string())
+            })?;
+        let source_path =
+            focus::validate_stage_media_path(&project, &character, effective_stage, file_path)
+                .map_err(|error| {
                     GameServiceError::InvalidCharacterOperation(format!(
                         "图片执行产物路径无效：{error}"
                     ))
                 })?;
-            let variant = artifact
-                .get("variant")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .or_else(|| (effective_stage == "views").then(|| "quad".to_string()));
-            if effective_stage == "views" && variant.as_deref() != Some("quad") {
-                return Err(GameServiceError::InvalidAction(
-                    "四视图产物必须是单张 2×2 四宫格（variant=quad）".to_string(),
-                ));
-            }
-            let mut asset_spec = artifact.clone();
-            asset_spec.insert(
-                "submitted_by".to_string(),
-                serde_json::Value::String(context.agent_code.clone()),
-            );
-            asset_spec.insert(
-                "revision_scope".to_string(),
-                serde_json::Value::String(effective_stage.to_string()),
-            );
-            asset_spec.insert(
-                "focus_changes_summary".to_string(),
-                serde_json::Value::String(focus_changes_summary.to_string()),
-            );
-            generations.push(Generation {
-                id: Uuid::now_v7().to_string(),
-                project_id: project.id.as_str().to_string(),
-                target_kind: "character".to_string(),
-                target_ref: context.target_id.clone(),
-                stage: effective_stage.to_string(),
-                variant,
-                file_path: archived_path,
-                file_hash: Some(file_hash),
-                is_final: false,
-                review_status: GenerationReviewStatus::Pending,
-                review_feedback: None,
-                reviewed_at: None,
-                source: executor.to_string(),
-                task_id: Some(context.task_id.clone()),
-                asset_spec: serde_json::to_value(asset_spec)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                created_at: now(),
-            });
+        let dimensions = image::image_dimensions(&source_path).map_err(|error| {
+            GameServiceError::InvalidCharacterOperation(format!("无法读取图片产物尺寸：{error}"))
+        })?;
+        if dimensions != (2048, 2048) {
+            return Err(GameServiceError::InvalidAction(
+                "角色图片产物尺寸必须为 2048x2048".to_string(),
+            ));
         }
-        Ok((generations, Some(character)))
+        let (archived_path, file_hash) =
+            focus::import_generation_media(&project, &character, effective_stage, file_path)
+                .map_err(|error| {
+                    GameServiceError::InvalidCharacterOperation(format!(
+                        "图片执行产物路径无效：{error}"
+                    ))
+                })?;
+        apply_generation_stage_transition(&mut character, effective_stage, now())?;
+        let generation = Generation {
+            id: Uuid::now_v7().to_string(),
+            project_id: project.id.as_str().to_string(),
+            target_kind: "character".to_string(),
+            target_ref: context.target_id.clone(),
+            stage: effective_stage.to_string(),
+            variant: (effective_stage == "views").then(|| "quad".to_string()),
+            file_path: archived_path,
+            file_hash: Some(file_hash),
+            is_final: false,
+            review_status: GenerationReviewStatus::Pending,
+            review_feedback: None,
+            reviewed_at: None,
+            source: executor.to_string(),
+            task_id: Some(context.task_id.clone()),
+            asset_spec: serde_json::json!({
+                "candidateId": event.payload.get("callId").cloned().unwrap_or(serde_json::Value::Null),
+                "prompt": event.payload.get("prompt").cloned().unwrap_or(serde_json::Value::Null),
+                "executor": executor,
+                "temporaryPath": file_path,
+                "paramsSnapshot": {
+                    "transparentBackground": event.payload.get("transparentBackground").cloned().unwrap_or(serde_json::Value::Null),
+                    "resultBytes": event.payload.get("resultBytes").cloned().unwrap_or(serde_json::Value::Null),
+                },
+                "submittedBy": context.agent_code.as_str(),
+                "revisionScope": effective_stage,
+                "focusChangesSummary": focus_changes_summary,
+            }),
+            created_at: now(),
+        };
+        Ok((vec![generation], Some(character)))
     }
 
     fn apply_failed_message(
@@ -1553,6 +1481,39 @@ impl GameService {
             .await
     }
 
+    pub async fn prepare_character_agent_turn_if_idle(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        agent_code: &str,
+        content: String,
+    ) -> Result<Option<PreparedConversationTurn>, GameServiceError> {
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        match self
+            .prepare_conversation_turn_with_visibility(
+                conversation.id.as_str(),
+                content,
+                Some(agent_code.to_string()),
+                true,
+                Vec::new(),
+                None,
+            )
+            .await
+        {
+            Ok(prepared) => Ok(Some(prepared)),
+            Err(GameServiceError::InvalidAction(message))
+                if message == CONVERSATION_ALREADY_RUNNING =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn prepare_director_resume_turn(
         &self,
         conversation_id: &str,
@@ -1603,15 +1564,10 @@ impl GameService {
         attachments: Vec<serde_json::Value>,
         revision: GenerationRevisionTurn,
     ) -> Result<PreparedConversationTurn, GameServiceError> {
-        let director_agent_code = self
-            .read_conversation(conversation_id)
-            .await?
-            .conversation
-            .director_agent_code;
         self.prepare_conversation_turn_with_visibility(
             conversation_id,
             content,
-            Some(director_agent_code),
+            Some("visual_designer".to_string()),
             true,
             attachments,
             Some(revision),
@@ -1911,11 +1867,16 @@ impl GameService {
                 "handoff 目标与上一条 Action 不一致".to_string(),
             ));
         }
+        let deterministic_transition = matches!(
+            (latest_message.agent_code.as_str(), target_agent),
+            ("spec_writer", "spec_reviewer") | ("spec_reviewer", "spec_writer")
+        );
         if latest_message.agent_code != snapshot.conversation.director_agent_code
             && target_agent != snapshot.conversation.director_agent_code
+            && !deterministic_transition
         {
             return Err(GameServiceError::InvalidAction(
-                "专业 Agent 只能将控制权交回总管".to_string(),
+                "专业 Agent 只能回交总管或执行系统确定的固定转换".to_string(),
             ));
         }
         let handoff_count = snapshot
@@ -2066,7 +2027,9 @@ impl GameService {
             let focus_paths = focus::paths(&prepared.project, character);
             focus::ensure(&prepared.project, character, now())?;
             art_bible = fs::read_to_string(&focus_paths.art_bible).ok();
-            fs::read_to_string(&focus_paths.character_spec).ok()
+            fs::read_to_string(&focus_paths.character_spec)
+                .ok()
+                .map(|spec| visual_character_context(&spec, character, &prepared.stage))
         } else {
             character
                 .as_ref()
@@ -2136,13 +2099,14 @@ impl GameService {
                         .unwrap_or_else(|| character.state.stage().to_string()),
                     pending_draft_id: facts.pending_spec.as_ref().map(|draft| draft.id.clone()),
                     review_status: facts.spec_review_status.as_str().to_string(),
-                    latest_verdict: facts.latest_spec_verdict.as_ref().map(|verdict| {
-                        WorkflowVerdictSummary {
+                    latest_verdict: (character.state == CharacterState::S0SpecDrafting)
+                        .then_some(facts.latest_spec_verdict.as_ref())
+                        .flatten()
+                        .map(|verdict| WorkflowVerdictSummary {
                             token: verdict.token.clone(),
                             subject_id: verdict.subject_id.clone(),
                             decision: verdict.decision.clone(),
-                        }
-                    }),
+                        }),
                 });
         let review_subject = (prepared.agent_code == "spec_reviewer")
             .then(|| workflow_facts.as_ref()?.pending_spec.as_ref())
@@ -2264,13 +2228,21 @@ impl GameService {
             .into_iter()
             .map(|memory| format!("{}:{}", memory.kind, memory.content))
             .collect();
+        let action_contract = action_contract_profile(
+            &prepared.agent_code,
+            &prepared.stage,
+            &prepared.conversation.director_agent_code,
+            &allowed_handoffs,
+        );
         Ok(ContextPackage {
             conversation_history,
             context_version: prepared.conversation.turn,
-            contract_version: 2,
+            contract_version: 3,
             agent_definition_version: "2".to_string(),
-            // Agent 输出是面向用户的正文加尾置 Action 块，不能启用整条回复 JSON schema。
+            // 回复包含用户可见正文，不能把 Action 子结构用作整条回复的 provider schema。
             output_schema: String::new(),
+            action_schema: action_contract.schema,
+            action_examples: action_contract.examples,
             target_kind: prepared.conversation.target_kind.as_str().to_string(),
             target_ref: prepared.conversation.target_ref.clone(),
             stage: prepared.stage.clone(),
@@ -2282,10 +2254,7 @@ impl GameService {
             recovery_context,
             memories,
             allowed_handoffs,
-            action_protocol: action_protocol_instruction(
-                &prepared.agent_code,
-                &prepared.conversation.director_agent_code,
-            ),
+            action_protocol: action_contract.instruction,
         })
     }
 
@@ -2426,6 +2395,11 @@ impl GameService {
             ));
         }
         let snapshot = self.read_conversation(conversation_id).await?;
+        if snapshot.conversation.target_kind == ConversationTargetKind::Character {
+            return Err(GameServiceError::InvalidAction(
+                "角色规格必须通过专用审校与人工确认门禁提交".to_string(),
+            ));
+        }
         let project = self.read_project(snapshot.conversation.project_id.as_str())?;
         let store = self.project_store(project.id.as_str(), true)?;
         let mut selected = Vec::with_capacity(draft_ids.len());
@@ -2724,7 +2698,8 @@ impl GameService {
                         .map(|id| format!("spec-rewrite:{id}")),
                     SpecReviewStatus::Approved
                     | SpecReviewStatus::Concerns
-                    | SpecReviewStatus::Error => None,
+                    | SpecReviewStatus::Error
+                    | SpecReviewStatus::Confirmed => None,
                 },
                 CharacterState::S1SpecConfirmed => character
                     .gate_spec_confirmed_at
@@ -2772,10 +2747,18 @@ impl GameService {
                 "续跑标识已过期，请刷新角色状态".to_string(),
             ));
         }
-        self.prepare_character_director_resume_turn_if_idle(
+        let next_agent = if current_key.starts_with("spec:") {
+            "spec_reviewer"
+        } else if current_key.starts_with("spec-rewrite:") {
+            "spec_writer"
+        } else {
+            "visual_designer"
+        };
+        self.prepare_character_agent_turn_if_idle(
             project_id,
             character_id,
-            format!("检测到角色工作流待续跑（{current_key}），请根据当前状态继续处理。"),
+            next_agent,
+            format!("检测到角色工作流待续跑（{current_key}），请继续完成当前专业任务。"),
         )
         .await
     }
@@ -2913,6 +2896,23 @@ impl GameService {
         if draft.target_path != "docs/角色定稿.md" {
             return Err(GameServiceError::InvalidCharacterOperation(
                 "角色设定草稿目标必须是 docs/角色定稿.md".to_string(),
+            ));
+        }
+        let review_approved = self
+            .read_conversation(conversation.id.as_str())
+            .await?
+            .messages
+            .iter()
+            .rev()
+            .filter_map(|message| message.action.as_ref()?.payload.verdict.as_ref())
+            .any(|verdict| {
+                verdict.token == "SPEC-CHECK"
+                    && verdict.subject_id == draft.id
+                    && matches!(verdict.decision.as_str(), "APPROVE" | "CONCERNS")
+            });
+        if !review_approved {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色设定必须先通过规格审校才能确认".to_string(),
             ));
         }
         let constraints = self
@@ -3177,7 +3177,7 @@ impl GameService {
         self.prepare_generation_revision_turn(
             conversation.id.as_str(),
             format!(
-                "用户要求修改 {} 阶段的媒体结果。反馈：{}{}。请交给视觉设计师先更新 focus 设定；有歧义必须先 ask_user，否则只生成一次后等待确认。",
+                "用户要求修改 {} 阶段的媒体结果。反馈：{}{}。请先更新 focus 设定；有歧义必须先 ask_user，否则只生成一次后等待确认。",
                 generation.stage, feedback, reference_instruction
             ),
             attachments,
@@ -3693,7 +3693,9 @@ fn character_workflow_facts(
             && task.stage == "spec"
             && matches!(task.agent_code.as_str(), "spec_writer" | "spec_reviewer")
     });
-    let spec_review_status = if pending_spec.is_none() {
+    let spec_review_status = if character.state != CharacterState::S0SpecDrafting {
+        SpecReviewStatus::Confirmed
+    } else if pending_spec.is_none() {
         SpecReviewStatus::AwaitingDraft
     } else if let Some(verdict) = matching_verdict {
         match verdict.decision.as_str() {
@@ -3712,29 +3714,19 @@ fn character_workflow_facts(
     } else {
         SpecReviewStatus::Pending
     };
-    let rejection_after_generation = |stage: &str| {
-        let latest_generation = generations
+    let revision_generation = |stage: &str| {
+        generations
             .iter()
-            .filter(|generation| generation.stage == stage)
-            .max_by_key(|generation| (generation.created_at, generation.id.as_str()));
-        memories
-            .iter()
-            .filter(|memory| {
-                memory.character_ref.as_deref() == Some(character.id.as_str())
-                    && memory.kind == format!("{stage}_rejection")
+            .filter(|generation| {
+                generation.stage == stage
+                    && generation.review_status == GenerationReviewStatus::RevisionRequested
             })
-            .max_by_key(|memory| (memory.updated_at, memory.id.as_str()))
-            .filter(|rejected| {
-                latest_generation.is_some_and(|generated| {
-                    (rejected.updated_at, rejected.id.as_str())
-                        > (generated.created_at, generated.id.as_str())
-                })
-            })
+            .max_by_key(|generation| (generation.created_at, generation.id.as_str()))
     };
-    let render_rejection = rejection_after_generation("render");
-    let views_rejection = rejection_after_generation("views");
-    let render_rejected_after_generation = render_rejection.is_some();
-    let views_rejected_after_generation = views_rejection.is_some();
+    let render_revision = revision_generation("render");
+    let views_revision = revision_generation("views");
+    let render_rejected_after_generation = render_revision.is_some();
+    let views_rejected_after_generation = views_revision.is_some();
     let current_design_stage = match character.state {
         CharacterState::S0SpecDrafting => Some("spec"),
         CharacterState::S1SpecConfirmed => Some("render"),
@@ -3760,8 +3752,8 @@ fn character_workflow_facts(
         spec_review_status,
         latest_spec_verdict,
         latest_spec_rejection_id: latest_spec_rejection.map(|memory| memory.id.clone()),
-        render_rejection_id: render_rejection.map(|memory| memory.id.clone()),
-        views_rejection_id: views_rejection.map(|memory| memory.id.clone()),
+        render_rejection_id: render_revision.map(|generation| generation.id.clone()),
+        views_rejection_id: views_revision.map(|generation| generation.id.clone()),
         render_rejected_after_generation,
         views_rejected_after_generation,
         failed_design_stage,
@@ -4047,6 +4039,12 @@ fn allowed_handoffs_for(
     if handoff_count >= MAX_HANDOFFS {
         return Vec::new();
     }
+    if matches!(
+        current_agent,
+        "spec_writer" | "spec_reviewer" | "visual_designer"
+    ) {
+        return Vec::new();
+    }
     if current_agent != director_agent {
         return vec![director_agent.to_string()];
     }
@@ -4064,7 +4062,9 @@ fn allowed_handoffs_for(
         CharacterState::S0SpecDrafting => match workflow.spec_review_status {
             SpecReviewStatus::AwaitingDraft | SpecReviewStatus::Rejected => Some("spec_writer"),
             SpecReviewStatus::Pending | SpecReviewStatus::Error => Some("spec_reviewer"),
-            SpecReviewStatus::Approved | SpecReviewStatus::Concerns => None,
+            SpecReviewStatus::Approved
+            | SpecReviewStatus::Concerns
+            | SpecReviewStatus::Confirmed => None,
         },
         CharacterState::S1SpecConfirmed | CharacterState::S3RenderConfirmed => {
             Some("visual_designer")
@@ -4082,20 +4082,83 @@ fn allowed_handoffs_for(
     target.into_iter().map(str::to_string).collect()
 }
 
-fn action_protocol_instruction(current_agent: &str, director_agent: &str) -> String {
-    let control_flow = if current_agent == director_agent {
-        "你是当前会话总管，只有你可以决定并 handoff 给下一位专业 Agent；无需继续派单时才可使用 done。"
-            .to_string()
+fn visual_character_context(spec: &str, character: &Character, stage: &str) -> String {
+    let stage_spec = if stage == "render" {
+        spec.lines()
+            .filter(|line| {
+                let normalized = line.to_ascii_lowercase().replace(['-', '_', ' '], "");
+                !normalized.contains("tpose") && !normalized.contains("apose")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
-        format!(
-            "你是专业 Agent，只负责当前任务；工作完成后必须 handoff 回总管 {director_agent}，不得直接 done，也不得 handoff 给其他专业 Agent。"
-        )
+        spec.to_string()
     };
+    let constraints = character
+        .hard_constraints
+        .iter()
+        .filter(|constraint| {
+            constraint
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|scope| scope == "identity" || scope == stage)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let delivery_rules = match stage {
+        "render" => {
+            "效果图必须使用自然动态姿势或战斗准备动作，禁止 T-pose/A-pose；武器必须被合理握持、背负或连接，肢体受力和武器方向一致；允许环境背景与氛围光。"
+        }
+        "views" => {
+            "四视图必须使用 T-pose 或 A-pose，纯色不透明背景；禁止武器、手持物、背负装备、环境场景和动作特效。"
+        }
+        _ => "仅应用当前阶段明确允许的视觉规则。",
+    };
+    let constraints = serde_json::to_string(&constraints).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "每次回复最后必须且只能包含一个 {start} JSON {end} 块。顶层只允许 action、target_agent、reason、payload；action 只允许 ask_user、handoff、done、blocked。handoff 目标必须来自 allowed_handoffs，其他动作 target_agent 必须为 null。{control_flow} 一次只允许一个待用户完成的交互阶段：payload.choices 与非空 payload.drafts 不得同轮出现；存在待确认问题时只输出 choices，用户完成选择后的下一轮才能输出 drafts 进入最终确认。",
-        start = codex_game_domain::ACTION_START,
-        end = codex_game_domain::ACTION_END,
+        "{stage_spec}\n\n<stage_delivery_rules stage=\"{stage}\">\n{delivery_rules}\n当前阶段硬性约束：{constraints}\n</stage_delivery_rules>"
     )
+}
+
+fn apply_deterministic_transition(agent_code: &str, action: &mut AgentAction) {
+    match agent_code {
+        "spec_writer"
+            if action.payload.drafts.as_ref().is_some_and(|drafts| {
+                drafts
+                    .iter()
+                    .any(|draft| draft.artifact_slot == ArtifactSlot::CharacterSpec)
+            }) =>
+        {
+            action.action = AgentActionKind::Handoff;
+            action.target_agent = Some("spec_reviewer".to_string());
+            action.reason = "角色规格草稿已提交，系统进入规格审校".to_string();
+        }
+        "spec_reviewer" => {
+            if let Some(verdict) = action.payload.verdict.as_ref() {
+                if verdict.decision == "REJECT" {
+                    action.action = AgentActionKind::Handoff;
+                    action.target_agent = Some("spec_writer".to_string());
+                    action.reason = "规格审校未通过，系统回派角色设计师修订".to_string();
+                } else {
+                    action.action = AgentActionKind::Done;
+                    action.target_agent = None;
+                    action.reason = "规格审校完成，等待用户确认".to_string();
+                }
+            }
+        }
+        "visual_designer"
+            if action
+                .payload
+                .result
+                .as_ref()
+                .is_some_and(|result| result.status == AgentResultStatus::Success) =>
+        {
+            action.action = AgentActionKind::Done;
+            action.target_agent = None;
+            action.reason = "视觉候选已登记，等待用户确认".to_string();
+        }
+        _ => {}
+    }
 }
 
 fn absolute_root(root: &str) -> Result<PathBuf, GameServiceError> {
@@ -4214,6 +4277,116 @@ mod tests {
             task_id: None,
             asset_spec: serde_json::json!({}),
             created_at: 1,
+        }
+    }
+
+    #[test]
+    fn visual_context_filters_constraints_by_delivery_stage() {
+        let mut character = test_character(CharacterState::S1SpecConfirmed);
+        character.hard_constraints = vec![
+            serde_json::json!({"scope": "identity", "item": "眼睛", "value": "红色"}),
+            serde_json::json!({"scope": "render", "item": "动作", "value": "战斗准备"}),
+            serde_json::json!({"scope": "views", "item": "建模姿势", "value": "T-pose"}),
+        ];
+
+        let spec = "规格正文\n- 四视图建模姿势：T-pose\n- 效果图动作：战斗准备";
+        let render = visual_character_context(spec, &character, "render");
+        assert!(render.contains("自然动态姿势"));
+        assert!(render.contains("武器必须被合理握持"));
+        assert!(render.contains("禁止 T-pose/A-pose"));
+        assert!(render.contains("战斗准备"));
+        assert!(!render.contains("四视图建模姿势"));
+        assert!(!render.contains("\"scope\":\"views\""));
+
+        let views = visual_character_context(spec, &character, "views");
+        assert!(views.contains("T-pose 或 A-pose"));
+        assert!(views.contains("纯色不透明背景"));
+        assert!(views.contains("禁止武器"));
+        assert!(views.contains("建模姿势"));
+        assert!(!views.contains("\"scope\":\"render\""));
+    }
+
+    #[test]
+    fn fixed_specialist_results_transition_without_director() {
+        let mut writer = AgentAction {
+            action: AgentActionKind::Done,
+            target_agent: None,
+            reason: "角色规格草稿已完成".to_string(),
+            payload: AgentActionPayload {
+                drafts: Some(vec![codex_game_domain::ArtifactDraft {
+                    artifact_slot: ArtifactSlot::CharacterSpec,
+                    content: "# 角色定稿".to_string(),
+                    based_on_hash: None,
+                }]),
+                ..AgentActionPayload::default()
+            },
+        };
+        apply_deterministic_transition("spec_writer", &mut writer);
+        assert_eq!(writer.action, AgentActionKind::Handoff);
+        assert_eq!(writer.target_agent.as_deref(), Some("spec_reviewer"));
+
+        let verdict = |decision: &str| AgentAction {
+            action: AgentActionKind::Done,
+            target_agent: None,
+            reason: "规格审校完成".to_string(),
+            payload: AgentActionPayload {
+                verdict: Some(AgentVerdict {
+                    token: "SPEC-CHECK".to_string(),
+                    subject_id: "draft-1".to_string(),
+                    decision: decision.to_string(),
+                    sections: BTreeMap::from([("缺失维度".to_string(), Vec::new())]),
+                    constraints: Vec::new(),
+                }),
+                ..AgentActionPayload::default()
+            },
+        };
+        let mut approved = verdict("APPROVE");
+        apply_deterministic_transition("spec_reviewer", &mut approved);
+        assert_eq!(approved.action, AgentActionKind::Done);
+        assert_eq!(approved.target_agent, None);
+
+        let mut rejected = verdict("REJECT");
+        apply_deterministic_transition("spec_reviewer", &mut rejected);
+        assert_eq!(rejected.action, AgentActionKind::Handoff);
+        assert_eq!(rejected.target_agent.as_deref(), Some("spec_writer"));
+
+        let mut visual = AgentAction {
+            action: AgentActionKind::Done,
+            target_agent: None,
+            reason: "视觉候选已生成".to_string(),
+            payload: AgentActionPayload {
+                result: Some(codex_game_domain::AgentResult {
+                    status: AgentResultStatus::Success,
+                    artifacts: Vec::new(),
+                    error: None,
+                    revision_scope: Some(VisualRevisionScope::Render),
+                    focus_changes_summary: Some("保持当前角色设定".to_string()),
+                }),
+                ..AgentActionPayload::default()
+            },
+        };
+        apply_deterministic_transition("visual_designer", &mut visual);
+        assert_eq!(visual.action, AgentActionKind::Done);
+        assert_eq!(visual.target_agent, None);
+    }
+
+    #[test]
+    fn fixed_specialists_have_no_model_selected_handoffs() {
+        let character = test_character(CharacterState::S0SpecDrafting);
+        let facts = test_workflow_facts(SpecReviewStatus::Pending);
+        for agent in ["spec_writer", "spec_reviewer", "visual_designer"] {
+            assert!(
+                allowed_handoffs_for(
+                    "character",
+                    "spec",
+                    agent,
+                    "studio_director",
+                    0,
+                    Some(&character),
+                    Some(&facts),
+                )
+                .is_empty()
+            );
         }
     }
 
@@ -4430,6 +4603,7 @@ mod tests {
         let draft = ArtifactDraftRecord {
             id: "draft-current".to_string(),
             conversation_id: "conversation-1".to_string(),
+            artifact_slot: ArtifactSlot::CharacterSpec,
             target_path: "docs/角色定稿.md".to_string(),
             content: "# 角色设定".to_string(),
             based_on_hash: None,
@@ -4560,6 +4734,115 @@ mod tests {
                 "四视图设计",
                 ["finish", "finish", "finish", "finish", "process", "wait"],
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_revision_routes_directly_to_visual_designer_with_candidate_context() {
+        let directory = tempdir().expect("tempdir");
+        let root = directory.path().join("game");
+        let service = GameService::new(directory.path().join("app"));
+        let project = service
+            .create_project(
+                "project-1".to_string(),
+                "Project".to_string(),
+                root.to_string_lossy().into_owned(),
+            )
+            .await
+            .expect("create project");
+        {
+            let mut projects = service.projects.lock().expect("projects");
+            projects
+                .get_mut(project.id.as_str())
+                .expect("project session")
+                .project
+                .state = ProjectState::Ready;
+        }
+        fs::write(root.join("art-bible.md"), "# Art Bible").expect("art bible");
+        let mut character = service
+            .create_character(project.id.as_str(), "Hero".to_string(), None, false)
+            .await
+            .expect("create character");
+        character.state = CharacterState::S2RenderGenerated;
+        write_character_file(
+            &service.read_project(project.id.as_str()).expect("project"),
+            &character,
+        )
+        .expect("write character");
+        let store = service
+            .project_store(project.id.as_str(), true)
+            .expect("store");
+        store
+            .update_character(&character)
+            .await
+            .expect("update character state");
+        service
+            .ensure_conversation(
+                project.id.as_str(),
+                ConversationTargetKind::Character,
+                Some(character.id.clone()),
+                "Hero".to_string(),
+                "studio_director".to_string(),
+            )
+            .await
+            .expect("conversation");
+        let candidate_path = format!(
+            "{}/tmp/focus/media/render/candidate.png",
+            character.dir_name
+        );
+        store
+            .insert_generation(&Generation {
+                id: "generation-1".to_string(),
+                project_id: project.id.as_str().to_string(),
+                target_kind: "character".to_string(),
+                target_ref: character.id.clone(),
+                stage: "render".to_string(),
+                variant: None,
+                file_path: candidate_path.clone(),
+                file_hash: Some("hash-1".to_string()),
+                is_final: false,
+                review_status: GenerationReviewStatus::Pending,
+                review_feedback: None,
+                reviewed_at: None,
+                source: "image_t2i".to_string(),
+                task_id: Some("task-original".to_string()),
+                asset_spec: serde_json::json!({}),
+                created_at: 1,
+            })
+            .await
+            .expect("generation");
+
+        let prepared = service
+            .request_generation_revision(
+                project.id.as_str(),
+                &character.id,
+                "generation-1",
+                "加强动作张力".to_string(),
+                None,
+            )
+            .await
+            .expect("revision turn");
+        assert_eq!(prepared.agent_code, "visual_designer");
+        let context = service
+            .build_conversation_context(&prepared)
+            .await
+            .expect("context");
+        assert_eq!(context.allowed_handoffs, Vec::<String>::new());
+        assert_eq!(
+            context
+                .visual_focus
+                .as_ref()
+                .and_then(|focus| focus.revision_candidate_path.as_deref()),
+            Some(candidate_path.as_str())
+        );
+        assert_eq!(
+            store
+                .read_generation("generation-1")
+                .await
+                .expect("read generation")
+                .expect("generation")
+                .review_status,
+            GenerationReviewStatus::RevisionRequested
         );
     }
 

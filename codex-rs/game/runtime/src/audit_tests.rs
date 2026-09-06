@@ -204,6 +204,8 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             contract_version: 1,
             agent_definition_version: "v1".to_string(),
             output_schema: "{}".to_string(),
+            action_schema: "{}".to_string(),
+            action_examples: "example".to_string(),
             target_kind: "project".to_string(),
             target_ref: None,
             stage: "planning".to_string(),

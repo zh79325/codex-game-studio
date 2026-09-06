@@ -8,6 +8,7 @@ use codex_game_domain::AgentHandoff;
 use codex_game_domain::ArtBibleVersion;
 use codex_game_domain::ArtBibleVersionId;
 use codex_game_domain::ArtifactDraftRecord;
+use codex_game_domain::ArtifactSlot;
 use codex_game_domain::Character;
 use codex_game_domain::CharacterState;
 use codex_game_domain::ContextPackage;
@@ -167,7 +168,8 @@ ON agent_handoffs(conversation_id, turn, id);
 CREATE TABLE IF NOT EXISTS artifact_drafts (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
-    target_path TEXT NOT NULL,
+    artifact_slot TEXT NOT NULL,
+    resolved_path TEXT NOT NULL,
     content TEXT NOT NULL,
     based_on_hash TEXT,
     status TEXT NOT NULL,
@@ -744,15 +746,17 @@ impl ProjectStore {
             .await?;
         }
         for draft in action.payload.drafts.as_deref().unwrap_or_default() {
-            sqlx::query("UPDATE artifact_drafts SET status = 'superseded' WHERE conversation_id = ? AND target_path = ? AND status = 'pending'")
+            let resolved_path = draft.artifact_slot.target_path();
+            sqlx::query("UPDATE artifact_drafts SET status = 'superseded' WHERE conversation_id = ? AND artifact_slot = ? AND status = 'pending'")
                 .bind(&completion.conversation_id)
-                .bind(&draft.target_path)
+                .bind(draft.artifact_slot.as_str())
                 .execute(&mut *transaction)
                 .await?;
-            sqlx::query("INSERT INTO artifact_drafts(id, conversation_id, target_path, content, based_on_hash, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
+            sqlx::query("INSERT INTO artifact_drafts(id, conversation_id, artifact_slot, resolved_path, content, based_on_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
                 .bind(uuid::Uuid::now_v7().to_string())
                 .bind(&completion.conversation_id)
-                .bind(&draft.target_path)
+                .bind(draft.artifact_slot.as_str())
+                .bind(resolved_path)
                 .bind(&draft.content)
                 .bind(&draft.based_on_hash)
                 .bind(created_at)
@@ -973,16 +977,21 @@ impl ProjectStore {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<ArtifactDraftRecord>, StoreError> {
-        let rows = sqlx::query("SELECT id, target_path, content, based_on_hash, status, created_at FROM artifact_drafts WHERE conversation_id = ? ORDER BY created_at, id")
+        let rows = sqlx::query("SELECT id, artifact_slot, resolved_path, content, based_on_hash, status, created_at FROM artifact_drafts WHERE conversation_id = ? ORDER BY created_at, id")
             .bind(conversation_id)
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter()
             .map(|row| {
+                let artifact_slot_name: String = row.try_get("artifact_slot")?;
+                let artifact_slot = ArtifactSlot::parse(&artifact_slot_name).ok_or_else(|| {
+                    StoreError::InvalidData(format!("unknown artifact slot: {artifact_slot_name}"))
+                })?;
                 Ok(ArtifactDraftRecord {
                     id: row.try_get("id")?,
                     conversation_id: conversation_id.to_string(),
-                    target_path: row.try_get("target_path")?,
+                    artifact_slot,
+                    target_path: row.try_get("resolved_path")?,
                     content: row.try_get("content")?,
                     based_on_hash: row.try_get("based_on_hash")?,
                     status: row.try_get("status")?,
@@ -2908,6 +2917,7 @@ mod tests {
     use codex_game_domain::AgentActionKind;
     use codex_game_domain::AgentActionPayload;
     use codex_game_domain::ArtifactDraft;
+    use codex_game_domain::ArtifactSlot;
     use codex_game_domain::ChoiceGroup;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
@@ -3341,7 +3351,7 @@ mod tests {
         .await
         .expect("seed message");
         sqlx::query(
-            "INSERT INTO artifact_drafts(id, conversation_id, target_path, content, status, created_at) VALUES ('d1', 'c1', 'art-bible.md', 'old art bible', 'pending', 1), ('d2', 'c1', 'project.json', 'old project', 'pending', 1)",
+            "INSERT INTO artifact_drafts(id, conversation_id, artifact_slot, resolved_path, content, status, created_at) VALUES ('d1', 'c1', 'project_art_bible', 'art-bible.md', 'old art bible', 'pending', 1), ('d2', 'c1', 'project_manifest', 'project.json', 'old project', 'pending', 1)",
         )
         .execute(store.pool())
         .await
@@ -3352,7 +3362,7 @@ mod tests {
             reason: "请确认更新后的风格".to_string(),
             payload: AgentActionPayload {
                 drafts: Some(vec![ArtifactDraft {
-                    target_path: "art-bible.md".to_string(),
+                    artifact_slot: ArtifactSlot::ProjectArtBible,
                     content: "new art bible".to_string(),
                     based_on_hash: None,
                 }]),
@@ -3366,7 +3376,7 @@ mod tests {
             .expect("commit action turn");
 
         let drafts: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT target_path, content, status FROM artifact_drafts WHERE conversation_id = 'c1' ORDER BY target_path, created_at, content",
+            "SELECT resolved_path, content, status FROM artifact_drafts WHERE conversation_id = 'c1' ORDER BY resolved_path, created_at, content",
         )
         .fetch_all(store.pool())
         .await

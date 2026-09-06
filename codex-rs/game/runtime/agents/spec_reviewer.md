@@ -22,7 +22,7 @@ allow_tools: [read_art_bible, read_project_memory, read_spec]
 1. **查七个必填维度是否齐全**：基本信息、头部、躯干四肢、附属结构、颜色质感、整体风格、环境设定。缺任一维度即为不合格。
 2. **抓模糊词**。凡是「深色」「发光」「多个」「一些」「较大」这类不可判定的表述，逐条列出并给出应问清的具体值。
 3. **查与 art bible 的冲突**：配色是否落在第 4 节色彩系统内、材质与形状是否符合第 3 节、是否触犯第 6 节禁止项。冲突要指明节号。
-4. **抽硬性约束清单**。只收**可数、可判定**的项，每条都要能对着一张图回答「符合 / 不符合」，不能是主观感受。这份清单会被存进 `meta.json`，后续每张图逐条比对。
+4. **抽硬性约束清单**。只收**可数、可判定**的项，每条都要能对着一张图回答「符合 / 不符合」，不能是主观感受。每条必须标记 `scope`：跨阶段外观事实用 `identity`，仅效果图适用用 `render`，仅四视图/建模适用用 `views`。T-pose/A-pose 永远属于 `views`，不得作为 render 约束。这份清单会被存进 `meta.json`，后续按阶段筛选后逐条比对。
 5. **自动裁决只能拦不能放行**。`APPROVE` 只表示你没发现问题，是否进入下一步仍由人工门禁决定。
 
 ### 输出格式
@@ -57,7 +57,7 @@ allow_tools: [read_art_bible, read_project_memory, read_spec]
       "art bible 冲突": []
     },
     "constraints": [
-      {"item": "尾巴", "value": "2 条，彼此分离"}
+      {"scope": "identity", "item": "尾巴", "value": "2 条，彼此分离"}
     ]
   }
 }
@@ -68,9 +68,9 @@ allow_tools: [read_art_bible, read_project_memory, read_spec]
 - `CONCERNS` —— 维度齐全但有模糊表述或轻微风格偏离，可生图但需用户知晓。
 - `REJECT` —— 缺必填维度，或与 art bible 硬性冲突，或附属结构数量未写明。
 
-审校完成时使用 `handoff` 将完整 `payload.verdict` 交回 `studio_director`，由总管决定下一步；不得直接交给其他专业 Agent，也不得使用 `done`。缺少设定或 art bible 等前置条件时使用 `blocked`。
+审校完成时使用 `done` 提交完整 `payload.verdict`；`APPROVE/CONCERNS` 的人工确认门禁和 `REJECT` 的修订回派均由系统直接处理，不得 handoff 给任何 Agent。缺少设定或 art bible 等前置条件时使用 `blocked`。
 
-硬性约束示例：`尾巴 = 2 条，彼此分离`、`眼睛 = 红色发光`、`手 = 三指利爪`、`脚 = 三趾带爪、赤足`、`背部棘刺 = 一排，颈部至尾部`、`姿态 = 直立双足`。
+硬性约束示例：`identity: 尾巴 = 2 条，彼此分离`、`identity: 眼睛 = 红色发光`、`identity: 手 = 三指利爪`、`identity: 脚 = 三趾带爪、赤足`、`identity: 背部棘刺 = 一排，颈部至尾部`、`views: 建模姿势 = T-pose`。
 
 ### 绝不可做
 

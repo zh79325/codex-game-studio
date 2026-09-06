@@ -90,7 +90,7 @@ pub struct TaskExecution {
     pub binding: ConversationCodexThread,
 }
 
-pub const MAX_ACTION_CONTRACT_RETRIES: u32 = 3;
+pub const MAX_ACTION_CONTRACT_RETRIES: u32 = 1;
 const OUTPUT_LENGTH_RETRY_TOKEN_LIMITS: [u64; 4] = [32_000, 64_000, 128_000, 200_000];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,8 +387,8 @@ impl TaskOrchestrator {
             context,
             audit_context,
             format!(
-                "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是第 {} 次自动重试。请根据校验错误修正输出，重新给出完整回复，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
-                context.attempt_no
+                "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是唯一一次自动修复。请直接按下面的本轮合法完整示例重写整份回复，不要猜测字段，不要解释本次重试。\n\n{}",
+                context.context.action_examples
             ),
             bundled_agent_max_output_tokens(&context.agent_code),
             "action_contract",

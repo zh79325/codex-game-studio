@@ -4,6 +4,7 @@ use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentResultStatus;
 use codex_game_domain::AgentTurnOutput;
+use codex_game_domain::ArtifactSlot;
 use codex_game_domain::MAX_CHOICE_GROUPS;
 use codex_game_domain::MAX_REVIEW_SUBJECT_BYTES;
 use serde::Deserialize;
@@ -63,9 +64,15 @@ pub fn parse_agent_turn(
     }
     let json = output[body_start..end].trim();
     let value = parse_json_without_duplicate_keys(json)?;
-    let mut action: AgentAction = serde_json::from_value(value)
+    let normalized = serde_json::to_string(&value)
         .map_err(|error| ActionProtocolError::InvalidJson(error.to_string()))?;
+    let mut deserializer = serde_json::Deserializer::from_str(&normalized);
+    let mut action: AgentAction =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            ActionProtocolError::InvalidJson(format!("{}：{}", error.path(), error.inner()))
+        })?;
     if current_agent != director_agent
+        && !is_system_managed_specialist(current_agent)
         && matches!(
             action.action,
             AgentActionKind::Handoff | AgentActionKind::Done
@@ -75,6 +82,13 @@ pub fn parse_agent_turn(
         action.target_agent = Some(director_agent.to_string());
     }
     validate_action(&action, current_agent, director_agent, allowed_handoffs)?;
+    crate::action_contract::validate_action_profile(
+        current_agent,
+        director_agent,
+        allowed_handoffs,
+        &action,
+    )
+    .map_err(ActionProtocolError::InvalidPayload)?;
     Ok(AgentTurnOutput {
         text: output[..start].trim_end().to_string(),
         action,
@@ -161,11 +175,18 @@ fn validate_payload(
         drafts.iter().any(|draft| {
             draft.content.trim().is_empty()
                 || draft.content.len() > MAX_REVIEW_SUBJECT_BYTES
-                || !is_safe_relative_path(&draft.target_path)
+                || !matches!(
+                    (current_agent, draft.artifact_slot),
+                    ("spec_writer", ArtifactSlot::CharacterSpec)
+                        | (
+                            "game_designer",
+                            ArtifactSlot::ProjectArtBible | ArtifactSlot::ProjectManifest
+                        )
+                )
         })
     }) {
         return Err(ActionProtocolError::InvalidPayload(
-            "drafts 必须包含安全相对路径和非空内容".to_string(),
+            "drafts 必须包含当前 Agent 支持的 artifact_slot 和非空内容".to_string(),
         ));
     }
     if payload.memories.as_ref().is_some_and(|memories| {
@@ -232,7 +253,10 @@ fn validate_payload(
     }
     if let Some(result) = &payload.result {
         let expected = match result.status {
-            AgentResultStatus::Success if current_agent != director_agent => {
+            AgentResultStatus::Success
+                if current_agent != director_agent
+                    && !is_system_managed_specialist(current_agent) =>
+            {
                 AgentActionKind::Handoff
             }
             AgentResultStatus::Success => AgentActionKind::Done,
@@ -240,7 +264,8 @@ fn validate_payload(
         };
         if action.action != expected
             || (result.status == AgentResultStatus::Success
-                && (result.error.is_some() || result.artifacts.is_empty()))
+                && (result.error.is_some()
+                    || (current_agent != "visual_designer" && result.artifacts.is_empty())))
             || (result.status == AgentResultStatus::Failed
                 && (result.error.as_deref().is_none_or(str::is_empty)
                     || !result.artifacts.is_empty()))
@@ -249,33 +274,51 @@ fn validate_payload(
         }
         if current_agent == "visual_designer"
             && result.status == AgentResultStatus::Success
-            && (result.revision_scope.is_none()
+            && (!result.artifacts.is_empty()
+                || result.revision_scope.is_none()
                 || result
                     .focus_changes_summary
                     .as_deref()
                     .is_none_or(|summary| summary.trim().is_empty()))
         {
             return Err(ActionProtocolError::InvalidPayload(
-                "视觉结果必须包含 revision_scope 和非空 focus_changes_summary".to_string(),
+                "视觉结果不得包含 artifacts，且必须包含 revision_scope 和非空 focus_changes_summary"
+                    .to_string(),
             ));
         }
     }
 
-    let requires_ask_user = payload
+    let has_choices = payload
         .choices
         .as_ref()
-        .is_some_and(|items| !items.is_empty())
-        || payload
-            .drafts
-            .as_ref()
-            .is_some_and(|items| !items.is_empty())
-        || payload
-            .naming
-            .as_ref()
-            .is_some_and(|items| !items.is_empty());
-    if requires_ask_user && action.action != AgentActionKind::AskUser {
+        .is_some_and(|items| !items.is_empty());
+    let has_drafts = payload
+        .drafts
+        .as_ref()
+        .is_some_and(|items| !items.is_empty());
+    let has_naming = payload
+        .naming
+        .as_ref()
+        .is_some_and(|items| !items.is_empty());
+    if has_choices && has_drafts {
         return Err(ActionProtocolError::InvalidPayload(
-            "choices、drafts 与 naming 只能配合 ask_user".to_string(),
+            "choices 与 drafts 不能在同一轮出现；必须先让用户完成选择，下一轮才能输出 drafts"
+                .to_string(),
+        ));
+    }
+    if (has_choices || has_naming) && action.action != AgentActionKind::AskUser {
+        return Err(ActionProtocolError::InvalidPayload(
+            "choices 与 naming 只能配合 ask_user".to_string(),
+        ));
+    }
+    let expected_draft_action = if current_agent == "spec_writer" {
+        AgentActionKind::Done
+    } else {
+        AgentActionKind::AskUser
+    };
+    if has_drafts && action.action != expected_draft_action {
+        return Err(ActionProtocolError::InvalidPayload(
+            "角色规格 drafts 必须配合 done，其他 drafts 必须配合 ask_user".to_string(),
         ));
     }
     if payload.asset_specs.is_some() && action.action != AgentActionKind::Handoff {
@@ -283,14 +326,15 @@ fn validate_payload(
             "asset_specs 只能配合 handoff".to_string(),
         ));
     }
-    let successful_completion_action = if current_agent == director_agent {
-        AgentActionKind::Done
-    } else {
-        AgentActionKind::Handoff
-    };
+    let successful_completion_action =
+        if current_agent == director_agent || is_system_managed_specialist(current_agent) {
+            AgentActionKind::Done
+        } else {
+            AgentActionKind::Handoff
+        };
     if payload.verdict.is_some() && action.action != successful_completion_action {
         return Err(ActionProtocolError::InvalidPayload(
-            "verdict 必须随完成结果交回总管".to_string(),
+            "verdict 必须随完成结果提交给系统".to_string(),
         ));
     }
     if payload.naming.is_some() && (payload.choices.is_some() || payload.drafts.is_some()) {
@@ -298,30 +342,14 @@ fn validate_payload(
             "naming 不能与 choices 或 drafts 同时出现".to_string(),
         ));
     }
-    let has_choices = payload
-        .choices
-        .as_ref()
-        .is_some_and(|choices| !choices.is_empty());
-    let has_drafts = payload
-        .drafts
-        .as_ref()
-        .is_some_and(|drafts| !drafts.is_empty());
-    if has_choices && has_drafts {
-        return Err(ActionProtocolError::InvalidPayload(
-            "choices 与 drafts 不能在同一轮出现；必须先让用户完成选择，下一轮才能输出 drafts"
-                .to_string(),
-        ));
-    }
     Ok(())
 }
 
-fn is_safe_relative_path(value: &str) -> bool {
-    !value.trim().is_empty()
-        && !value.starts_with('/')
-        && !value.starts_with('\\')
-        && !value
-            .split(['/', '\\'])
-            .any(|part| part.is_empty() || part == "." || part == "..")
+fn is_system_managed_specialist(agent_code: &str) -> bool {
+    matches!(
+        agent_code,
+        "spec_writer" | "spec_reviewer" | "visual_designer"
+    )
 }
 
 fn is_valid_project_code(value: &str) -> bool {
@@ -553,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn specialists_always_return_control_to_the_director() {
+    fn fixed_workflow_specialists_submit_to_the_system() {
         let reviewer_done = output(json!({
             "action": "done",
             "target_agent": null,
@@ -568,18 +596,10 @@ mod tests {
                 }
             }
         }));
-        let parsed = parse_agent_turn(
-            &reviewer_done,
-            "spec_reviewer",
-            "studio_director",
-            &["studio_director".to_string()],
-        )
-        .expect("specialist done should return to director");
-        assert_eq!(parsed.action.action, AgentActionKind::Handoff);
-        assert_eq!(
-            parsed.action.target_agent.as_deref(),
-            Some("studio_director")
-        );
+        let parsed = parse_agent_turn(&reviewer_done, "spec_reviewer", "studio_director", &[])
+            .expect("reviewer completion should be submitted to the system");
+        assert_eq!(parsed.action.action, AgentActionKind::Done);
+        assert_eq!(parsed.action.target_agent, None);
         assert!(parsed.action.payload.verdict.is_some());
 
         let direct_handoff = output(json!({
@@ -588,33 +608,28 @@ mod tests {
             "reason": "交给审校继续处理",
             "payload": {}
         }));
+        assert_eq!(
+            parse_agent_turn(&direct_handoff, "spec_writer", "studio_director", &[],),
+            Err(ActionProtocolError::InvalidHandoff)
+        );
+
+        let generic_done = output(json!({
+            "action": "done",
+            "target_agent": null,
+            "reason": "美术基调已完成",
+            "payload": {}
+        }));
         let parsed = parse_agent_turn(
-            &direct_handoff,
-            "spec_writer",
+            &generic_done,
+            "game_designer",
             "studio_director",
             &["studio_director".to_string()],
         )
-        .expect("specialist handoff should be routed through director");
+        .expect("generic specialist should still return to director");
         assert_eq!(parsed.action.action, AgentActionKind::Handoff);
         assert_eq!(
             parsed.action.target_agent.as_deref(),
             Some("studio_director")
-        );
-
-        let return_to_director = output(json!({
-            "action": "handoff",
-            "target_agent": "studio_director",
-            "reason": "设定编写完成，交回总管决定下一步",
-            "payload": {}
-        }));
-        assert!(
-            parse_agent_turn(
-                &return_to_director,
-                "spec_writer",
-                "studio_director",
-                &["studio_director".to_string()],
-            )
-            .is_ok()
         );
     }
 
@@ -634,15 +649,15 @@ mod tests {
                 "drafts": []
             }
         }));
-        assert!(
+        assert!(matches!(
             parse_agent_turn(
                 &choice_with_empty_drafts,
                 "spec_writer",
                 "studio_director",
                 &[],
-            )
-            .is_ok()
-        );
+            ),
+            Err(ActionProtocolError::InvalidPayload(_))
+        ));
 
         let mixed_interaction = output(json!({
             "action": "ask_user",
@@ -656,7 +671,7 @@ mod tests {
                     "multiple": false
                 }],
                 "drafts": [{
-                    "target_path": "docs/角色定稿.md",
+                    "artifact_slot": "character_spec",
                     "content": "# 角色设定"
                 }]
             }
@@ -702,7 +717,7 @@ mod tests {
             "reason": "请确认角色设定",
             "payload": {
                 "drafts": [{
-                    "target_path": "docs/角色定稿.md",
+                    "artifact_slot": "character_spec",
                     "content": "x".repeat(MAX_REVIEW_SUBJECT_BYTES + 1)
                 }]
             }
@@ -721,13 +736,12 @@ mod tests {
     #[test]
     fn visual_designer_requires_revision_metadata_but_may_ask_before_generating() {
         let missing_revision_metadata = output(json!({
-            "action": "handoff",
-            "target_agent": "studio_director",
-            "reason": "图片生成完成，交回总管",
+            "action": "done",
+            "target_agent": null,
+            "reason": "图片生成完成并提交系统",
             "payload": {
                 "result": {
                     "status": "success",
-                    "artifacts": [{ "path": "media/render/result.png" }],
                     "error": null
                 }
             }
@@ -740,18 +754,18 @@ mod tests {
                 &["studio_director".to_string()],
             ),
             Err(ActionProtocolError::InvalidPayload(
-                "视觉结果必须包含 revision_scope 和非空 focus_changes_summary".to_string()
+                "视觉结果不得包含 artifacts，且必须包含 revision_scope 和非空 focus_changes_summary"
+                    .to_string()
             ))
         );
 
         let valid_result = output(json!({
-            "action": "handoff",
-            "target_agent": "studio_director",
-            "reason": "图片生成完成，交回总管",
+            "action": "done",
+            "target_agent": null,
+            "reason": "图片生成完成并提交系统",
             "payload": {
                 "result": {
                     "status": "success",
-                    "artifacts": [{ "path": "media/render/result.png" }],
                     "error": null,
                     "revision_scope": "render",
                     "focus_changes_summary": "收紧角色服装材质约束"
@@ -793,13 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn enforces_result_status_and_artifact_contract() {
+    fn enforces_result_status_and_error_contract() {
         let invalid_success = output(json!({
             "action": "handoff",
             "target_agent": "studio_director",
             "reason": "图片生成完成，交回总管",
             "payload": {
-                "result": { "status": "success", "artifacts": [], "error": null }
+                "result": { "status": "success", "error": "unexpected" }
             }
         }));
         assert_eq!(
@@ -817,7 +831,7 @@ mod tests {
             "target_agent": null,
             "reason": "缺少图片执行器",
             "payload": {
-                "result": { "status": "failed", "artifacts": [], "error": null }
+                "result": { "status": "failed", "error": null }
             }
         }));
         assert_eq!(

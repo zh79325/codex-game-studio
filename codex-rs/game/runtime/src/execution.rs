@@ -1,5 +1,6 @@
 use crate::RouteDecision;
 use crate::TurnAuditContext;
+use crate::render_action_contract;
 use codex_game_domain::ContextPackage;
 use std::future::Future;
 use thiserror::Error;
@@ -41,10 +42,22 @@ pub struct StartTurnRequest {
 
 impl StartTurnRequest {
     pub fn model_input(&self) -> Result<String, serde_json::Error> {
-        let context = serde_json::to_string(&self.context)?;
+        let mut context = serde_json::to_value(&self.context)?;
+        if let Some(object) = context.as_object_mut() {
+            object.remove("actionSchema");
+            object.remove("actionExamples");
+            object.remove("actionProtocol");
+        }
+        let context = serde_json::to_string(&context)?;
+        let action_contract = render_action_contract(
+            &self.context.action_protocol,
+            &self.context.action_schema,
+            &self.context.action_examples,
+            self.context.contract_version,
+        );
         Ok(format!(
-            "<game_agent_definition>\n{}\n</game_agent_definition>\n\n{}\n\n<game_context attempt_id=\"{}\">\n{}\n</game_context>",
-            self.agent_definition, self.prompt, self.attempt_id, context
+            "<game_agent_definition>\n{}\n</game_agent_definition>\n\n{}\n\n{}\n\n<game_context attempt_id=\"{}\">\n{}\n</game_context>",
+            self.agent_definition, action_contract, self.prompt, self.attempt_id, context
         ))
     }
 }

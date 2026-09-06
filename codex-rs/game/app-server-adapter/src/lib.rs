@@ -757,12 +757,13 @@ impl GameAppServerAdapter {
         let prepared = self
             .runtime
             .service()
-            .prepare_director_resume_turn(
+            .prepare_conversation_turn(
                 &params.conversation_id,
                 format!(
                     "用户已确认并提交本轮草稿：{}。请根据最新流程状态决定下一步。",
                     target_paths.join("、")
                 ),
+                Some("studio_director".to_string()),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -882,20 +883,21 @@ impl GameAppServerAdapter {
         })
     }
 
-    async fn character_response_with_resume<E: CodexExecutionPort>(
+    async fn character_response_with_next_agent<E: CodexExecutionPort>(
         &self,
         execution: &E,
         character: Character,
         reason: String,
-        resume: bool,
+        next_agent: Option<&str>,
     ) -> Result<(GameCharacterResponse, Option<TaskExecution>), String> {
-        let task = if resume {
+        let task = if let Some(agent_code) = next_agent {
             let prepared = self
                 .runtime
                 .service()
-                .prepare_character_director_resume_turn_if_idle(
+                .prepare_character_agent_turn_if_idle(
                     &character.project_id,
                     &character.id,
+                    agent_code,
                     reason,
                 )
                 .await
@@ -927,11 +929,11 @@ impl GameAppServerAdapter {
             .confirm_character_spec(&params.project_id, &params.character_id, &params.draft_id)
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(
+        self.character_response_with_next_agent(
             execution,
             character,
-            "用户已确认角色设定，请根据最新工作流继续生成效果图。".to_string(),
-            true,
+            "角色设定已确认，请生成角色效果图。".to_string(),
+            Some("visual_designer"),
         )
         .await
     }
@@ -1042,11 +1044,11 @@ impl GameAppServerAdapter {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(
+        self.character_response_with_next_agent(
             execution,
             character,
-            format!("用户补充了角色设定修改要求：{reason}。请根据最新工作流继续处理。"),
-            true,
+            format!("用户补充了角色设定修改要求：{reason}。请修订角色规格。"),
+            Some("spec_writer"),
         )
         .await
     }
@@ -1066,11 +1068,11 @@ impl GameAppServerAdapter {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(
+        self.character_response_with_next_agent(
             execution,
             character,
-            "用户已确认角色效果图，请根据最新工作流继续生成四视图。".to_string(),
-            true,
+            "角色效果图已确认，请基于已确认效果图生成四视图。".to_string(),
+            Some("visual_designer"),
         )
         .await
     }
@@ -1092,11 +1094,11 @@ impl GameAppServerAdapter {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(
+        self.character_response_with_next_agent(
             execution,
             character,
-            format!("用户补充了效果图修改要求：{reason}。请根据最新工作流继续处理。"),
-            true,
+            format!("用户补充了效果图修改要求：{reason}。请更新 focus 设定并重新生成。"),
+            Some("visual_designer"),
         )
         .await
     }
@@ -1116,7 +1118,7 @@ impl GameAppServerAdapter {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(execution, character, String::new(), false)
+        self.character_response_with_next_agent(execution, character, String::new(), None)
             .await
     }
 
@@ -1137,11 +1139,11 @@ impl GameAppServerAdapter {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.character_response_with_resume(
+        self.character_response_with_next_agent(
             execution,
             character,
-            format!("用户补充了四视图修改要求：{reason}。请根据最新工作流继续处理。"),
-            true,
+            format!("用户补充了四视图修改要求：{reason}。请更新 focus 设定并重新生成。"),
+            Some("visual_designer"),
         )
         .await
     }
@@ -1261,17 +1263,7 @@ fn turn_projection(completion: codex_game_runtime::CompletedTaskAttempt) -> Game
         .filter(|action| action.action == AgentActionKind::Handoff)
         .map(|action| (action.target_agent.clone(), Some(action.reason.clone())))
         .unwrap_or((None, None));
-    let director_resume_reason = (completion.agent_code.as_deref() == Some("spec_writer"))
-        .then_some(completion.action.as_ref())
-        .flatten()
-        .filter(|action| action.action == AgentActionKind::AskUser)
-        .and_then(|action| action.payload.drafts.as_ref())
-        .is_some_and(|drafts| {
-            drafts
-                .iter()
-                .any(|draft| draft.target_path == "docs/角色定稿.md")
-        })
-        .then(|| "角色设计师已提交待审角色设定草稿，请根据当前工作流继续派单。".to_string());
+    let director_resume_reason = None;
     GameTurnProjection {
         attempt_id: completion.attempt_id,
         task_id: completion.task_id,
@@ -1713,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_writer_draft_completion_requests_director_resume() {
+    fn spec_writer_draft_completion_routes_directly_to_reviewer() {
         let completion = codex_game_runtime::CompletedTaskAttempt {
             attempt_id: "attempt-1".to_string(),
             task_id: "task-1".to_string(),
@@ -1721,12 +1713,12 @@ mod tests {
             status: TaskAttemptStatus::Succeeded,
             agent_code: Some("spec_writer".to_string()),
             action: Some(codex_game_domain::AgentAction {
-                action: AgentActionKind::AskUser,
-                target_agent: None,
-                reason: "请确认角色设定".to_string(),
+                action: AgentActionKind::Handoff,
+                target_agent: Some("spec_reviewer".to_string()),
+                reason: "角色规格草稿已提交，系统进入规格审校".to_string(),
                 payload: codex_game_domain::AgentActionPayload {
                     drafts: Some(vec![codex_game_domain::ArtifactDraft {
-                        target_path: "docs/角色定稿.md".to_string(),
+                        artifact_slot: codex_game_domain::ArtifactSlot::CharacterSpec,
                         content: "# 角色设定".to_string(),
                         based_on_hash: None,
                     }]),
@@ -1737,8 +1729,8 @@ mod tests {
 
         let projection = turn_projection(completion);
 
-        assert!(projection.handoff_target.is_none());
-        assert!(projection.director_resume_reason.is_some());
+        assert_eq!(projection.handoff_target.as_deref(), Some("spec_reviewer"));
+        assert!(projection.director_resume_reason.is_none());
     }
 
     #[tokio::test]
@@ -1894,7 +1886,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn committing_specialist_drafts_resumes_with_the_director() {
+    async fn dedicated_drafts_cannot_use_generic_commit_or_resume_director() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
         let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
@@ -1912,7 +1904,7 @@ mod tests {
             "ask_user",
             None,
             "请确认设计草稿",
-            r##"{"drafts":[{"target_path":"docs/视觉说明.md","content":"# 视觉说明"}]}"##,
+            r##"{"drafts":[{"artifact_slot":"project_art_bible","content":"# 视觉说明"}]}"##,
         );
         adapter
             .observe_turn_completed(
@@ -1936,7 +1928,7 @@ mod tests {
             .expect("pending draft")
             .id;
 
-        let (_, task) = adapter
+        let error = adapter
             .conversation_commit_drafts(
                 &execution,
                 GameConversationCommitDraftsParams {
@@ -1945,24 +1937,18 @@ mod tests {
                 },
             )
             .await
-            .expect("commit drafts");
+            .expect_err("dedicated draft must use its confirmation gate");
 
-        let task = task.expect("director task");
-        assert_eq!(task.task.agent_code, "studio_director");
+        assert!(error.contains("专用人工门禁"));
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 2);
         let snapshot = adapter
             .conversation_read(GameConversationReadParams { conversation_id })
             .await
             .expect("snapshot");
-        assert_eq!(snapshot.conversation.status, "running");
+        assert_eq!(snapshot.conversation.status, "active");
         assert_eq!(
             snapshot.conversation.focus_agent_code.as_deref(),
-            Some("studio_director")
-        );
-        assert!(
-            snapshot
-                .messages
-                .iter()
-                .any(|message| message.role == "user" && message.folded)
+            Some("game_designer")
         );
     }
 
@@ -2043,6 +2029,20 @@ mod tests {
     async fn action_contract_retry_can_recover_with_a_valid_output() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let model_input = execution.turn_requests.lock().expect("turn requests")[0]
+            .model_input()
+            .expect("model input");
+        let definition = model_input
+            .find("<game_agent_definition>")
+            .expect("definition");
+        let contract = model_input
+            .find("<action_contract version=\"3\">")
+            .expect("action contract");
+        let task = model_input.find("定义美术基调").expect("task prompt");
+        let context = model_input.find("<game_context").expect("game context");
+        assert!(definition < contract && contract < task && task < context);
+        assert!(model_input.contains("JSON Schema："));
+        assert!(model_input.contains("本轮合法完整示例："));
         let retry = adapter
             .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), None)
             .await
@@ -2073,7 +2073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn action_contract_failure_retries_three_times_before_failing() {
+    async fn action_contract_failure_retries_once_before_failing() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let mut turn_id = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
 
@@ -2088,7 +2088,8 @@ mod tests {
             let requests = execution.turn_requests.lock().expect("turn request lock");
             let prompt = &requests[retry_number as usize].prompt;
             assert!(prompt.contains("Action 契约校验"));
-            assert!(prompt.contains(&format!("第 {retry_number} 次自动重试")));
+            assert!(prompt.contains("这是唯一一次自动修复"));
+            assert!(prompt.contains("本轮合法完整示例"));
         }
 
         let retrying_snapshot = adapter
@@ -2110,7 +2111,7 @@ mod tests {
             .expect("final contract failure")
             .expect("failed projection");
         assert_eq!(projection.status, "failed");
-        assert_eq!(execution.turns.load(Ordering::SeqCst), 4);
+        assert_eq!(execution.turns.load(Ordering::SeqCst), 2);
 
         let snapshot = adapter
             .conversation_read(GameConversationReadParams { conversation_id })
@@ -2119,6 +2120,6 @@ mod tests {
         let assistant = snapshot.messages.last().expect("assistant message");
         assert_eq!(assistant.status, "failed");
         assert!(assistant.content.contains("Action 协议校验失败"));
-        assert!(assistant.content.contains("已自动重试 3 次"));
+        assert!(assistant.content.contains("已自动重试 1 次"));
     }
 }

@@ -3441,6 +3441,7 @@ dependencies = [
 name = "codex-game-domain"
 version = "0.0.0"
 dependencies = [
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3468,8 +3469,10 @@ dependencies = [
  "codex-game-domain",
  "codex-game-store",
  "image",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "sha2 0.10.9",
  "tempfile",

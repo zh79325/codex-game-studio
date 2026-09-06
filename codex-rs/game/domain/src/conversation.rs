@@ -1,4 +1,5 @@
 use crate::AgentAction;
+use crate::ArtifactSlot;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -22,6 +23,7 @@ pub struct AgentHandoff {
 pub struct ArtifactDraftRecord {
     pub id: String,
     pub conversation_id: String,
+    pub artifact_slot: ArtifactSlot,
     pub target_path: String,
     pub content: String,
     pub based_on_hash: Option<String>,

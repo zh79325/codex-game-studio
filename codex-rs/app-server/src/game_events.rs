@@ -173,6 +173,7 @@ pub(crate) fn spawn_game_event_observer(
                                 "status": event.status.as_str(),
                                 "savedPath": event.saved_path.as_ref().map(|path| path.as_path().display().to_string()),
                                 "prompt": event.revised_prompt.as_deref().map(|prompt| truncate_text(prompt, 2048)),
+                                "transparentBackground": event.transparent_background,
                                 "resultBytes": event.result.len(),
                                 "failure": event.failure,
                             }),
@@ -320,20 +321,34 @@ pub(crate) fn spawn_game_event_observer(
                     let is_running = projection.status == "running";
                     let director_resume_reason = projection.director_resume_reason.clone();
                     if let Some(context) = event_context.as_ref() {
-                        record_task_event(
-                            adapter.as_ref(),
-                            context,
-                            audit_context.as_ref(),
-                            "attempt_terminal",
+                        let llm_execution_status =
                             if matches!(observed.event.msg, EventMsg::TurnAborted(_)) {
                                 "interrupted"
                             } else if terminal_error.is_some() {
                                 "failed"
                             } else {
                                 "succeeded"
-                            },
+                            };
+                        let attempt_status = if llm_execution_status == "interrupted" {
+                            "interrupted"
+                        } else if llm_execution_status == "failed"
+                            || projection.status != "succeeded"
+                        {
+                            "failed"
+                        } else {
+                            "succeeded"
+                        };
+                        record_task_event(
+                            adapter.as_ref(),
+                            context,
+                            audit_context.as_ref(),
+                            "attempt_terminal",
+                            attempt_status,
                             "任务尝试已进入终态",
-                            serde_json::json!({ "projectionStatus": projection.status.as_str() }),
+                            serde_json::json!({
+                                "llmExecutionStatus": llm_execution_status,
+                                "projectionStatus": projection.status.as_str(),
+                            }),
                         )
                         .await;
                     }

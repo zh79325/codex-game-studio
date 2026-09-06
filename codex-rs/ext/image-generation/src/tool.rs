@@ -616,7 +616,7 @@ fn validate_executor_args(
             if args
                 .referenced_image_paths
                 .as_ref()
-                .is_none_or(|paths| paths.is_empty())
+                .is_none_or(std::vec::Vec::is_empty)
                 && args
                     .num_last_images_to_include
                     .is_none_or(|count| count == 0) =>

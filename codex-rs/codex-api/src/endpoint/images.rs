@@ -1,6 +1,7 @@
 use crate::auth::SharedAuthProvider;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
+use crate::images::ArkImageGenerationRequest;
 use crate::images::ImageEditRequest;
 use crate::images::ImageGenerationRequest;
 use crate::images::ImageResponse;
@@ -55,6 +56,20 @@ impl<T: HttpTransport> ImagesClient<T> {
             .await
     }
 
+    pub async fn generate_ark(
+        &self,
+        request: &ArkImageGenerationRequest,
+        extra_headers: HeaderMap,
+    ) -> Result<(ImageResponse, Option<String>), ApiError> {
+        self.post_image_request(
+            "images/generations",
+            request,
+            extra_headers,
+            "Ark image generation",
+        )
+        .await
+    }
+
     async fn post_image_request<R: Serialize>(
         &self,
         path: &str,
@@ -84,6 +99,10 @@ impl<T: HttpTransport> ImagesClient<T> {
 mod tests {
     use super::*;
     use crate::auth::AuthProvider;
+    use crate::images::ArkImageInput;
+    use crate::images::ArkImageOutputFormat;
+    use crate::images::ArkImageResponseFormat;
+    use crate::images::ArkSequentialImageGeneration;
     use crate::images::ImageBackground;
     use crate::images::ImageData;
     use crate::images::ImageQuality;
@@ -252,6 +271,55 @@ mod tests {
                 "model": "gpt-image-1.5",
                 "quality": "medium",
                 "size": "1024x1536",
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn ark_generation_posts_seedream_contract() {
+        let transport = CapturingTransport::new(response_body());
+        let client = ImagesClient::new(transport.clone(), provider(), Arc::new(DummyAuth));
+
+        let (response, imagegen_request_id) = client
+            .generate_ark(
+                &ArkImageGenerationRequest {
+                    model: "doubao-seedream-5.0-lite".to_string(),
+                    prompt: "孙悟空站在现代都市天台".to_string(),
+                    image: Some(ArkImageInput::Single(
+                        "data:image/png;base64,Zm9v".to_string(),
+                    )),
+                    size: "2K".to_string(),
+                    response_format: ArkImageResponseFormat::B64Json,
+                    sequential_image_generation: Some(ArkSequentialImageGeneration::Disabled),
+                    stream: false,
+                    watermark: false,
+                    output_format: Some(ArkImageOutputFormat::Png),
+                },
+                HeaderMap::new(),
+            )
+            .await
+            .expect("Ark image generation request should succeed");
+
+        assert_eq!(response, expected_response());
+        assert_eq!(imagegen_request_id, None);
+
+        let request = captured_request(&transport);
+        assert_eq!(
+            request.url,
+            "https://example.com/api/codex/images/generations"
+        );
+        assert_eq!(
+            request.body.as_ref().and_then(RequestBody::json),
+            Some(&json!({
+                "model": "doubao-seedream-5.0-lite",
+                "prompt": "孙悟空站在现代都市天台",
+                "image": "data:image/png;base64,Zm9v",
+                "size": "2K",
+                "response_format": "b64_json",
+                "sequential_image_generation": "disabled",
+                "stream": false,
+                "watermark": false,
+                "output_format": "png",
             }))
         );
     }

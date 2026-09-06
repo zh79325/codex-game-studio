@@ -34,5 +34,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+codex-game-app-server-adapter = { workspace = true }
+codex-game-runtime = { workspace = true }
+codex-game-store = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,8 +1,10 @@
 mod artifact;
 mod backend;
+mod dialect;
 mod extension;
 mod tool;
 
+pub use dialect::ImageApiDialect;
 pub use extension::ImageGenerationRouteOverride;
 pub use extension::ImageGenerationToolRouteOverride;
 pub use extension::install;

@@ -119,7 +119,7 @@ driver = "ark_video"
 auth_style = "bearer"
 
 [[presets.models]]
-model_id = "doubao-seedream-5.0-lite"
+model_id = "doubao-seedream-5-0-lite-260128"
 capabilities = ["image_text_to_image", "image_image_to_image"]
 driver = "ark_image"
 api_path = "/api/plan/v3/images/generations"
@@ -168,17 +168,17 @@ driver = "ark_video"
 auth_style = "bearer"
 
 [[presets.models]]
-model_id = "doubao-seedream-5.0-pro"
+model_id = "doubao-seedream-5-0-pro-260628"
 capabilities = ["image_text_to_image", "image_image_to_image"]
 driver = "ark_image"
 api_path = "/api/v3/images/generations"
 limit_kind = "images"
 default_period = "month"
 params = {}
-remark = "一个通用长效 API Key 同时打图片 /api/v3/images/generations 与视频 /api/v3/contents/generations/tasks，与 Coding Plan、Agent Plan 的套餐 key 完全隔离。系列名，确切 model_id 带日期版本后缀，以方舟模型列表为准，也可填 Endpoint ID。size 走档位 1K/1.5K/2K 或精确像素（总像素 [921600, 4624220]，宽高比 [1/16,16]），要档位就在模型 params 配 size_style=tier；参考图最多 10 张；支持 layer_decomposition 图层拆分（底图 + ≤16 图层）、background=transparent、output_format png/jpeg；不支持组图与流式"
+remark = "一个通用长效 API Key 同时打图片 /api/v3/images/generations 与视频 /api/v3/contents/generations/tasks，与 Coding Plan、Agent Plan 的套餐 key 完全隔离。也可将 model_id 改填已开通的 Endpoint ID。size 走档位 1K/1.5K/2K 或精确像素（总像素 [921600, 4624220]，宽高比 [1/16,16]），要档位就在模型 params 配 size_style=tier；参考图最多 10 张；支持 layer_decomposition 图层拆分（底图 + ≤16 图层）、background=transparent、output_format png/jpeg；不支持组图与流式"
 
 [[presets.models]]
-model_id = "doubao-seedream-5.0-lite"
+model_id = "doubao-seedream-5-0-lite-260128"
 capabilities = ["image_text_to_image", "image_image_to_image"]
 driver = "ark_image"
 api_path = "/api/v3/images/generations"
@@ -188,7 +188,7 @@ params = {}
 remark = "size 走档位 2K/3K/4K 或精确像素（总像素 [3686400, 16777216]），最低 2K 起，2048x2048 的缺省边长正好落在区间内；参考图最多 14 张；支持组图（sequential_image_generation=auto，参考图数 + 生成数 ≤ 15）、流式、web_search 工具"
 
 [[presets.models]]
-model_id = "doubao-seedream-4.5"
+model_id = "doubao-seedream-4-5-251128"
 capabilities = ["image_text_to_image", "image_image_to_image"]
 driver = "ark_image"
 api_path = "/api/v3/images/generations"
@@ -198,7 +198,7 @@ params = {}
 remark = "size 走档位 2K/4K 或精确像素（总像素 [3686400, 16777216]）；不支持 output_format，固定 jpeg；支持组图与流式"
 
 [[presets.models]]
-model_id = "doubao-seedream-4.0"
+model_id = "doubao-seedream-4-0-250828"
 capabilities = ["image_text_to_image", "image_image_to_image"]
 driver = "ark_image"
 api_path = "/api/v3/images/generations"

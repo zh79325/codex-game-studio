@@ -17,6 +17,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::backend::CodexImagesBackend;
+use crate::dialect::ImageApiDialect;
 use crate::tool::ImageGenerationTool;
 
 #[derive(Clone)]
@@ -37,6 +38,7 @@ pub struct ImageGenerationRouteOverride {
 pub struct ImageGenerationToolRouteOverride {
     pub provider: ModelProviderInfo,
     pub model: String,
+    pub api_dialect: ImageApiDialect,
     pub save_root: Option<AbsolutePathBuf>,
     pub tool_name: String,
 }
@@ -50,6 +52,7 @@ struct ImageGenerationExtensionConfig {
 struct ImageGenerationToolConfig {
     provider: ModelProviderInfo,
     model: String,
+    api_dialect: ImageApiDialect,
     save_root: Option<AbsolutePathBuf>,
     tool_name: Option<String>,
 }
@@ -69,6 +72,7 @@ impl ImageGenerationExtensionConfig {
                     .map(|tool| ImageGenerationToolConfig {
                         provider: tool.provider.clone(),
                         model: tool.model.clone(),
+                        api_dialect: tool.api_dialect,
                         save_root: tool.save_root.clone(),
                         tool_name: Some(tool.tool_name.clone()),
                     })
@@ -83,6 +87,7 @@ impl ImageGenerationExtensionConfig {
                 .then(|| ImageGenerationToolConfig {
                     provider: config.model_provider.clone(),
                     model: "gpt-image-2".to_string(),
+                    api_dialect: ImageApiDialect::OpenAi,
                     save_root: resolve_save_root(config),
                     tool_name: None,
                 })
@@ -156,6 +161,7 @@ impl ToolContributor for ImageGenerationExtension {
                             Some(self.auth_manager.clone()),
                         ),
                         originator.clone(),
+                        tool.api_dialect,
                     ),
                     tool.save_root.clone(),
                     thread_store.level_id().to_string(),

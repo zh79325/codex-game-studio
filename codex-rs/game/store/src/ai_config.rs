@@ -104,7 +104,50 @@ pub async fn initialize_ai_config_schema(pool: &SqlitePool) -> Result<(), StoreE
         sqlx::query(statement).execute(pool).await?;
     }
     migrate_legacy_ai_data(pool).await?;
+    migrate_seedream_model_ids(pool).await?;
     migrate_provider_metadata(pool).await?;
+    Ok(())
+}
+
+async fn migrate_seedream_model_ids(pool: &SqlitePool) -> Result<(), StoreError> {
+    const MIGRATION_NAME: &str = "seedream-model-ids-v1";
+    const MODEL_IDS: [(&str, &str); 4] = [
+        ("doubao-seedream-5.0-pro", "doubao-seedream-5-0-pro-260628"),
+        (
+            "doubao-seedream-5.0-lite",
+            "doubao-seedream-5-0-lite-260128",
+        ),
+        ("doubao-seedream-4.5", "doubao-seedream-4-5-251128"),
+        ("doubao-seedream-4.0", "doubao-seedream-4-0-250828"),
+    ];
+    let mut transaction = pool.begin().await?;
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ai_config_migrations WHERE name = ?)")
+            .bind(MIGRATION_NAME)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if applied {
+        transaction.rollback().await?;
+        return Ok(());
+    }
+    for (legacy_id, model_id) in MODEL_IDS {
+        sqlx::query(
+            "UPDATE ai_models SET model_id = ?, display_name = CASE WHEN display_name = ? THEN ? ELSE display_name END WHERE driver = 'ark_image' AND model_id = ? AND provider_code NOT IN (SELECT provider_code FROM ai_models WHERE model_id = ?)",
+        )
+        .bind(model_id)
+        .bind(legacy_id)
+        .bind(model_id)
+        .bind(legacy_id)
+        .bind(model_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query("INSERT INTO ai_config_migrations(name, applied_at) VALUES (?, ?)")
+        .bind(MIGRATION_NAME)
+        .bind(current_timestamp())
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -1127,6 +1170,43 @@ mod tests {
         .await
         .expect("read migration marker");
         assert_eq!(migration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_seedream_aliases_to_provider_model_ids() {
+        let pool = test_pool().await;
+        let mut configured_provider = provider("ark", Vec::new());
+        configured_provider.driver = "ark_image".to_string();
+        upsert_ai_provider(&pool, &configured_provider)
+            .await
+            .expect("seed Ark provider");
+        let mut configured_model = model("seedream", "ark", 0, "images");
+        configured_model.model_id = "doubao-seedream-5.0-lite".to_string();
+        configured_model.display_name = configured_model.model_id.clone();
+        configured_model.driver = "ark_image".to_string();
+        configured_model.api_path = "/api/v3/images/generations".to_string();
+        upsert_ai_model(&pool, &configured_model)
+            .await
+            .expect("seed legacy Seedream model");
+        sqlx::query("DELETE FROM ai_config_migrations WHERE name = 'seedream-model-ids-v1'")
+            .execute(&pool)
+            .await
+            .expect("reset Seedream migration marker");
+
+        migrate_seedream_model_ids(&pool)
+            .await
+            .expect("migrate Seedream model ID");
+        migrate_seedream_model_ids(&pool)
+            .await
+            .expect("repeat Seedream migration");
+
+        configured_model.model_id = "doubao-seedream-5-0-lite-260128".to_string();
+        configured_model.display_name = configured_model.model_id.clone();
+        configured_provider.models = vec![configured_model];
+        assert_eq!(
+            list_ai_providers(&pool).await.expect("list providers"),
+            vec![configured_provider]
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ use codex_http_client::StreamResponseAudit;
 use codex_http_client::StreamResponseAuditEvent;
 use codex_http_client::register_stream_response_audit;
 use codex_http_client::unregister_stream_response_audit;
+use codex_image_generation_extension::ImageApiDialect;
 use codex_image_generation_extension::ImageGenerationRouteOverride;
 use codex_image_generation_extension::ImageGenerationToolRouteOverride;
 use codex_model_provider_info::ModelProviderInfo;
@@ -44,6 +45,12 @@ pub(crate) struct AppServerCodexExecutionPort {
 pub(crate) struct ConnectionCodexExecutionPort<'a> {
     execution: &'a AppServerCodexExecutionPort,
     connection_id: ConnectionId,
+}
+
+struct ResolvedModelProvider {
+    model: String,
+    driver: String,
+    provider: ModelProviderInfo,
 }
 
 struct GameTurnStreamAudit {
@@ -117,7 +124,7 @@ impl AppServerCodexExecutionPort {
     async fn resolve_model_provider(
         &self,
         route: &codex_game_runtime::RouteDecision,
-    ) -> Result<(String, ModelProviderInfo), ExecutionError> {
+    ) -> Result<ResolvedModelProvider, ExecutionError> {
         let resolved = self
             .game_adapter
             .resolve_ai_execution_route(route)
@@ -127,12 +134,17 @@ impl AppServerCodexExecutionPort {
                 message,
             })?;
         let model = resolved.model.clone();
+        let driver = resolved.driver.clone();
         let provider =
             model_provider_info(resolved).map_err(|message| ExecutionError::RouteUnavailable {
                 route: route.clone(),
                 message,
             })?;
-        Ok((model, provider))
+        Ok(ResolvedModelProvider {
+            model,
+            driver,
+            provider,
+        })
     }
 }
 
@@ -206,19 +218,27 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
     ) -> Result<StartedThread, ExecutionError> {
         let cwd = AbsolutePathBuf::from_absolute_path_checked(&request.cwd)
             .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
-        let (model, provider) = self.resolve_model_provider(&request.route).await?;
+        let resolved = self.resolve_model_provider(&request.route).await?;
         let mut config = self.base_config.as_ref().clone();
-        config.model = Some(model);
-        config.model_provider = provider;
+        config.model = Some(resolved.model);
+        config.model_provider = resolved.provider;
         config.model_provider_id = request.route.provider.clone();
         let mut thread_extension_init = ExtensionDataInit::new();
         if !request.image_generation_tools.is_empty() {
             let mut tools = Vec::with_capacity(request.image_generation_tools.len());
             for tool in request.image_generation_tools {
-                let (model, provider) = self.resolve_model_provider(&tool.route).await?;
+                let resolved = self.resolve_model_provider(&tool.route).await?;
+                let api_dialect =
+                    ImageApiDialect::try_from(resolved.driver.as_str()).map_err(|message| {
+                        ExecutionError::RouteUnavailable {
+                            route: tool.route.clone(),
+                            message,
+                        }
+                    })?;
                 tools.push(ImageGenerationToolRouteOverride {
-                    provider,
-                    model,
+                    provider: resolved.provider,
+                    model: resolved.model,
+                    api_dialect,
                     save_root: Some(cwd.join("tmp")),
                     tool_name: tool.tool_name,
                 });

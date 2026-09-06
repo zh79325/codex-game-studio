@@ -3410,6 +3410,7 @@ dependencies = [
 name = "codex-game-app-server-adapter"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "codex-game-app-server-protocol",
  "codex-game-domain",
  "codex-game-import",
@@ -3466,6 +3467,7 @@ version = "0.0.0"
 dependencies = [
  "codex-game-domain",
  "codex-game-store",
+ "image",
  "serde",
  "serde_json",
  "serde_yaml",

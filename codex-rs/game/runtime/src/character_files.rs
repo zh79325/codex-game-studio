@@ -13,18 +13,17 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 
-const CHARACTER_SCHEMA_VERSION: u32 = 3;
 const CHARACTER_FILE_NAME: &str = ".model.json";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CharacterFileDocument {
     schema_version: u32,
-    character: CharacterFile,
+    character: LegacyCharacterFile,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CharacterFile {
     id: String,
     name: String,
@@ -32,11 +31,26 @@ struct CharacterFile {
     spec_path: Option<String>,
     render_path: Option<String>,
     view_paths: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCharacterFile {
+    id: String,
+    name: String,
+    state: CharacterState,
+    spec_path: Option<String>,
+    render_path: Option<String>,
+    #[serde(default)]
+    view_paths: BTreeMap<String, String>,
+    #[serde(default)]
     hard_constraints: Vec<Value>,
     gate_spec_confirmed_at: Option<i64>,
     gate_render_confirmed_at: Option<i64>,
     gate_views_confirmed_at: Option<i64>,
+    #[serde(default)]
     created_at: i64,
+    #[serde(default)]
     updated_at: i64,
 }
 
@@ -81,11 +95,7 @@ pub(crate) fn write_character_file(project: &Project, character: &Character) -> 
             ));
         }
     }
-    let document = CharacterFileDocument {
-        schema_version: CHARACTER_SCHEMA_VERSION,
-        character: CharacterFile::from(character),
-    };
-    let content = serde_json::to_string_pretty(&document)
+    let content = serde_json::to_string_pretty(&CharacterFile::from(character))
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     write_art_bible(&path, &format!("{content}\n"))
 }
@@ -99,12 +109,6 @@ impl From<&Character> for CharacterFile {
             spec_path: character.spec_path.clone(),
             render_path: character.render_path.clone(),
             view_paths: character.view_paths.clone(),
-            hard_constraints: character.hard_constraints.clone(),
-            gate_spec_confirmed_at: character.gate_spec_confirmed_at,
-            gate_render_confirmed_at: character.gate_render_confirmed_at,
-            gate_views_confirmed_at: character.gate_views_confirmed_at,
-            created_at: character.created_at,
-            updated_at: character.updated_at,
         }
     }
 }
@@ -124,12 +128,76 @@ fn collect_character_files(directory: &Path, files: &mut Vec<PathBuf>) -> io::Re
 
 fn read_character_file(project: &Project, path: &Path) -> io::Result<Character> {
     let content = fs::read_to_string(path)?;
-    let document: CharacterFileDocument = serde_json::from_str(&content)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    if document.schema_version < 2 || document.character.id.trim().is_empty() {
+    let (metadata, hard_constraints, gate_spec, gate_render, gate_views, created_at, updated_at) =
+        match serde_json::from_str::<CharacterFile>(&content) {
+            Ok(metadata) => {
+                let timestamp = fs::metadata(path)?
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|value| value.as_secs() as i64)
+                    .unwrap_or_default();
+                let gate_spec =
+                    (metadata.state != CharacterState::S0SpecDrafting).then_some(timestamp);
+                let gate_render = matches!(
+                    metadata.state,
+                    CharacterState::S3RenderConfirmed
+                        | CharacterState::S4ViewsGenerated
+                        | CharacterState::S5ViewsConfirmed
+                )
+                .then_some(timestamp);
+                let gate_views =
+                    (metadata.state == CharacterState::S5ViewsConfirmed).then_some(timestamp);
+                (
+                    metadata,
+                    Vec::new(),
+                    gate_spec,
+                    gate_render,
+                    gate_views,
+                    timestamp,
+                    timestamp,
+                )
+            }
+            Err(flat_error) => {
+                let document: CharacterFileDocument = serde_json::from_str(&content).map_err(
+                    |legacy_error| {
+                        io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "invalid flat character metadata ({flat_error}); invalid legacy metadata ({legacy_error})"
+                            ),
+                        )
+                    },
+                )?;
+                if document.schema_version < 2 || document.character.id.trim().is_empty() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "unsupported character metadata",
+                    ));
+                }
+                let legacy = document.character;
+                (
+                    CharacterFile {
+                        id: legacy.id,
+                        name: legacy.name,
+                        state: legacy.state,
+                        spec_path: legacy.spec_path,
+                        render_path: legacy.render_path,
+                        view_paths: legacy.view_paths,
+                    },
+                    legacy.hard_constraints,
+                    legacy.gate_spec_confirmed_at,
+                    legacy.gate_render_confirmed_at,
+                    legacy.gate_views_confirmed_at,
+                    legacy.created_at,
+                    legacy.updated_at,
+                )
+            }
+        };
+    if metadata.id.trim().is_empty() {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "unsupported character metadata",
+            "character id cannot be empty",
         ));
     }
     let root = Path::new(&project.root);
@@ -148,7 +216,6 @@ fn read_character_file(project: &Project, path: &Path) -> io::Result<Character> 
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(|parent| parent.to_string_lossy().into_owned());
-    let metadata = document.character;
     Ok(Character {
         id: metadata.id,
         project_id: project.id.as_str().to_string(),
@@ -159,12 +226,12 @@ fn read_character_file(project: &Project, path: &Path) -> io::Result<Character> 
         spec_path: metadata.spec_path,
         render_path: metadata.render_path,
         view_paths: metadata.view_paths,
-        hard_constraints: metadata.hard_constraints,
-        gate_spec_confirmed_at: metadata.gate_spec_confirmed_at,
-        gate_render_confirmed_at: metadata.gate_render_confirmed_at,
-        gate_views_confirmed_at: metadata.gate_views_confirmed_at,
-        created_at: metadata.created_at,
-        updated_at: metadata.updated_at,
+        hard_constraints,
+        gate_spec_confirmed_at: gate_spec,
+        gate_render_confirmed_at: gate_render,
+        gate_views_confirmed_at: gate_views,
+        created_at,
+        updated_at,
     })
 }
 

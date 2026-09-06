@@ -3,6 +3,7 @@ mod agents;
 mod audit;
 mod character_files;
 mod execution;
+mod focus;
 mod orchestrator;
 mod routing;
 mod service;

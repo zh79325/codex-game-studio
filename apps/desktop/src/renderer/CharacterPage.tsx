@@ -1,24 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  App,
-  Card,
-  Checkbox,
-  Col,
-  Radio,
-  Row,
-  Space,
-  Steps,
-  Tag,
-  Typography,
-} from "antd";
-import { useEffect, useRef, useState } from "react";
+import { App, Card, Col, Row, Space, Steps, Tag, Typography } from "antd";
+import { useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
-import FinalConfirmationActions from "./chat/FinalConfirmationActions";
 import { useConversation } from "./chat/useConversation";
-import type { ArtifactDraft, Generation } from "./types";
+import type { ArtifactDraft, FeedbackImage, Generation } from "./types";
 
 const characterStateLabels: Record<string, string> = {
   S0_spec_drafting: "角色设定中",
@@ -34,8 +22,6 @@ export default function CharacterPage() {
   const queryClient = useQueryClient();
   const { projectId = "", characterId = "" } = useParams();
   const { canWrite, setActiveProject } = useStudio();
-  const [selectedRender, setSelectedRender] = useState<string>();
-  const [selectedViews, setSelectedViews] = useState<string[]>([]);
   const resumedContinuationKeys = useRef(new Set<string>());
 
   const project = useQuery({
@@ -134,18 +120,18 @@ export default function CharacterPage() {
     },
     onSuccess: async () => {
       message.success("人工门禁已确认");
-      setSelectedRender(undefined);
-      setSelectedViews([]);
       await refresh();
     },
   });
 
   const character = detail.data?.character;
   const generations = detail.data?.generations ?? [];
-  const renderGenerations = generations.filter(
-    (item) => item.stage === "render",
+  const pendingRenderGenerations = generations.filter(
+    (item) => item.stage === "render" && item.reviewStatus === "pending",
   );
-  const viewGenerations = generations.filter((item) => item.stage === "views");
+  const pendingViewGenerations = generations.filter(
+    (item) => item.stage === "views" && item.reviewStatus === "pending",
+  );
   const workflowSteps = detail.data?.workflowProgress.steps ?? [];
   const currentStep = workflowSteps.findIndex(
     (step) => step.status === "process" || step.status === "error",
@@ -159,14 +145,11 @@ export default function CharacterPage() {
   const isViewsConfirmation = workflowSteps.some(
     (step) => step.key === "views_confirm" && step.status === "process",
   );
-  const hasCompleteViewSelection =
-    selectedViews.length === 1 &&
-    viewGenerations.some(
-      (item) => item.id === selectedViews[0] && item.variant === "quad",
-    );
-  const hasRenderSelection = renderGenerations.some(
-    (item) => item.id === selectedRender,
-  );
+  const pendingMediaGenerations = isRenderConfirmation
+    ? pendingRenderGenerations
+    : isViewsConfirmation
+      ? pendingViewGenerations
+      : [];
 
   useEffect(() => {
     const workflowProgress = detail.data?.workflowProgress;
@@ -211,47 +194,47 @@ export default function CharacterPage() {
     }
     await action.mutateAsync({ type: "spec", draftId: draft.id });
   };
-  const confirmRender = async () => {
-    if (!selectedRender || !hasRenderSelection) {
-      throw new Error("请先选择一张效果图候选");
+  const confirmMedia = async (generation: Generation) => {
+    if (!character || generation.reviewStatus !== "pending") {
+      throw new Error("当前生成结果已变化，请刷新后重试");
     }
-    await action.mutateAsync({
-      type: "render",
-      generationId: selectedRender,
-    });
-  };
-  const confirmViews = async () => {
-    if (!hasCompleteViewSelection) {
-      throw new Error("请先选择一张完整四视图");
-    }
-    await action.mutateAsync({
-      type: "views",
-      generationIds: selectedViews,
-    });
-  };
-  const requestRevision = async (
-    stage: "spec" | "render" | "views",
-    content: string,
-  ) => {
-    if (!character) throw new Error("角色信息尚未加载");
-    const expectedState =
-      stage === "spec"
-        ? "S0_spec_drafting"
-        : stage === "render"
-          ? "S2_render_generated"
-          : "S4_views_generated";
-    if (character.state !== expectedState) {
+    if (
+      (generation.stage === "render" && character.state !== "S2_render_generated") ||
+      (generation.stage === "views" && character.state !== "S4_views_generated")
+    ) {
       throw new Error("当前角色阶段已变化，请刷新后重试");
     }
-    if (stage === "spec") {
-      await charactersApi.rejectSpec(projectId, characterId, content);
-    } else if (stage === "render") {
-      await charactersApi.rejectRender(projectId, characterId, content);
-      setSelectedRender(undefined);
-    } else {
-      await charactersApi.rejectViews(projectId, characterId, content);
-      setSelectedViews([]);
+    if (generation.stage === "views" && generation.variant !== "quad") {
+      throw new Error("请选择一张完整四视图");
     }
+    await action.mutateAsync(
+      generation.stage === "render"
+        ? { type: "render", generationId: generation.id }
+        : { type: "views", generationIds: [generation.id] },
+    );
+  };
+  const requestSpecRevision = async (content: string) => {
+    if (character?.state !== "S0_spec_drafting") {
+      throw new Error("当前角色阶段已变化，请刷新后重试");
+    }
+    await charactersApi.rejectSpec(projectId, characterId, content);
+    await refresh();
+  };
+  const requestMediaRevision = async (
+    generation: Generation,
+    content: string,
+    image?: FeedbackImage,
+  ) => {
+    if (!character || generation.reviewStatus !== "pending") {
+      throw new Error("当前生成结果已变化，请刷新后重试");
+    }
+    await charactersApi.requestGenerationRevision(
+      projectId,
+      characterId,
+      generation.id,
+      content,
+      image,
+    );
     await refresh();
   };
 
@@ -287,10 +270,12 @@ export default function CharacterPage() {
             onConfirmDraft={isSpecConfirmation ? confirmSpecDraft : undefined}
             confirmingDraft={action.isPending}
             onSubmitDraftFeedback={
-              isSpecConfirmation
-                ? (content) => requestRevision("spec", content)
-                : undefined
+              isSpecConfirmation ? requestSpecRevision : undefined
             }
+            mediaGenerations={pendingMediaGenerations}
+            onConfirmMedia={confirmMedia}
+            onSubmitMediaFeedback={requestMediaRevision}
+            confirmingMedia={action.isPending}
           />
         </Col>
         <Col xs={24} xl={9}>
@@ -311,12 +296,15 @@ export default function CharacterPage() {
               <StatusRow label="分组" value={character?.group ?? "未分组"} />
               <StatusRow label="目录" value={character?.dirName} />
               <StatusRow label="设定" value={character?.specPath} />
-              <StatusRow label="效果图" value={character?.renderPath} />
+              <StatusRow
+                label="效果图"
+                value={character?.renderPath ? "已发布" : undefined}
+              />
               <StatusRow
                 label="四视图"
                 value={
-                  character
-                    ? Object.values(character.viewPaths).join("、")
+                  character && Object.keys(character.viewPaths).length > 0
+                    ? "已发布"
                     : undefined
                 }
               />
@@ -324,50 +312,6 @@ export default function CharacterPage() {
                 Agent 审校结论仅供参考，只有这里的人工操作会推进状态。
               </Typography.Text>
             </Card>
-            {isRenderConfirmation && (
-              <GenerationGate
-                title="选择效果图定稿"
-                generations={renderGenerations}
-                selectedId={selectedRender}
-                disabled={!canWrite || conversation.isBusy}
-                confirming={action.isPending}
-                onSelect={setSelectedRender}
-                onConfirm={confirmRender}
-                onSupplement={(content) => requestRevision("render", content)}
-              />
-            )}
-            {isViewsConfirmation && (
-              <Card title="确认四视图" className="content-card">
-                <Space orientation="vertical" className="workspace-main">
-                  {viewGenerations.map((generation) => (
-                    <Checkbox
-                      key={generation.id}
-                      checked={selectedViews.includes(generation.id)}
-                      disabled={
-                        !canWrite ||
-                        conversation.isBusy ||
-                        generation.variant !== "quad"
-                      }
-                      onChange={(event) =>
-                        setSelectedViews(
-                          event.target.checked ? [generation.id] : [],
-                        )
-                      }
-                    >
-                      {generation.variant === "quad"
-                        ? "完整 2×2 四宫格"
-                        : "格式不兼容"}{" "}
-                      · {generation.filePath}
-                    </Checkbox>
-                  ))}
-                  <FinalConfirmationActions
-                    confirming={action.isPending}
-                    onConfirm={confirmViews}
-                    onSupplement={(content) => requestRevision("views", content)}
-                  />
-                </Space>
-              </Card>
-            )}
           </Space>
         </Col>
       </Row>
@@ -383,57 +327,5 @@ function StatusRow({ label, value }: { label: string; value?: string | null }) {
         {value || "未确认"}
       </Typography.Text>
     </p>
-  );
-}
-
-function GenerationGate({
-  title,
-  generations,
-  selectedId,
-  disabled,
-  confirming,
-  onSelect,
-  onConfirm,
-  onSupplement,
-}: {
-  title: string;
-  generations: Generation[];
-  selectedId?: string;
-  disabled: boolean;
-  confirming: boolean;
-  onSelect: (id: string) => void;
-  onConfirm: () => Promise<unknown>;
-  onSupplement: (content: string) => Promise<unknown>;
-}) {
-  return (
-    <Card title={title} className="content-card">
-      <Space orientation="vertical" className="workspace-main">
-        <Radio.Group
-          className="generation-options"
-          value={selectedId}
-          disabled={disabled}
-          onChange={(event) => onSelect(event.target.value as string)}
-        >
-          {generations.map((generation) => (
-            <Card size="small" key={generation.id}>
-              <Radio value={generation.id}>
-                {generation.variant ?? "候选"}
-              </Radio>
-              <Typography.Text className="path-text">
-                {generation.filePath}
-              </Typography.Text>
-            </Card>
-          ))}
-        </Radio.Group>
-        {!generations.length && (
-          <Typography.Text type="secondary">尚无可确认候选</Typography.Text>
-        )}
-        <FinalConfirmationActions
-          confirming={confirming}
-          onConfirm={onConfirm}
-          onSupplement={onSupplement}
-        />
-      </Space>
-    </Card>
   );
 }

@@ -62,6 +62,7 @@ impl CodexExecutionPort for FakeExecution {
 fn request(root: &str, key: &str) -> ExecuteTaskRequest {
     ExecuteTaskRequest {
         project_root: root.to_string(),
+        workspace_root: root.to_string(),
         conversation_id: "conversation-1".to_string(),
         conversation_turn: 1,
         target_id: "project-1".to_string(),
@@ -71,6 +72,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
         agent_code: "game_designer".to_string(),
         idempotency_key: key.to_string(),
         prompt: "design a game".to_string(),
+        local_image_paths: Vec::new(),
         context: ContextPackage {
             conversation_history: Vec::new(),
             context_version: 1,
@@ -84,6 +86,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             character_context: None,
             workflow_context: None,
             review_subject: None,
+            visual_focus: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "strict action".to_string(),

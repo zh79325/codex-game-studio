@@ -19,6 +19,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use crate::backend::CodexImagesBackend;
 use crate::dialect::ImageApiDialect;
 use crate::tool::ImageGenerationTool;
+use crate::tool::ImageGenerationTurnGate;
 
 #[derive(Clone)]
 struct ImageGenerationExtension {
@@ -106,6 +107,9 @@ impl ThreadLifecycleContributor<Config> for ImageGenerationExtension {
         Box::pin(async move {
             input
                 .thread_store
+                .insert(ImageGenerationTurnGate::default());
+            input
+                .thread_store
                 .insert(ImageGenerationExtensionConfig::from_config(
                     input.config,
                     self.resolve_save_root.as_ref(),
@@ -150,6 +154,9 @@ impl ToolContributor for ImageGenerationExtension {
         let originator = thread_store
             .get::<ThreadOriginator>()
             .map(|originator| originator.0.clone());
+        let turn_gate = thread_store
+            .get::<ImageGenerationTurnGate>()
+            .unwrap_or_else(|| Arc::new(ImageGenerationTurnGate::default()));
         config
             .tools
             .iter()
@@ -167,6 +174,7 @@ impl ToolContributor for ImageGenerationExtension {
                     thread_store.level_id().to_string(),
                     tool.model.clone(),
                     tool.tool_name.clone(),
+                    turn_gate.clone(),
                 )) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
             })
             .collect()

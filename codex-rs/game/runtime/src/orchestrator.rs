@@ -64,6 +64,7 @@ pub struct InternalExecutor {
 #[derive(Debug, Clone)]
 pub struct ExecuteTaskRequest {
     pub project_root: String,
+    pub workspace_root: String,
     pub conversation_id: String,
     pub conversation_turn: u64,
     pub target_id: String,
@@ -73,6 +74,7 @@ pub struct ExecuteTaskRequest {
     pub agent_code: String,
     pub idempotency_key: String,
     pub prompt: String,
+    pub local_image_paths: Vec<String>,
     pub context: ContextPackage,
     pub capability: Capability,
     pub internal_executors: Vec<InternalExecutor>,
@@ -249,6 +251,7 @@ impl TaskOrchestrator {
         let start_request = StartTurnRequest {
             thread_id: binding.codex_thread_id.clone(),
             attempt_id: attempt.id.as_str().to_string(),
+            media_generation_scope: task.id.as_str().to_string(),
             agent_definition: bundled_agent_definition(&request.agent_code)
                 .ok_or_else(|| {
                     ExecutionError::InvalidRequest(format!(
@@ -258,6 +261,7 @@ impl TaskOrchestrator {
                 })?
                 .to_string(),
             prompt: request.prompt,
+            local_image_paths: request.local_image_paths,
             context: request.context,
             max_output_tokens: bundled_agent_max_output_tokens(&request.agent_code),
             audit_context: Some(audit_context.clone()),
@@ -403,6 +407,7 @@ impl TaskOrchestrator {
         let request = StartTurnRequest {
             thread_id: context.codex_thread_id.clone(),
             attempt_id: retry_attempt.id.as_str().to_string(),
+            media_generation_scope: context.task_id.clone(),
             agent_definition: bundled_agent_definition(&context.agent_code)
                 .ok_or_else(|| {
                     ExecutionError::InvalidRequest(format!(
@@ -412,6 +417,7 @@ impl TaskOrchestrator {
                 })?
                 .to_string(),
             prompt,
+            local_image_paths: Vec::new(),
             context: context.context.clone(),
             max_output_tokens,
             audit_context: Some(audit_context.clone()),
@@ -549,8 +555,9 @@ impl TaskOrchestrator {
         loop {
             match execution
                 .start_thread(StartThreadRequest {
-                    cwd: request.project_root.clone(),
+                    cwd: request.workspace_root.clone(),
                     agent_code: request.agent_code.clone(),
+                    stage: request.stage.clone(),
                     route: route.clone(),
                     image_generation_tools: image_generation_tools.clone(),
                 })

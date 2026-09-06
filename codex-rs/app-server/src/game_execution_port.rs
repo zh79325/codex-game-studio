@@ -19,6 +19,7 @@ use codex_http_client::unregister_stream_response_audit;
 use codex_image_generation_extension::ImageApiDialect;
 use codex_image_generation_extension::ImageGenerationRouteOverride;
 use codex_image_generation_extension::ImageGenerationToolRouteOverride;
+use codex_image_generation_extension::ImageGenerationTurnGate;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
@@ -225,6 +226,16 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
         config.model_provider_id = request.route.provider.clone();
         let mut thread_extension_init = ExtensionDataInit::new();
         if !request.image_generation_tools.is_empty() {
+            let media_stage = match request.stage.as_str() {
+                "render" => "render",
+                "views" => "views",
+                _ => {
+                    return Err(ExecutionError::InvalidRequest(format!(
+                        "image generation is unavailable for stage {}",
+                        request.stage
+                    )));
+                }
+            };
             let mut tools = Vec::with_capacity(request.image_generation_tools.len());
             for tool in request.image_generation_tools {
                 let resolved = self.resolve_model_provider(&tool.route).await?;
@@ -239,7 +250,7 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
                     provider: resolved.provider,
                     model: resolved.model,
                     api_dialect,
-                    save_root: Some(cwd.join("tmp")),
+                    save_root: Some(cwd.join("media").join(media_stage)),
                     tool_name: tool.tool_name,
                 });
             }
@@ -267,13 +278,28 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
 
     async fn start_turn(&self, request: StartTurnRequest) -> Result<StartedTurn, ExecutionError> {
         let thread = self.thread(&request.thread_id).await?;
+        if let Some(gate) = thread
+            .thread_extension_data()
+            .get::<ImageGenerationTurnGate>()
+        {
+            gate.begin_scope(request.media_generation_scope.clone());
+        }
         let input = request
             .model_input()
             .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
-        let mut turn = TurnInputRequest::user_input(vec![UserInput::Text {
+        let mut user_input = vec![UserInput::Text {
             text: input,
             text_elements: Vec::new(),
-        }]);
+        }];
+        for path in request.local_image_paths {
+            let path = AbsolutePathBuf::from_absolute_path_checked(path)
+                .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+            user_input.push(UserInput::LocalImage {
+                path: path.to_path_buf(),
+                detail: None,
+            });
+        }
+        let mut turn = TurnInputRequest::user_input(user_input);
         if !request.context.output_schema.trim().is_empty() {
             let schema = serde_json::from_str(&request.context.output_schema).map_err(|error| {
                 ExecutionError::InvalidRequest(format!("invalid output schema: {error}"))

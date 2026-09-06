@@ -247,6 +247,18 @@ fn validate_payload(
         {
             return Err(ActionProtocolError::InvalidResult);
         }
+        if current_agent == "visual_designer"
+            && result.status == AgentResultStatus::Success
+            && (result.revision_scope.is_none()
+                || result
+                    .focus_changes_summary
+                    .as_deref()
+                    .is_none_or(|summary| summary.trim().is_empty()))
+        {
+            return Err(ActionProtocolError::InvalidPayload(
+                "视觉结果必须包含 revision_scope 和非空 focus_changes_summary".to_string(),
+            ));
+        }
     }
 
     let requires_ask_user = payload
@@ -704,6 +716,80 @@ mod tests {
             ),
             Err(ActionProtocolError::InvalidPayload(_))
         ));
+    }
+
+    #[test]
+    fn visual_designer_requires_revision_metadata_but_may_ask_before_generating() {
+        let missing_revision_metadata = output(json!({
+            "action": "handoff",
+            "target_agent": "studio_director",
+            "reason": "图片生成完成，交回总管",
+            "payload": {
+                "result": {
+                    "status": "success",
+                    "artifacts": [{ "path": "media/render/result.png" }],
+                    "error": null
+                }
+            }
+        }));
+        assert_eq!(
+            parse_agent_turn(
+                &missing_revision_metadata,
+                "visual_designer",
+                "studio_director",
+                &["studio_director".to_string()],
+            ),
+            Err(ActionProtocolError::InvalidPayload(
+                "视觉结果必须包含 revision_scope 和非空 focus_changes_summary".to_string()
+            ))
+        );
+
+        let valid_result = output(json!({
+            "action": "handoff",
+            "target_agent": "studio_director",
+            "reason": "图片生成完成，交回总管",
+            "payload": {
+                "result": {
+                    "status": "success",
+                    "artifacts": [{ "path": "media/render/result.png" }],
+                    "error": null,
+                    "revision_scope": "render",
+                    "focus_changes_summary": "收紧角色服装材质约束"
+                }
+            }
+        }));
+        assert!(
+            parse_agent_turn(
+                &valid_result,
+                "visual_designer",
+                "studio_director",
+                &["studio_director".to_string()],
+            )
+            .is_ok()
+        );
+
+        let clarification = output(json!({
+            "action": "ask_user",
+            "target_agent": null,
+            "reason": "反馈可能改变全局视觉规则，需要确认",
+            "payload": {
+                "choices": [{
+                    "item": "影响范围",
+                    "options": ["仅当前角色", "整个项目"],
+                    "recommended": ["仅当前角色"],
+                    "multiple": false
+                }]
+            }
+        }));
+        assert!(
+            parse_agent_turn(
+                &clarification,
+                "visual_designer",
+                "studio_director",
+                &["studio_director".to_string()],
+            )
+            .is_ok()
+        );
     }
 
     #[test]

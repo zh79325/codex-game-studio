@@ -53,6 +53,15 @@ pub struct ProjectMemory {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GenerationReviewStatus {
+    Pending,
+    Accepted,
+    RevisionRequested,
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Generation {
@@ -65,6 +74,9 @@ pub struct Generation {
     pub file_path: String,
     pub file_hash: Option<String>,
     pub is_final: bool,
+    pub review_status: GenerationReviewStatus,
+    pub review_feedback: Option<String>,
+    pub reviewed_at: Option<i64>,
     pub source: String,
     pub task_id: Option<String>,
     pub asset_spec: Value,

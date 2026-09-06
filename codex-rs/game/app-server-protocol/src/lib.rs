@@ -316,6 +316,9 @@ game_dto!(GameGeneration {
     file_path: String,
     file_hash: Option<String>,
     is_final: bool,
+    review_status: String,
+    review_feedback: Option<String>,
+    reviewed_at: Option<i64>,
     source: String,
     task_id: Option<String>,
     asset_spec: serde_json::Value,
@@ -405,6 +408,28 @@ game_dto!(GameGenerationRegisterResponse {
 });
 game_dto!(GameGenerationListParams { project_id: String, character_id: String, stage: Option<String> });
 game_dto!(GameGenerationListResponse { generations: Vec<GameGeneration> });
+game_dto!(GameGenerationReadMediaParams {
+    project_id: String,
+    generation_id: String
+});
+game_dto!(GameGenerationReadMediaResponse {
+    mime_type: String,
+    data_base64: String
+});
+game_dto!(GameFeedbackImage {
+    mime_type: String,
+    data_base64: String
+});
+game_dto!(GameGenerationRequestRevisionParams {
+    project_id: String,
+    character_id: String,
+    generation_id: String,
+    feedback: String,
+    image: Option<GameFeedbackImage>
+});
+game_dto!(GameGenerationRequestRevisionResponse {
+    execution_started: bool
+});
 
 game_dto!(GameTaskListParams {
     conversation_id: String

@@ -103,12 +103,23 @@ pub enum AgentResultStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualRevisionScope {
+    Render,
+    Views,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResult {
     pub status: AgentResultStatus,
     pub artifacts: Vec<BTreeMap<String, Value>>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub revision_scope: Option<VisualRevisionScope>,
+    #[serde(default)]
+    pub focus_changes_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

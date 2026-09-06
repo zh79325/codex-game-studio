@@ -1,5 +1,6 @@
 use crate::character_files::read_project_characters;
 use crate::character_files::write_character_file;
+use crate::focus;
 use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentActionPayload;
@@ -17,7 +18,9 @@ use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
 use codex_game_domain::ConversationStatus;
 use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::FeedbackImageAttachment;
 use codex_game_domain::Generation;
+use codex_game_domain::GenerationReviewStatus;
 use codex_game_domain::MAX_HANDOFFS;
 use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
@@ -28,6 +31,8 @@ use codex_game_domain::ReviewSubject;
 use codex_game_domain::Task;
 use codex_game_domain::TaskAttemptStatus;
 use codex_game_domain::TaskStatus;
+use codex_game_domain::VisualFocusContext;
+use codex_game_domain::VisualRevisionScope;
 use codex_game_domain::WorkflowContext;
 use codex_game_domain::WorkflowVerdictSummary;
 use codex_game_store::ProjectAccess;
@@ -88,6 +93,14 @@ pub struct PreparedConversationTurn {
     pub store: Arc<ProjectStore>,
 }
 
+#[derive(Debug, Clone)]
+struct GenerationRevisionTurn {
+    generation_id: String,
+    character_id: String,
+    feedback: String,
+    reviewed_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDirState {
@@ -101,6 +114,12 @@ pub struct ProjectDirState {
 pub struct ListedCharacter {
     pub character: Character,
     pub model_file_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationMedia {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,13 +717,31 @@ impl GameService {
                     )));
                 }
             };
-            let meta_backup = if let Some(character) = updated_character.as_ref() {
+            let metadata_backups = if let Some(character) = updated_character.as_ref() {
                 let project = self.read_project(&character.project_id)?;
-                let path = Path::new(&project.root)
+                let meta_path = Path::new(&project.root)
                     .join(&character.dir_name)
                     .join(".model.json");
-                let previous = fs::read_to_string(&path).ok();
-                if let Err(error) = write_character_file(&project, character) {
+                let fallback_manifest_path = (context.stage == "views"
+                    && generations
+                        .first()
+                        .is_some_and(|generation| generation.stage == "render"))
+                .then(|| focus::paths(&project, character).manifest);
+                let mut backups = vec![(meta_path.clone(), fs::read(&meta_path).ok())];
+                if let Some(path) = fallback_manifest_path.as_ref() {
+                    backups.push((path.clone(), fs::read(path).ok()));
+                }
+                let write_result = (|| -> Result<(), GameServiceError> {
+                    write_character_file(&project, character)?;
+                    if let Some(path) = fallback_manifest_path {
+                        let mut manifest = focus::read_manifest(&path)?;
+                        apply_render_refocus(&mut manifest);
+                        focus::write_manifest(&path, &manifest)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = write_result {
+                    restore_files(&backups);
                     let message = format!("Action 产物元数据写入失败：{error}");
                     let completion = store
                         .fail_action_turn(
@@ -731,9 +768,9 @@ impl GameService {
                         },
                     )));
                 }
-                Some((path, previous))
+                backups
             } else {
-                None
+                Vec::new()
             };
             let completion = match store
                 .commit_action_turn(
@@ -749,9 +786,7 @@ impl GameService {
             {
                 Ok(completion) => completion,
                 Err(error) => {
-                    if let Some((path, previous)) = meta_backup {
-                        restore_file(&path, previous.as_deref());
-                    }
+                    restore_files(&metadata_backups);
                     return Err(error.into());
                 }
             };
@@ -859,7 +894,7 @@ impl GameService {
         context: &codex_game_store::TurnAttemptContext,
         action: &AgentAction,
     ) -> Result<(Vec<Generation>, Option<Character>), GameServiceError> {
-        if context.agent_code != "visual_designer" {
+        if context.agent_code != "visual_designer" || action.action == AgentActionKind::AskUser {
             return Ok((Vec::new(), None));
         }
         let result = action.payload.result.as_ref().ok_or_else(|| {
@@ -873,7 +908,34 @@ impl GameService {
                 "图片执行成功时必须返回至少一个产物".to_string(),
             ));
         }
-        let allowed_executors: &[&str] = match context.stage.as_str() {
+        let revision_scope = result.revision_scope.ok_or_else(|| {
+            GameServiceError::InvalidAction("视觉结果必须声明 revision_scope".to_string())
+        })?;
+        let focus_changes_summary = result
+            .focus_changes_summary
+            .as_deref()
+            .filter(|summary| !summary.trim().is_empty())
+            .ok_or_else(|| {
+                GameServiceError::InvalidAction(
+                    "视觉结果必须提供非空 focus_changes_summary".to_string(),
+                )
+            })?;
+        let effective_stage = match (context.stage.as_str(), revision_scope) {
+            ("render", VisualRevisionScope::Render) => "render",
+            ("views", VisualRevisionScope::Views) => "views",
+            ("views", VisualRevisionScope::Render) => "render",
+            ("render", VisualRevisionScope::Views) => {
+                return Err(GameServiceError::InvalidAction(
+                    "render 阶段不能声明 views 修订范围".to_string(),
+                ));
+            }
+            _ => {
+                return Err(GameServiceError::InvalidAction(
+                    "图片产物只能登记到 render 或 views 阶段".to_string(),
+                ));
+            }
+        };
+        let allowed_executors: &[&str] = match effective_stage {
             "render" => &["image_t2i", "image_i2i"],
             "views" => &["image_i2i"],
             _ => {
@@ -882,7 +944,7 @@ impl GameService {
                 ));
             }
         };
-        let (project, target_kind) = {
+        let (project, target_kind, feedback_image_paths) = {
             let projects = self
                 .projects
                 .lock()
@@ -893,10 +955,19 @@ impl GameService {
                 .ok_or_else(|| {
                     GameServiceError::ConversationNotFound(context.conversation_id.clone())
                 })?;
-            let target_kind = session.conversations[&context.conversation_id]
-                .conversation
-                .target_kind;
-            (session.project.clone(), target_kind)
+            let snapshot = &session.conversations[&context.conversation_id];
+            let target_kind = snapshot.conversation.target_kind;
+            let feedback_image_paths = snapshot
+                .messages
+                .iter()
+                .filter(|message| message.turn == context.turn && message.role == "user")
+                .flat_map(|message| &message.attachments)
+                .filter_map(|attachment| {
+                    serde_json::from_value::<FeedbackImageAttachment>(attachment.clone()).ok()
+                })
+                .map(|attachment| attachment.path)
+                .collect::<Vec<_>>();
+            (session.project.clone(), target_kind, feedback_image_paths)
         };
         if target_kind != ConversationTargetKind::Character {
             return Err(GameServiceError::InvalidAction(
@@ -906,18 +977,44 @@ impl GameService {
         let mut character = self
             .read_character(project.id.as_str(), &context.target_id)
             .await?;
-        let next_state = match (context.stage.as_str(), character.state) {
-            ("render", CharacterState::S1SpecConfirmed) => Some(CharacterState::S2RenderGenerated),
-            ("render", CharacterState::S2RenderGenerated) => None,
-            ("views", CharacterState::S3RenderConfirmed) => Some(CharacterState::S4ViewsGenerated),
-            ("views", CharacterState::S4ViewsGenerated) => None,
-            _ => {
-                return Err(GameServiceError::InvalidCharacterOperation(format!(
-                    "当前角色状态不允许登记 {} 产物",
-                    context.stage
-                )));
-            }
+        let manifest = focus::ensure(&project, &character, now())?;
+        let required_feedback_refs = feedback_image_paths
+            .iter()
+            .map(|path| focus::validate_media_path(&project, &character, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let required_render_ref = if effective_stage == "views" {
+            let generation_id = manifest
+                .accepted_render_generation_id
+                .as_deref()
+                .ok_or_else(|| {
+                    GameServiceError::InvalidAction("生成四视图前必须先确认角色效果图".to_string())
+                })?;
+            let render = self
+                .project_store(project.id.as_str(), false)?
+                .read_generation(generation_id)
+                .await?
+                .filter(|generation| {
+                    generation.project_id == project.id.as_str()
+                        && generation.target_kind == "character"
+                        && generation.target_ref == character.id
+                        && generation.stage == "render"
+                        && generation.review_status == GenerationReviewStatus::Accepted
+                })
+                .ok_or_else(|| {
+                    GameServiceError::InvalidAction("四视图引用的已确认效果图记录无效".to_string())
+                })?;
+            Some(
+                focus::validate_stage_media_path(&project, &character, "render", &render.file_path)
+                    .map_err(|error| {
+                        GameServiceError::InvalidAction(format!(
+                            "四视图引用的已确认效果图路径无效：{error}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
         };
+        apply_generation_stage_transition(&mut character, effective_stage, now())?;
         if result.artifacts.len() != 1 {
             return Err(GameServiceError::InvalidAction(
                 "角色图片 Agent 每次必须且只能返回一张 2048x2048 图片".to_string(),
@@ -934,10 +1031,55 @@ impl GameService {
                 })?;
             if !allowed_executors.contains(&executor) {
                 return Err(GameServiceError::InvalidAction(format!(
-                    "{} 阶段只允许使用 {} 内部执行器",
-                    context.stage,
+                    "{effective_stage} 阶段只允许使用 {} 内部执行器",
                     allowed_executors.join(" 或 ")
                 )));
+            }
+            if required_render_ref.is_some() || !required_feedback_refs.is_empty() {
+                if executor != "image_i2i" {
+                    return Err(GameServiceError::InvalidAction(
+                        "四视图及包含反馈图片的视觉任务必须使用 image_i2i".to_string(),
+                    ));
+                }
+                let references = artifact
+                    .get("references")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        GameServiceError::InvalidAction(
+                            "image_i2i 视觉产物必须记录 references".to_string(),
+                        )
+                    })?;
+                let referenced_paths = references
+                    .iter()
+                    .map(|reference| {
+                        let path = reference.as_str().ok_or_else(|| {
+                            GameServiceError::InvalidAction(
+                                "视觉产物 references 必须是路径字符串".to_string(),
+                            )
+                        })?;
+                        focus::validate_media_path(&project, &character, path).map_err(|error| {
+                            GameServiceError::InvalidAction(format!(
+                                "视觉产物引用路径无效：{error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<HashSet<_>, _>>()?;
+                if required_feedback_refs
+                    .iter()
+                    .any(|path| !referenced_paths.contains(path))
+                {
+                    return Err(GameServiceError::InvalidAction(
+                        "image_i2i 必须引用本轮反馈图片".to_string(),
+                    ));
+                }
+                if required_render_ref
+                    .as_ref()
+                    .is_some_and(|path| !referenced_paths.contains(path))
+                {
+                    return Err(GameServiceError::InvalidAction(
+                        "四视图必须引用已确认的效果图".to_string(),
+                    ));
+                }
             }
             let file_path = artifact
                 .get("path")
@@ -945,11 +1087,6 @@ impl GameService {
                 .filter(|path| !path.trim().is_empty())
                 .ok_or_else(|| GameServiceError::InvalidAction("图片产物缺少 path".to_string()))?
                 .to_string();
-            if !Path::new(&file_path).starts_with("tmp") {
-                return Err(GameServiceError::InvalidAction(
-                    "图片执行产物必须写入项目 tmp/ 临时目录".to_string(),
-                ));
-            }
             if !paths.insert(file_path.clone()) {
                 return Err(GameServiceError::InvalidAction(
                     "图片产物路径不能重复".to_string(),
@@ -964,28 +1101,19 @@ impl GameService {
                     "角色图片产物尺寸必须为 2048x2048".to_string(),
                 ));
             }
-            let path = safe_project_path(&project.root, &file_path)?;
-            if !path.is_file() {
-                return Err(GameServiceError::InvalidCharacterOperation(format!(
-                    "生成文件不存在：{file_path}"
-                )));
-            }
-            let canonical_root = fs::canonicalize(&project.root)?;
-            let canonical_tmp = fs::canonicalize(Path::new(&project.root).join("tmp"))?;
-            let canonical_path = fs::canonicalize(&path)?;
-            if !canonical_tmp.starts_with(&canonical_root)
-                || !canonical_path.starts_with(&canonical_tmp)
-            {
-                return Err(GameServiceError::InvalidCharacterOperation(
-                    "图片执行产物必须真实位于项目 tmp/ 临时目录".to_string(),
-                ));
-            }
+            let (archived_path, file_hash) =
+                focus::import_generation_media(&project, &character, effective_stage, &file_path)
+                    .map_err(|error| {
+                    GameServiceError::InvalidCharacterOperation(format!(
+                        "图片执行产物路径无效：{error}"
+                    ))
+                })?;
             let variant = artifact
                 .get("variant")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
-                .or_else(|| (context.stage == "views").then(|| "quad".to_string()));
-            if context.stage == "views" && variant.as_deref() != Some("quad") {
+                .or_else(|| (effective_stage == "views").then(|| "quad".to_string()));
+            if effective_stage == "views" && variant.as_deref() != Some("quad") {
                 return Err(GameServiceError::InvalidAction(
                     "四视图产物必须是单张 2×2 四宫格（variant=quad）".to_string(),
                 ));
@@ -995,27 +1123,33 @@ impl GameService {
                 "submitted_by".to_string(),
                 serde_json::Value::String(context.agent_code.clone()),
             );
+            asset_spec.insert(
+                "revision_scope".to_string(),
+                serde_json::Value::String(effective_stage.to_string()),
+            );
+            asset_spec.insert(
+                "focus_changes_summary".to_string(),
+                serde_json::Value::String(focus_changes_summary.to_string()),
+            );
             generations.push(Generation {
                 id: Uuid::now_v7().to_string(),
                 project_id: project.id.as_str().to_string(),
                 target_kind: "character".to_string(),
                 target_ref: context.target_id.clone(),
-                stage: context.stage.clone(),
+                stage: effective_stage.to_string(),
                 variant,
-                file_path,
-                file_hash: Some(bytes_hash(&fs::read(&canonical_path)?)),
+                file_path: archived_path,
+                file_hash: Some(file_hash),
                 is_final: false,
+                review_status: GenerationReviewStatus::Pending,
+                review_feedback: None,
+                reviewed_at: None,
                 source: executor.to_string(),
                 task_id: Some(context.task_id.clone()),
                 asset_spec: serde_json::to_value(asset_spec)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 created_at: now(),
             });
-        }
-        if let Some(next_state) = next_state {
-            character.state = codex_game_domain::advance_character(character.state, next_state)
-                .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
-            character.updated_at = now();
         }
         Ok((generations, Some(character)))
     }
@@ -1170,6 +1304,8 @@ impl GameService {
             content,
             recipient_agent_code,
             false,
+            Vec::new(),
+            None,
         )
         .await
     }
@@ -1219,6 +1355,53 @@ impl GameService {
             content,
             Some(director_agent_code),
             true,
+            Vec::new(),
+            None,
+        )
+        .await
+    }
+
+    pub async fn prepare_director_resume_turn_with_attachments(
+        &self,
+        conversation_id: &str,
+        content: String,
+        attachments: Vec<serde_json::Value>,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let director_agent_code = self
+            .read_conversation(conversation_id)
+            .await?
+            .conversation
+            .director_agent_code;
+        self.prepare_conversation_turn_with_visibility(
+            conversation_id,
+            content,
+            Some(director_agent_code),
+            true,
+            attachments,
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_generation_revision_turn(
+        &self,
+        conversation_id: &str,
+        content: String,
+        attachments: Vec<serde_json::Value>,
+        revision: GenerationRevisionTurn,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let director_agent_code = self
+            .read_conversation(conversation_id)
+            .await?
+            .conversation
+            .director_agent_code;
+        self.prepare_conversation_turn_with_visibility(
+            conversation_id,
+            content,
+            Some(director_agent_code),
+            true,
+            attachments,
+            Some(revision),
         )
         .await
     }
@@ -1248,6 +1431,8 @@ impl GameService {
         content: String,
         recipient_agent_code: Option<String>,
         folded: bool,
+        attachments: Vec<serde_json::Value>,
+        generation_revision: Option<GenerationRevisionTurn>,
     ) -> Result<PreparedConversationTurn, GameServiceError> {
         if content.trim().is_empty() {
             return Err(GameServiceError::InvalidAction("消息不能为空".to_string()));
@@ -1340,7 +1525,7 @@ impl GameService {
                 status: MessageStatus::Completed,
                 token_count: 0,
                 folded,
-                attachments: Vec::new(),
+                attachments,
                 action: None,
                 created_at: timestamp,
             };
@@ -1367,10 +1552,24 @@ impl GameService {
                 assistant_message,
             )
         };
-        if let Err(error) = store
-            .begin_conversation_turn(&conversation, &user_message, &assistant_message)
-            .await
-        {
+        let persist_result = if let Some(revision) = generation_revision.as_ref() {
+            store
+                .begin_generation_revision_turn(
+                    &conversation,
+                    &user_message,
+                    &assistant_message,
+                    &revision.generation_id,
+                    &revision.character_id,
+                    &revision.feedback,
+                    revision.reviewed_at,
+                )
+                .await
+        } else {
+            store
+                .begin_conversation_turn(&conversation, &user_message, &assistant_message)
+                .await
+        };
+        if let Err(error) = persist_result {
             let mut projects = self
                 .projects
                 .lock()
@@ -1619,7 +1818,7 @@ impl GameService {
             .read_conversation(prepared.conversation.id.as_str())
             .await?;
         let art_bible_path = Path::new(&prepared.project.root).join("art-bible.md");
-        let art_bible = fs::read_to_string(art_bible_path).ok();
+        let mut art_bible = fs::read_to_string(art_bible_path).ok();
         let character = if prepared.conversation.target_kind == ConversationTargetKind::Character {
             let character_id = prepared.conversation.target_ref.as_deref().ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("角色会话缺少 targetRef".to_string())
@@ -1631,11 +1830,51 @@ impl GameService {
         } else {
             None
         };
-        let character_context = character
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let character_context = if prepared.agent_code == "visual_designer" {
+            let character = character.as_ref().ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(
+                    "视觉设计师必须在角色会话中运行".to_string(),
+                )
+            })?;
+            let focus_paths = focus::paths(&prepared.project, character);
+            focus::ensure(&prepared.project, character, now())?;
+            art_bible = fs::read_to_string(&focus_paths.art_bible).ok();
+            fs::read_to_string(&focus_paths.character_spec).ok()
+        } else {
+            character
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        };
+        let character_generations = if let Some(character) = character.as_ref() {
+            prepared
+                .store
+                .list_generations(
+                    prepared.project.id.as_str(),
+                    "character",
+                    character.id.as_str(),
+                    None,
+                )
+                .await?
+        } else {
+            Vec::new()
+        };
+        let visual_focus = if prepared.agent_code == "visual_designer" {
+            let character = character.as_ref().ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(
+                    "视觉设计师必须在角色会话中运行".to_string(),
+                )
+            })?;
+            let manifest = focus::ensure(&prepared.project, character, now())?;
+            Some(visual_focus_context(
+                &prepared.stage,
+                &manifest,
+                &character_generations,
+            ))
+        } else {
+            None
+        };
         let project_memories = prepared
             .store
             .list_project_memories(
@@ -1648,21 +1887,12 @@ impl GameService {
                 .store
                 .list_tasks(prepared.conversation.id.as_str())
                 .await?;
-            let generations = prepared
-                .store
-                .list_generations(
-                    prepared.project.id.as_str(),
-                    "character",
-                    character.id.as_str(),
-                    None,
-                )
-                .await?;
             Some(character_workflow_facts(
                 character,
                 &snapshot.messages,
                 &snapshot.drafts,
                 &tasks,
-                &generations,
+                &character_generations,
                 &project_memories,
             ))
         } else {
@@ -1740,6 +1970,7 @@ impl GameService {
             character_context,
             workflow_context,
             review_subject,
+            visual_focus,
             memories,
             allowed_handoffs,
             action_protocol: action_protocol_instruction(
@@ -2041,23 +2272,28 @@ impl GameService {
     ) -> Result<Vec<ListedCharacter>, GameServiceError> {
         let project = self.read_project(project_id)?;
         let disk_characters = read_project_characters(&project)?;
-        let disk_ids = disk_characters
-            .iter()
-            .map(|character| character.id.clone())
-            .collect::<HashSet<_>>();
-        let mut characters = disk_characters
+        let store = self.project_store(project_id, false)?;
+        let database_characters = store.list_characters(project_id).await?;
+        let mut database_by_id = database_characters
             .into_iter()
-            .map(|character| ListedCharacter {
+            .map(|character| (character.id.clone(), character))
+            .collect::<HashMap<_, _>>();
+        let mut characters = Vec::with_capacity(disk_characters.len() + database_by_id.len());
+        for disk_character in disk_characters {
+            let character = database_by_id
+                .remove(&disk_character.id)
+                .map(|database_character| {
+                    merge_character_runtime(disk_character.clone(), &database_character)
+                })
+                .unwrap_or(disk_character);
+            characters.push(ListedCharacter {
                 character,
                 model_file_exists: true,
-            })
-            .collect::<Vec<_>>();
+            });
+        }
         characters.extend(
-            self.project_store(project_id, false)?
-                .list_characters(project_id)
-                .await?
-                .into_iter()
-                .filter(|character| !disk_ids.contains(&character.id))
+            database_by_id
+                .into_values()
                 .map(|character| ListedCharacter {
                     character,
                     model_file_exists: false,
@@ -2089,13 +2325,31 @@ impl GameService {
         character_id: &str,
     ) -> Result<Character, GameServiceError> {
         let project = self.read_project(project_id)?;
-        let character = read_project_characters(&project)?
+        let disk_character = read_project_characters(&project)?
             .into_iter()
             .find(|character| character.id == character_id)
             .ok_or_else(|| GameServiceError::CharacterNotFound(character_id.to_string()))?;
         let store = self.project_store(project_id, false)?;
-        if store.access() == ProjectAccess::ReadWrite {
-            store.upsert_character(&character).await?;
+        let character = if let Some(database_character) =
+            store.read_character(project_id, character_id).await?
+        {
+            merge_character_runtime(disk_character, &database_character)
+        } else {
+            if store.access() == ProjectAccess::ReadWrite {
+                store.insert_character(&disk_character).await?;
+            }
+            disk_character
+        };
+        if store.access() == ProjectAccess::ReadWrite
+            && matches!(
+                character.state,
+                CharacterState::S1SpecConfirmed
+                    | CharacterState::S2RenderGenerated
+                    | CharacterState::S3RenderConfirmed
+                    | CharacterState::S4ViewsGenerated
+            )
+        {
+            focus::ensure(&project, &character, now())?;
         }
         Ok(character)
     }
@@ -2389,6 +2643,7 @@ impl GameService {
             restore_files(&backups);
             return Err(error.into());
         }
+        focus::ensure(&project, &character, timestamp)?;
         Ok(character)
     }
 
@@ -2405,6 +2660,7 @@ impl GameService {
         let project = self.read_project(project_id)?;
         let store = self.project_store(project_id, true)?;
         let mut character = self.read_character(project_id, character_id).await?;
+        focus::ensure(&project, &character, now())?;
         let next_state = match (stage, character.state) {
             ("render", CharacterState::S1SpecConfirmed) => Some(CharacterState::S2RenderGenerated),
             ("render", CharacterState::S2RenderGenerated) => None,
@@ -2431,7 +2687,10 @@ impl GameService {
         } else {
             variant
         };
-        let path = safe_project_path(&project.root, &file_path)?;
+        let path =
+            focus::validate_media_path(&project, &character, &file_path).map_err(|error| {
+                GameServiceError::InvalidCharacterOperation(format!("生成文件路径无效：{error}"))
+            })?;
         if !path.is_file() {
             return Err(GameServiceError::InvalidCharacterOperation(
                 "生成文件不存在".to_string(),
@@ -2447,12 +2706,24 @@ impl GameService {
             file_path,
             file_hash: Some(bytes_hash(&fs::read(&path)?)),
             is_final: false,
+            review_status: GenerationReviewStatus::Pending,
+            review_feedback: None,
+            reviewed_at: None,
             source,
             task_id: None,
             asset_spec,
             created_at: now(),
         };
         store.insert_generation(&generation).await?;
+        store
+            .supersede_generation_candidates(
+                project_id,
+                character_id,
+                stage,
+                &generation.id,
+                generation.created_at,
+            )
+            .await?;
         if let Some(next_state) = next_state {
             character.state = codex_game_domain::advance_character(character.state, next_state)
                 .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
@@ -2474,6 +2745,141 @@ impl GameService {
             .list_generations(project_id, "character", character_id, stage)
             .await
             .map_err(Into::into)
+    }
+
+    pub async fn read_generation_media(
+        &self,
+        project_id: &str,
+        generation_id: &str,
+    ) -> Result<GenerationMedia, GameServiceError> {
+        let store = self.project_store(project_id, false)?;
+        let generation = store
+            .read_generation(generation_id)
+            .await?
+            .filter(|generation| {
+                generation.project_id == project_id && generation.target_kind == "character"
+            })
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("媒体记录不存在".to_string())
+            })?;
+        let project = self.read_project(project_id)?;
+        let character = self
+            .read_character(project_id, &generation.target_ref)
+            .await?;
+        let path = focus::validate_media_path(&project, &character, &generation.file_path)
+            .map_err(|error| {
+                GameServiceError::InvalidCharacterOperation(format!("媒体路径无效：{error}"))
+            })?;
+        let bytes = fs::read(path)?;
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "媒体文件超过 32 MiB".to_string(),
+            ));
+        }
+        let mime_type = match image::guess_format(&bytes)
+            .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?
+        {
+            image::ImageFormat::Png => "image/png",
+            image::ImageFormat::Jpeg => "image/jpeg",
+            image::ImageFormat::WebP => "image/webp",
+            _ => {
+                return Err(GameServiceError::InvalidCharacterOperation(
+                    "当前仅支持读取 PNG、JPEG 或 WebP 图片".to_string(),
+                ));
+            }
+        };
+        Ok(GenerationMedia {
+            mime_type: mime_type.to_string(),
+            bytes,
+        })
+    }
+
+    pub async fn request_generation_revision(
+        &self,
+        project_id: &str,
+        character_id: &str,
+        generation_id: &str,
+        feedback: String,
+        feedback_image: Option<(&str, &[u8])>,
+    ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let feedback = feedback.trim();
+        if feedback.is_empty() {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "补充说明不能为空".to_string(),
+            ));
+        }
+        let project = self.read_project(project_id)?;
+        let store = self.project_store(project_id, true)?;
+        let character = self.read_character(project_id, character_id).await?;
+        let generation = store
+            .read_generation(generation_id)
+            .await?
+            .filter(|generation| {
+                generation.project_id == project_id
+                    && generation.target_kind == "character"
+                    && generation.target_ref == character_id
+                    && generation.review_status == GenerationReviewStatus::Pending
+            })
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation(
+                    "只能补充最新待审核的媒体结果".to_string(),
+                )
+            })?;
+        let latest_pending = store
+            .list_generations(
+                project_id,
+                "character",
+                character_id,
+                Some(&generation.stage),
+            )
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.review_status == GenerationReviewStatus::Pending)
+            .map(|candidate| candidate.id);
+        if latest_pending.as_deref() != Some(generation_id) {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "该媒体结果已不是最新待审核项".to_string(),
+            ));
+        }
+        focus::ensure(&project, &character, now())?;
+        let attachment = feedback_image
+            .map(|(mime_type, bytes)| {
+                focus::save_feedback_image(&project, &character, mime_type, bytes)
+            })
+            .transpose()?;
+        let attachments = attachment
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let reference_instruction = attachment.as_ref().map_or_else(String::new, |attachment| {
+            format!(
+                "\n反馈附图路径：{}。本次下一次生图必须使用 image_i2i，并在 referenced_image_paths 中至少包含该路径。",
+                attachment.path
+            )
+        });
+        let conversation = self.find_target_conversation(
+            project_id,
+            ConversationTargetKind::Character,
+            Some(character_id),
+        )?;
+        self.prepare_generation_revision_turn(
+            conversation.id.as_str(),
+            format!(
+                "用户要求修改 {} 阶段的媒体结果。反馈：{}{}。请交给视觉设计师先更新 focus 设定；有歧义必须先 ask_user，否则只生成一次后等待确认。",
+                generation.stage, feedback, reference_instruction
+            ),
+            attachments,
+            GenerationRevisionTurn {
+                generation_id: generation_id.to_string(),
+                character_id: character_id.to_string(),
+                feedback: feedback.to_string(),
+                reviewed_at: now(),
+            },
+        )
+        .await
     }
 
     pub async fn confirm_character_render(
@@ -2498,19 +2904,18 @@ impl GameService {
             .ok_or_else(|| {
                 GameServiceError::InvalidCharacterOperation("渲染记录不存在".to_string())
             })?;
-        let source = safe_project_path(&project.root, &generation.file_path)?;
-        if !source.is_file() {
+        if generation.review_status != GenerationReviewStatus::Pending {
             return Err(GameServiceError::InvalidCharacterOperation(
-                "渲染文件不存在".to_string(),
+                "只能确认最新待审核的渲染图".to_string(),
             ));
         }
-        let extension = source
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("png");
-        let relative =
-            PathBuf::from(&character.dir_name).join(format!("images/render-final.{extension}"));
-        let target = Path::new(&project.root).join(&relative);
+        focus::validate_media_path(&project, &character, &generation.file_path).map_err(
+            |error| {
+                GameServiceError::InvalidCharacterOperation(format!("渲染文件路径无效：{error}"))
+            },
+        )?;
+        let focus_paths = focus::paths(&project, &character);
+        let mut manifest = focus::ensure(&project, &character, now())?;
         let meta_path = Path::new(&project.root)
             .join(&character.dir_name)
             .join(".model.json");
@@ -2519,16 +2924,20 @@ impl GameService {
             CharacterState::S3RenderConfirmed,
         )
         .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
-        character.render_path = Some(relative.to_string_lossy().into_owned());
+        character.render_path = None;
         let timestamp = now();
         character.gate_render_confirmed_at = Some(timestamp);
         character.updated_at = timestamp;
+        manifest.accepted_render_generation_id = Some(generation_id.to_string());
+        manifest.stage = "views".to_string();
         let backups = vec![
-            (target.clone(), fs::read(&target).ok()),
+            (
+                focus_paths.manifest.clone(),
+                fs::read(&focus_paths.manifest).ok(),
+            ),
             (meta_path.clone(), fs::read(&meta_path).ok()),
         ];
-        if let Err(error) = fs::copy(source, &target)
-            .map(|_| ())
+        if let Err(error) = focus::write_manifest(&focus_paths.manifest, &manifest)
             .map_err(GameServiceError::from)
             .and_then(|_| {
                 write_character_file(&project, &character).map_err(GameServiceError::from)
@@ -2539,7 +2948,13 @@ impl GameService {
         }
         let generation_ids = [generation_id.to_string()];
         if let Err(error) = store
-            .commit_character_generation_gate("render", &generation_ids, &character, timestamp)
+            .commit_character_generation_gate(
+                "render",
+                &generation_ids,
+                &character,
+                None,
+                timestamp,
+            )
             .await
         {
             restore_files(&backups);
@@ -2581,56 +2996,137 @@ impl GameService {
                 "四视图候选必须是完整的 2×2 四宫格".to_string(),
             ));
         }
-        let source = safe_project_path(&project.root, &generation.file_path)?;
-        if !source.is_file() {
-            return Err(GameServiceError::InvalidCharacterOperation(format!(
-                "四视图文件不存在：{}",
-                generation.file_path
-            )));
+        if generation.review_status != GenerationReviewStatus::Pending {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "只能确认最新待审核的四视图".to_string(),
+            ));
         }
-        let extension = source
+        let views_source = focus::validate_media_path(&project, &character, &generation.file_path)
+            .map_err(|error| {
+                GameServiceError::InvalidCharacterOperation(format!("四视图文件路径无效：{error}"))
+            })?;
+        let focus_paths = focus::paths(&project, &character);
+        let manifest = focus::ensure(&project, &character, now())?;
+        focus::verify_baselines(&project, &character, &manifest).map_err(|error| {
+            GameServiceError::InvalidCharacterOperation(format!("发布基线冲突：{error}"))
+        })?;
+        let render_id = manifest
+            .accepted_render_generation_id
+            .as_deref()
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("缺少已确认的效果图".to_string())
+            })?;
+        let render = store
+            .list_generations(project_id, "character", character_id, Some("render"))
+            .await?
+            .into_iter()
+            .find(|candidate| {
+                candidate.id == render_id
+                    && candidate.review_status == GenerationReviewStatus::Accepted
+            })
+            .ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("已确认的效果图记录无效".to_string())
+            })?;
+        let render_source = focus::validate_media_path(&project, &character, &render.file_path)
+            .map_err(|error| {
+                GameServiceError::InvalidCharacterOperation(format!("效果图文件路径无效：{error}"))
+            })?;
+        let render_extension = render_source
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or("png");
-        let relative =
-            PathBuf::from(&character.dir_name).join(format!("images/views-final.{extension}"));
-        let target = Path::new(&project.root).join(&relative);
+        let views_extension = views_source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("png");
+        let render_relative = PathBuf::from(&character.dir_name)
+            .join(format!("images/render-final.{render_extension}"));
+        let views_relative = PathBuf::from(&character.dir_name)
+            .join(format!("images/views-final.{views_extension}"));
+        let render_target = Path::new(&project.root).join(&render_relative);
+        let views_target = Path::new(&project.root).join(&views_relative);
+        let art_bible_target = Path::new(&project.root).join("art-bible.md");
+        let character_spec_target = character
+            .spec_path
+            .as_deref()
+            .map(|path| Path::new(&project.root).join(path))
+            .unwrap_or_else(|| {
+                Path::new(&project.root)
+                    .join(&character.dir_name)
+                    .join("docs/角色定稿.md")
+            });
         let meta_path = Path::new(&project.root)
             .join(&character.dir_name)
             .join(".model.json");
-        let archived = relative.to_string_lossy().into_owned();
-        let selected = ["front", "right", "back", "left"]
-            .into_iter()
-            .map(|view| (view.to_string(), archived.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let archived_views = views_relative.to_string_lossy().into_owned();
         character.state =
             codex_game_domain::advance_character(character.state, CharacterState::S5ViewsConfirmed)
                 .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
-        character.view_paths = selected;
+        character.render_path = Some(render_relative.to_string_lossy().into_owned());
+        character.view_paths = ["front", "right", "back", "left"]
+            .into_iter()
+            .map(|view| (view.to_string(), archived_views.clone()))
+            .collect::<BTreeMap<_, _>>();
         let timestamp = now();
         character.gate_views_confirmed_at = Some(timestamp);
         character.updated_at = timestamp;
+        let art_bible = fs::read_to_string(&focus_paths.art_bible)?;
+        let character_spec = fs::read_to_string(&focus_paths.character_spec)?;
+        let version_number = store.load_art_bible_versions(project_id).await?.len() as u64 + 1;
+        let version = ArtBibleVersion {
+            id: ArtBibleVersionId::new(Uuid::now_v7().to_string()),
+            project_id: project.id.clone(),
+            version: version_number,
+            content_hash: content_hash(&art_bible),
+            source_artifact_ids: Vec::new(),
+            created_at: timestamp,
+        };
         let backups = vec![
-            (target.clone(), fs::read(&target).ok()),
+            (art_bible_target.clone(), fs::read(&art_bible_target).ok()),
+            (
+                character_spec_target.clone(),
+                fs::read(&character_spec_target).ok(),
+            ),
+            (render_target.clone(), fs::read(&render_target).ok()),
+            (views_target.clone(), fs::read(&views_target).ok()),
             (meta_path.clone(), fs::read(&meta_path).ok()),
         ];
-        if let Err(error) = fs::copy(source, &target)
-            .map(|_| ())
-            .map_err(GameServiceError::from)
-            .and_then(|_| {
-                write_character_file(&project, &character).map_err(GameServiceError::from)
-            })
-        {
+        let write_result = (|| -> Result<(), GameServiceError> {
+            write_art_bible(&art_bible_target, &art_bible)?;
+            write_art_bible(&character_spec_target, &character_spec)?;
+            fs::copy(&render_source, &render_target)?;
+            fs::copy(&views_source, &views_target)?;
+            write_character_file(&project, &character)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
             restore_files(&backups);
             return Err(error);
         }
         if let Err(error) = store
-            .commit_character_generation_gate("views", generation_ids, &character, timestamp)
+            .commit_character_generation_gate(
+                "views",
+                generation_ids,
+                &character,
+                Some((&version, &art_bible)),
+                timestamp,
+            )
             .await
         {
             restore_files(&backups);
             return Err(error.into());
         }
+        let mut projects = self
+            .projects
+            .lock()
+            .map_err(|_| GameServiceError::StateUnavailable)?;
+        let session = projects
+            .get_mut(project_id)
+            .ok_or_else(|| GameServiceError::ProjectNotFound(project_id.to_string()))?;
+        session.art_bibles.push(ArtBibleDocument {
+            version,
+            markdown: art_bible,
+        });
         Ok(character)
     }
 
@@ -3065,20 +3561,98 @@ fn build_character_workflow_progress(
     }
 }
 
+fn visual_focus_context(
+    stage: &str,
+    manifest: &focus::FocusManifest,
+    generations: &[Generation],
+) -> VisualFocusContext {
+    let accepted_render_path = manifest
+        .accepted_render_generation_id
+        .as_deref()
+        .and_then(|generation_id| {
+            generations.iter().find(|generation| {
+                generation.id == generation_id
+                    && generation.stage == "render"
+                    && generation.review_status == GenerationReviewStatus::Accepted
+            })
+        })
+        .map(|generation| generation.file_path.clone());
+    let revision_candidate_path = generations
+        .iter()
+        .find(|generation| {
+            generation.stage == stage
+                && generation.review_status == GenerationReviewStatus::RevisionRequested
+        })
+        .map(|generation| generation.file_path.clone());
+    VisualFocusContext {
+        stage: stage.to_string(),
+        accepted_render_path,
+        revision_candidate_path,
+    }
+}
+
+fn apply_render_refocus(manifest: &mut focus::FocusManifest) {
+    manifest.stage = "render".to_string();
+    manifest.accepted_render_generation_id = None;
+}
+
+fn apply_generation_stage_transition(
+    character: &mut Character,
+    stage: &str,
+    updated_at: i64,
+) -> Result<(), GameServiceError> {
+    match (stage, character.state) {
+        ("render", CharacterState::S1SpecConfirmed) => {
+            character.state = codex_game_domain::advance_character(
+                character.state,
+                CharacterState::S2RenderGenerated,
+            )
+            .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+            character.updated_at = updated_at;
+        }
+        ("render", CharacterState::S2RenderGenerated)
+        | ("views", CharacterState::S4ViewsGenerated) => {}
+        ("render", CharacterState::S3RenderConfirmed | CharacterState::S4ViewsGenerated) => {
+            character.state = CharacterState::S2RenderGenerated;
+            character.render_path = None;
+            character.view_paths.clear();
+            character.gate_render_confirmed_at = None;
+            character.gate_views_confirmed_at = None;
+            character.updated_at = updated_at;
+        }
+        ("views", CharacterState::S3RenderConfirmed) => {
+            character.state = codex_game_domain::advance_character(
+                character.state,
+                CharacterState::S4ViewsGenerated,
+            )
+            .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
+            character.updated_at = updated_at;
+        }
+        _ => {
+            return Err(GameServiceError::InvalidCharacterOperation(format!(
+                "当前角色状态不允许登记 {stage} 产物"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn merge_character_runtime(mut disk: Character, database: &Character) -> Character {
+    disk.hard_constraints = database.hard_constraints.clone();
+    disk.gate_spec_confirmed_at = database.gate_spec_confirmed_at;
+    disk.gate_render_confirmed_at = database.gate_render_confirmed_at;
+    disk.gate_views_confirmed_at = database.gate_views_confirmed_at;
+    disk.created_at = database.created_at;
+    disk.updated_at = database.updated_at;
+    disk
+}
+
 fn content_hash(content: &str) -> String {
     bytes_hash(content.as_bytes())
 }
 
 fn bytes_hash(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
-}
-
-fn restore_file(path: &Path, previous: Option<&str>) {
-    if let Some(previous) = previous {
-        let _ = write_art_bible(path, previous);
-    } else {
-        let _ = fs::remove_file(path);
-    }
 }
 
 fn restore_files(backups: &[(PathBuf, Option<Vec<u8>>)]) {
@@ -3294,6 +3868,107 @@ mod tests {
             failed_design_stage: None,
             has_running_task: false,
         }
+    }
+
+    fn test_generation(
+        id: &str,
+        stage: &str,
+        file_path: &str,
+        review_status: GenerationReviewStatus,
+    ) -> Generation {
+        Generation {
+            id: id.to_string(),
+            project_id: "project-1".to_string(),
+            target_kind: "character".to_string(),
+            target_ref: "character-1".to_string(),
+            stage: stage.to_string(),
+            variant: (stage == "views").then(|| "quad".to_string()),
+            file_path: file_path.to_string(),
+            file_hash: None,
+            is_final: false,
+            review_status,
+            review_feedback: None,
+            reviewed_at: None,
+            source: "image_i2i".to_string(),
+            task_id: None,
+            asset_spec: serde_json::json!({}),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn views_focus_context_exposes_confirmed_render_and_revision_candidate() {
+        let manifest = focus::FocusManifest {
+            art_bible_base_hash: None,
+            character_spec_base_hash: None,
+            accepted_render_generation_id: Some("render-accepted".to_string()),
+            stage: "views".to_string(),
+            created_at: 1,
+        };
+        let generations = vec![
+            test_generation(
+                "views-revision",
+                "views",
+                "characters/character-1/tmp/focus/media/views/revision.png",
+                GenerationReviewStatus::RevisionRequested,
+            ),
+            test_generation(
+                "render-accepted",
+                "render",
+                "characters/character-1/tmp/focus/media/render/accepted.png",
+                GenerationReviewStatus::Accepted,
+            ),
+        ];
+
+        assert_eq!(
+            visual_focus_context("views", &manifest, &generations),
+            VisualFocusContext {
+                stage: "views".to_string(),
+                accepted_render_path: Some(
+                    "characters/character-1/tmp/focus/media/render/accepted.png".to_string()
+                ),
+                revision_candidate_path: Some(
+                    "characters/character-1/tmp/focus/media/views/revision.png".to_string()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn render_refocus_clears_manifest_render_acceptance() {
+        let mut manifest = focus::FocusManifest {
+            art_bible_base_hash: None,
+            character_spec_base_hash: None,
+            accepted_render_generation_id: Some("render-accepted".to_string()),
+            stage: "views".to_string(),
+            created_at: 1,
+        };
+
+        apply_render_refocus(&mut manifest);
+
+        assert_eq!(manifest.stage, "render");
+        assert_eq!(manifest.accepted_render_generation_id, None);
+    }
+
+    #[test]
+    fn render_revision_from_views_invalidates_confirmed_visual_assets() {
+        let mut character = test_character(CharacterState::S4ViewsGenerated);
+        character.render_path = Some("images/render-final.png".to_string());
+        character
+            .view_paths
+            .insert("quad".to_string(), "images/views-final.png".to_string());
+        character.gate_render_confirmed_at = Some(2);
+        character.gate_views_confirmed_at = Some(3);
+
+        apply_generation_stage_transition(&mut character, "render", 4)
+            .expect("views feedback may return to render");
+
+        assert_eq!(character.state, CharacterState::S2RenderGenerated);
+        assert_eq!(character.render_path, None);
+        assert!(character.view_paths.is_empty());
+        assert_eq!(character.gate_render_confirmed_at, None);
+        assert_eq!(character.gate_views_confirmed_at, None);
+        assert_eq!(character.updated_at, 4);
     }
 
     #[test]

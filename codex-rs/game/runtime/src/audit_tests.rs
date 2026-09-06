@@ -159,8 +159,10 @@ fn start_request(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         thread_id: "thread-1".to_string(),
         attempt_id: "attempt-1".to_string(),
+        media_generation_scope: "task-1".to_string(),
         agent_definition: "agent definition".to_string(),
         prompt: prompt.to_string(),
+        local_image_paths: Vec::new(),
         context: ContextPackage {
             conversation_history: Vec::new(),
             context_version: 1,
@@ -174,6 +176,7 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             character_context: None,
             workflow_context: None,
             review_subject: None,
+            visual_focus: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "json".to_string(),

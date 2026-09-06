@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_game_app_server_protocol::*;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentCapability;
@@ -11,6 +13,7 @@ use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
 use codex_game_domain::ConversationStatus;
 use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::FeedbackImageAttachment;
 use codex_game_domain::Generation;
 use codex_game_domain::MessageStatus;
 use codex_game_domain::Project;
@@ -542,6 +545,25 @@ impl GameAppServerAdapter {
                 )
             }
         };
+        let workspace_root = if prepared.agent_code == "visual_designer" {
+            audit_target_dir.join("tmp/focus")
+        } else {
+            PathBuf::from(&prepared.project.root)
+        };
+        let local_image_paths = prepared
+            .user_message
+            .attachments
+            .iter()
+            .filter_map(|attachment| {
+                serde_json::from_value::<FeedbackImageAttachment>(attachment.clone()).ok()
+            })
+            .map(|attachment| {
+                Path::new(&prepared.project.root)
+                    .join(attachment.path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         match self
             .runtime
             .orchestrator()
@@ -550,6 +572,7 @@ impl GameAppServerAdapter {
                 prepared.store.as_ref(),
                 ExecuteTaskRequest {
                     project_root: prepared.project.root.clone(),
+                    workspace_root: workspace_root.to_string_lossy().into_owned(),
                     conversation_id: prepared.conversation.id.as_str().to_string(),
                     conversation_turn: prepared.conversation.turn,
                     target_id: prepared
@@ -563,6 +586,7 @@ impl GameAppServerAdapter {
                     agent_code: prepared.agent_code.clone(),
                     idempotency_key: prepared.assistant_message.id.clone(),
                     prompt: prepared.user_message.content.clone(),
+                    local_image_paths,
                     context,
                     capability,
                     internal_executors,
@@ -881,6 +905,57 @@ impl GameAppServerAdapter {
             .map(|generations| GameGenerationListResponse {
                 generations: generations.into_iter().map(generation_dto).collect(),
             })
+    }
+
+    pub async fn generation_read_media(
+        &self,
+        params: GameGenerationReadMediaParams,
+    ) -> Result<GameGenerationReadMediaResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .read_generation_media(&params.project_id, &params.generation_id)
+            .await
+            .map(|media| GameGenerationReadMediaResponse {
+                mime_type: media.mime_type,
+                data_base64: BASE64_STANDARD.encode(media.bytes),
+            })
+    }
+
+    pub async fn generation_request_revision<E: CodexExecutionPort>(
+        &self,
+        execution: &E,
+        params: GameGenerationRequestRevisionParams,
+    ) -> Result<(GameGenerationRequestRevisionResponse, Option<TaskExecution>), String> {
+        let image = params
+            .image
+            .map(|image| {
+                BASE64_STANDARD
+                    .decode(image.data_base64.trim())
+                    .map(|bytes| (image.mime_type, bytes))
+                    .map_err(|error| format!("反馈图片 base64 无效：{error}"))
+            })
+            .transpose()?;
+        let prepared = self
+            .runtime
+            .service()
+            .request_generation_revision(
+                &params.project_id,
+                &params.character_id,
+                &params.generation_id,
+                params.feedback,
+                image
+                    .as_ref()
+                    .map(|(mime_type, bytes)| (mime_type.as_str(), bytes.as_slice())),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let task = self.execute_prepared(execution, &prepared).await?;
+        Ok((
+            GameGenerationRequestRevisionResponse {
+                execution_started: task.is_some(),
+            },
+            task,
+        ))
     }
 
     pub async fn character_reject_spec<E: CodexExecutionPort>(
@@ -1334,6 +1409,15 @@ fn generation_dto(generation: Generation) -> GameGeneration {
         file_path: generation.file_path,
         file_hash: generation.file_hash,
         is_final: generation.is_final,
+        review_status: match generation.review_status {
+            codex_game_domain::GenerationReviewStatus::Pending => "pending",
+            codex_game_domain::GenerationReviewStatus::Accepted => "accepted",
+            codex_game_domain::GenerationReviewStatus::RevisionRequested => "revisionRequested",
+            codex_game_domain::GenerationReviewStatus::Superseded => "superseded",
+        }
+        .to_string(),
+        review_feedback: generation.review_feedback,
+        reviewed_at: generation.reviewed_at,
         source: generation.source,
         task_id: generation.task_id,
         asset_spec: generation.asset_spec,

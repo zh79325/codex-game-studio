@@ -1,10 +1,16 @@
 import { App, Card, Drawer, Typography } from "antd";
 import { useMemo, useState } from "react";
-import type { ArtifactDraft, ChoiceGroup } from "../types";
+import type {
+  ArtifactDraft,
+  ChoiceGroup,
+  FeedbackImage,
+  Generation,
+} from "../types";
 import ChoiceQuestions from "./ChoiceQuestions";
 import type { ChoiceSubmission } from "./ChoiceQuestions";
 import FinalConfirmationActions from "./FinalConfirmationActions";
 import MarkdownDocument from "./MarkdownDocument";
+import MediaConfirmationPanel from "./MediaConfirmationPanel";
 
 type PendingChoice = {
   id: string;
@@ -14,15 +20,20 @@ type PendingChoice = {
 export default function InteractionDrawer({
   choice,
   drafts,
+  mediaGenerations = [],
   disabled,
   onSubmitChoice,
   onSubmitFeedback,
   onCommitDrafts,
   onConfirmDraft,
   confirmingDraft = false,
+  onConfirmMedia,
+  onSubmitMediaFeedback,
+  confirmingMedia = false,
 }: {
   choice?: PendingChoice;
   drafts: ArtifactDraft[];
+  mediaGenerations?: Generation[];
   disabled: boolean;
   onSubmitChoice: (
     choice: PendingChoice,
@@ -32,6 +43,13 @@ export default function InteractionDrawer({
   onCommitDrafts?: (draftIds: string[]) => Promise<unknown>;
   onConfirmDraft?: (draft: ArtifactDraft) => Promise<unknown>;
   confirmingDraft?: boolean;
+  onConfirmMedia?: (generation: Generation) => Promise<unknown>;
+  onSubmitMediaFeedback?: (
+    generation: Generation,
+    content: string,
+    image?: FeedbackImage,
+  ) => Promise<unknown>;
+  confirmingMedia?: boolean;
 }) {
   const { message } = App.useApp();
   const visibleDrafts = useMemo(
@@ -39,13 +57,17 @@ export default function InteractionDrawer({
     [choice, drafts],
   );
   const dedicatedDraft = visibleDrafts.find(isDedicatedGateDraft);
+  const visibleMediaGenerations =
+    choice || visibleDrafts.length ? [] : mediaGenerations;
   const interactionKey = [
     choice?.id ?? "",
     ...visibleDrafts.map((draft) => draft.id),
+    ...visibleMediaGenerations.map((generation) => generation.id),
   ].join(":");
   const [dismissedKey, setDismissedKey] = useState("");
   const open =
-    Boolean(choice || visibleDrafts.length) && dismissedKey !== interactionKey;
+    Boolean(choice || visibleDrafts.length || visibleMediaGenerations.length) &&
+    dismissedKey !== interactionKey;
 
   const closeDrawer = () => setDismissedKey(interactionKey);
   const submitChoice = async (submission: ChoiceSubmission) => {
@@ -68,6 +90,20 @@ export default function InteractionDrawer({
     } else {
       throw new Error("当前内容缺少确认操作");
     }
+    closeDrawer();
+  };
+  const confirmMedia = async (generation: Generation) => {
+    if (!onConfirmMedia) throw new Error("当前媒体缺少确认操作");
+    await onConfirmMedia(generation);
+    closeDrawer();
+  };
+  const submitMediaFeedback = async (
+    generation: Generation,
+    content: string,
+    image?: FeedbackImage,
+  ) => {
+    if (!onSubmitMediaFeedback) throw new Error("当前媒体缺少补充操作");
+    await onSubmitMediaFeedback(generation, content, image);
     closeDrawer();
   };
 
@@ -101,8 +137,18 @@ export default function InteractionDrawer({
         {visibleDrafts.length > 0 && (
           <FinalConfirmationActions
             confirming={confirmingDraft}
+            disabled={disabled}
             onConfirm={confirmDrafts}
             onSupplement={submitFeedback}
+          />
+        )}
+        {visibleMediaGenerations.length > 0 && (
+          <MediaConfirmationPanel
+            generations={visibleMediaGenerations}
+            disabled={disabled}
+            confirming={confirmingMedia}
+            onConfirm={confirmMedia}
+            onSupplement={submitMediaFeedback}
           />
         )}
       </div>

@@ -20,6 +20,7 @@ use codex_game_domain::ConversationMessage;
 use codex_game_domain::ConversationStatus;
 use codex_game_domain::ConversationTargetKind;
 use codex_game_domain::Generation;
+use codex_game_domain::GenerationReviewStatus;
 use codex_game_domain::Interaction;
 use codex_game_domain::InteractionId;
 use codex_game_domain::MessageStatus;
@@ -223,6 +224,9 @@ CREATE TABLE IF NOT EXISTS generations (
     file_path TEXT NOT NULL,
     file_hash TEXT,
     is_final INTEGER NOT NULL DEFAULT 0,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    review_feedback TEXT,
+    reviewed_at INTEGER,
     source TEXT NOT NULL,
     task_id TEXT,
     asset_spec_json TEXT NOT NULL DEFAULT '{}',
@@ -503,6 +507,55 @@ impl ProjectStore {
         Ok(())
     }
 
+    pub async fn begin_generation_revision_turn(
+        &self,
+        conversation: &Conversation,
+        user_message: &ConversationMessage,
+        assistant_message: &ConversationMessage,
+        generation_id: &str,
+        character_id: &str,
+        feedback: &str,
+        reviewed_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut transaction = self.pool.begin().await?;
+        let reviewed = sqlx::query("UPDATE generations SET review_status = 'revisionRequested', review_feedback = ?, reviewed_at = ? WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ? AND review_status = 'pending'")
+            .bind(feedback)
+            .bind(reviewed_at)
+            .bind(generation_id)
+            .bind(conversation.project_id.as_str())
+            .bind(character_id)
+            .execute(&mut *transaction)
+            .await?;
+        if reviewed.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "generation {generation_id} is not pending"
+            )));
+        }
+        let updated = sqlx::query(
+            "UPDATE conversations SET focus_agent_code = ?, status = ?, turn = ?, title = ?, updated_at = ? WHERE id = ? AND status = 'active'",
+        )
+        .bind(&conversation.focus_agent_code)
+        .bind(conversation_status_name(conversation.status))
+        .bind(conversation.turn as i64)
+        .bind(&conversation.title)
+        .bind(conversation.updated_at)
+        .bind(conversation.id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict("该会话已有一轮正在运行".to_string()));
+        }
+        insert_message_query(user_message)
+            .execute(&mut *transaction)
+            .await?;
+        insert_message_query(assistant_message)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn begin_handoff_continuation(
         &self,
         conversation: &Conversation,
@@ -739,7 +792,24 @@ impl ProjectStore {
                 .await?;
         }
         for generation in generations {
-            sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ?, is_final = 0 WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = ? AND review_status IN ('pending', 'revisionRequested', 'accepted')")
+                .bind(created_at)
+                .bind(&generation.project_id)
+                .bind(&generation.target_kind)
+                .bind(&generation.target_ref)
+                .bind(&generation.stage)
+                .execute(&mut *transaction)
+                .await?;
+            if generation.stage == "render" {
+                sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ?, is_final = 0 WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = 'views' AND review_status IN ('pending', 'revisionRequested', 'accepted')")
+                    .bind(created_at)
+                    .bind(&generation.project_id)
+                    .bind(&generation.target_kind)
+                    .bind(&generation.target_ref)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, review_status, review_feedback, reviewed_at, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(&generation.id)
                 .bind(&generation.project_id)
                 .bind(&generation.target_kind)
@@ -749,6 +819,9 @@ impl ProjectStore {
                 .bind(&generation.file_path)
                 .bind(&generation.file_hash)
                 .bind(generation.is_final)
+                .bind(generation_review_status_name(generation.review_status))
+                .bind(&generation.review_feedback)
+                .bind(generation.reviewed_at)
                 .bind(&generation.source)
                 .bind(&generation.task_id)
                 .bind(serde_json::to_string(&generation.asset_spec)?)
@@ -1176,7 +1249,7 @@ impl ProjectStore {
 
     pub async fn insert_generation(&self, generation: &Generation) -> Result<(), StoreError> {
         self.require_writable()?;
-        sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO generations(id, project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, review_status, review_feedback, reviewed_at, source, task_id, asset_spec_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&generation.id)
             .bind(&generation.project_id)
             .bind(&generation.target_kind)
@@ -1186,6 +1259,9 @@ impl ProjectStore {
             .bind(&generation.file_path)
             .bind(&generation.file_hash)
             .bind(generation.is_final)
+            .bind(generation_review_status_name(generation.review_status))
+            .bind(&generation.review_feedback)
+            .bind(generation.reviewed_at)
             .bind(&generation.source)
             .bind(&generation.task_id)
             .bind(serde_json::to_string(&generation.asset_spec)?)
@@ -1202,7 +1278,7 @@ impl ProjectStore {
         target_ref: &str,
         stage: Option<&str>,
     ) -> Result<Vec<Generation>, StoreError> {
-        let rows = sqlx::query("SELECT id, stage, variant, file_path, file_hash, is_final, source, task_id, asset_spec_json, created_at FROM generations WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND (? IS NULL OR stage = ?) ORDER BY created_at DESC, id DESC")
+        let rows = sqlx::query("SELECT id, stage, variant, file_path, file_hash, is_final, review_status, review_feedback, reviewed_at, source, task_id, asset_spec_json, created_at FROM generations WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND (? IS NULL OR stage = ?) ORDER BY created_at DESC, id DESC")
             .bind(project_id)
             .bind(target_kind)
             .bind(target_ref)
@@ -1223,6 +1299,11 @@ impl ProjectStore {
                     file_path: row.try_get("file_path")?,
                     file_hash: row.try_get("file_hash")?,
                     is_final: row.try_get("is_final")?,
+                    review_status: parse_generation_review_status(
+                        row.try_get::<String, _>("review_status")?.as_str(),
+                    )?,
+                    review_feedback: row.try_get("review_feedback")?,
+                    reviewed_at: row.try_get("reviewed_at")?,
                     source: row.try_get("source")?,
                     task_id: row.try_get("task_id")?,
                     asset_spec: serde_json::from_str(&asset_spec)?,
@@ -1230,6 +1311,87 @@ impl ProjectStore {
                 })
             })
             .collect()
+    }
+
+    pub async fn read_generation(
+        &self,
+        generation_id: &str,
+    ) -> Result<Option<Generation>, StoreError> {
+        let row = sqlx::query("SELECT project_id, target_kind, target_ref, stage, variant, file_path, file_hash, is_final, review_status, review_feedback, reviewed_at, source, task_id, asset_spec_json, created_at FROM generations WHERE id = ?")
+            .bind(generation_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            let asset_spec: String = row.try_get("asset_spec_json")?;
+            Ok(Generation {
+                id: generation_id.to_string(),
+                project_id: row.try_get("project_id")?,
+                target_kind: row.try_get("target_kind")?,
+                target_ref: row.try_get("target_ref")?,
+                stage: row.try_get("stage")?,
+                variant: row.try_get("variant")?,
+                file_path: row.try_get("file_path")?,
+                file_hash: row.try_get("file_hash")?,
+                is_final: row.try_get("is_final")?,
+                review_status: parse_generation_review_status(
+                    row.try_get::<String, _>("review_status")?.as_str(),
+                )?,
+                review_feedback: row.try_get("review_feedback")?,
+                reviewed_at: row.try_get("reviewed_at")?,
+                source: row.try_get("source")?,
+                task_id: row.try_get("task_id")?,
+                asset_spec: serde_json::from_str(&asset_spec)?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn review_generation(
+        &self,
+        project_id: &str,
+        target_ref: &str,
+        generation_id: &str,
+        status: GenerationReviewStatus,
+        feedback: Option<&str>,
+        reviewed_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let updated = sqlx::query("UPDATE generations SET review_status = ?, review_feedback = ?, reviewed_at = ? WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ? AND review_status = 'pending'")
+            .bind(generation_review_status_name(status))
+            .bind(feedback)
+            .bind(reviewed_at)
+            .bind(generation_id)
+            .bind(project_id)
+            .bind(target_ref)
+            .execute(&self.pool)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "generation {generation_id} is not pending"
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn supersede_generation_candidates(
+        &self,
+        project_id: &str,
+        target_ref: &str,
+        stage: &str,
+        except_id: &str,
+        reviewed_at: i64,
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ? WHERE project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ? AND id != ? AND review_status IN ('pending', 'revisionRequested')")
+            .bind(reviewed_at)
+            .bind(project_id)
+            .bind(target_ref)
+            .bind(stage)
+            .bind(except_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn mark_generation_final(
@@ -1265,18 +1427,27 @@ impl ProjectStore {
         stage: &str,
         generation_ids: &[String],
         character: &Character,
+        art_bible_publication: Option<(&ArtBibleVersion, &str)>,
         created_at: i64,
     ) -> Result<(), StoreError> {
         self.require_writable()?;
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("UPDATE generations SET is_final = 0 WHERE project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ?")
+        sqlx::query("UPDATE generations SET is_final = 0 WHERE project_id = ? AND target_kind = 'character' AND target_ref = ?")
+            .bind(&character.project_id)
+            .bind(&character.id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ? WHERE project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ? AND review_status IN ('pending', 'revisionRequested')")
+            .bind(created_at)
             .bind(&character.project_id)
             .bind(&character.id)
             .bind(stage)
             .execute(&mut *transaction)
             .await?;
         for generation_id in generation_ids {
-            let updated = sqlx::query("UPDATE generations SET is_final = 1 WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ?")
+            let updated = sqlx::query("UPDATE generations SET review_status = 'accepted', reviewed_at = ?, is_final = ? WHERE id = ? AND project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = ?")
+                .bind(created_at)
+                .bind(stage == "views")
                 .bind(generation_id)
                 .bind(&character.project_id)
                 .bind(&character.id)
@@ -1286,6 +1457,25 @@ impl ProjectStore {
             if updated.rows_affected() != 1 {
                 return Err(StoreError::NotFound(format!("generation {generation_id}")));
             }
+        }
+        if stage == "views" {
+            sqlx::query("UPDATE generations SET is_final = 1 WHERE project_id = ? AND target_kind = 'character' AND target_ref = ? AND stage = 'render' AND review_status = 'accepted'")
+                .bind(&character.project_id)
+                .bind(&character.id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        if let Some((version, markdown)) = art_bible_publication {
+            sqlx::query("INSERT INTO art_bible_versions(id, project_id, version, content_hash, source_artifact_ids_json, markdown, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                .bind(version.id.as_str())
+                .bind(version.project_id.as_str())
+                .bind(version.version as i64)
+                .bind(&version.content_hash)
+                .bind(serde_json::to_string(&version.source_artifact_ids)?)
+                .bind(markdown)
+                .bind(version.created_at)
+                .execute(&mut *transaction)
+                .await?;
         }
         let updated = sqlx::query("UPDATE characters SET state = ?, spec_path = ?, render_path = ?, view_paths_json = ?, hard_constraints_json = ?, gate_spec_confirmed_at = ?, gate_render_confirmed_at = ?, gate_views_confirmed_at = ?, updated_at = ? WHERE id = ? AND project_id = ?")
             .bind(character_state_name(character.state))
@@ -1984,6 +2174,27 @@ fn parse_message_status(value: &str) -> Result<MessageStatus, sqlx::Error> {
     }
 }
 
+fn generation_review_status_name(status: GenerationReviewStatus) -> &'static str {
+    match status {
+        GenerationReviewStatus::Pending => "pending",
+        GenerationReviewStatus::Accepted => "accepted",
+        GenerationReviewStatus::RevisionRequested => "revisionRequested",
+        GenerationReviewStatus::Superseded => "superseded",
+    }
+}
+
+fn parse_generation_review_status(value: &str) -> Result<GenerationReviewStatus, sqlx::Error> {
+    match value {
+        "pending" => Ok(GenerationReviewStatus::Pending),
+        "accepted" => Ok(GenerationReviewStatus::Accepted),
+        "revisionRequested" => Ok(GenerationReviewStatus::RevisionRequested),
+        "superseded" => Ok(GenerationReviewStatus::Superseded),
+        other => Err(sqlx::Error::Decode(
+            format!("unknown generation review status: {other}").into(),
+        )),
+    }
+}
+
 fn character_state_name(state: CharacterState) -> &'static str {
     match state {
         CharacterState::S0SpecDrafting => "S0_spec_drafting",
@@ -2396,6 +2607,27 @@ async fn migrate_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "ALTER TABLE tasks ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
     )
     .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('generations') WHERE name = 'review_status'",
+        "ALTER TABLE generations ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('generations') WHERE name = 'review_feedback'",
+        "ALTER TABLE generations ADD COLUMN review_feedback TEXT",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "SELECT COUNT(*) FROM pragma_table_info('generations') WHERE name = 'reviewed_at'",
+        "ALTER TABLE generations ADD COLUMN reviewed_at INTEGER",
+    )
+    .await?;
+    sqlx::query("UPDATE generations SET review_status = CASE WHEN is_final = 1 THEN 'accepted' ELSE 'superseded' END WHERE review_status = 'pending' AND EXISTS (SELECT 1 FROM generations AS final_generation WHERE final_generation.project_id = generations.project_id AND final_generation.target_kind = generations.target_kind AND final_generation.target_ref = generations.target_ref AND final_generation.stage = generations.stage AND final_generation.is_final = 1)")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS unique_interaction_stage_agent ON tasks(interaction_id, stage, agent_code)",
     )
@@ -2476,6 +2708,228 @@ mod tests {
                 .expect("list groups"),
             vec!["主角".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn generation_revision_starts_atomically_with_feedback_message() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        let active_conversation = Conversation {
+            id: ConversationId::new("conversation-1"),
+            project_id: ProjectId::new("project-1"),
+            target_kind: ConversationTargetKind::Character,
+            target_ref: Some("character-1".to_string()),
+            title: "角色视觉".to_string(),
+            director_agent_code: "studio_director".to_string(),
+            focus_agent_code: None,
+            status: ConversationStatus::Active,
+            turn: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store
+            .insert_conversation(&active_conversation)
+            .await
+            .expect("seed conversation");
+        store
+            .insert_generation(&Generation {
+                id: "generation-1".to_string(),
+                project_id: "project-1".to_string(),
+                target_kind: "character".to_string(),
+                target_ref: "character-1".to_string(),
+                stage: "render".to_string(),
+                variant: None,
+                file_path: "characters/character-1/tmp/focus/media/render/result.png".to_string(),
+                file_hash: Some("hash".to_string()),
+                is_final: false,
+                review_status: GenerationReviewStatus::Pending,
+                review_feedback: None,
+                reviewed_at: None,
+                source: "image_i2i".to_string(),
+                task_id: Some("task-1".to_string()),
+                asset_spec: serde_json::json!({}),
+                created_at: 1,
+            })
+            .await
+            .expect("seed generation");
+
+        let mut running_conversation = active_conversation.clone();
+        running_conversation.status = ConversationStatus::Running;
+        running_conversation.focus_agent_code = Some("studio_director".to_string());
+        running_conversation.turn = 1;
+        running_conversation.updated_at = 2;
+        let user_message = ConversationMessage {
+            id: "message-user".to_string(),
+            conversation_id: running_conversation.id.clone(),
+            turn: 1,
+            role: "user".to_string(),
+            content: "请调整服装材质".to_string(),
+            agent_code: "user".to_string(),
+            recipient_agent_code: Some("studio_director".to_string()),
+            status: MessageStatus::Completed,
+            token_count: 0,
+            folded: false,
+            attachments: vec![serde_json::json!({ "kind": "feedbackImage" })],
+            action: None,
+            created_at: 2,
+        };
+        let assistant_message = ConversationMessage {
+            id: "message-assistant".to_string(),
+            conversation_id: running_conversation.id.clone(),
+            turn: 1,
+            role: "assistant".to_string(),
+            content: String::new(),
+            agent_code: "studio_director".to_string(),
+            recipient_agent_code: None,
+            status: MessageStatus::Thinking,
+            token_count: 0,
+            folded: false,
+            attachments: Vec::new(),
+            action: None,
+            created_at: 2,
+        };
+
+        store
+            .begin_generation_revision_turn(
+                &running_conversation,
+                &user_message,
+                &assistant_message,
+                "generation-1",
+                "character-1",
+                "请调整服装材质",
+                2,
+            )
+            .await
+            .expect("begin revision");
+
+        let generation = store
+            .read_generation("generation-1")
+            .await
+            .expect("read generation")
+            .expect("generation exists");
+        assert_eq!(
+            generation.review_status,
+            GenerationReviewStatus::RevisionRequested
+        );
+        assert_eq!(
+            generation.review_feedback.as_deref(),
+            Some("请调整服装材质")
+        );
+        let stored: (String, i64, String) = sqlx::query_as(
+            "SELECT status, turn, focus_agent_code FROM conversations WHERE id = 'conversation-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("read conversation");
+        assert_eq!(
+            stored,
+            ("running".to_string(), 1, "studio_director".to_string())
+        );
+        let attachments: String =
+            sqlx::query_scalar("SELECT attachments_json FROM messages WHERE id = 'message-user'")
+                .fetch_one(store.pool())
+                .await
+                .expect("read attachments");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&attachments).expect("valid attachments"),
+            serde_json::json!([{ "kind": "feedbackImage" }])
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_revision_rolls_back_when_conversation_is_busy() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        let conversation = Conversation {
+            id: ConversationId::new("conversation-1"),
+            project_id: ProjectId::new("project-1"),
+            target_kind: ConversationTargetKind::Character,
+            target_ref: Some("character-1".to_string()),
+            title: "角色视觉".to_string(),
+            director_agent_code: "studio_director".to_string(),
+            focus_agent_code: Some("studio_director".to_string()),
+            status: ConversationStatus::Running,
+            turn: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store
+            .insert_conversation(&conversation)
+            .await
+            .expect("seed busy conversation");
+        store
+            .insert_generation(&Generation {
+                id: "generation-1".to_string(),
+                project_id: "project-1".to_string(),
+                target_kind: "character".to_string(),
+                target_ref: "character-1".to_string(),
+                stage: "render".to_string(),
+                variant: None,
+                file_path: "characters/character-1/tmp/focus/media/render/result.png".to_string(),
+                file_hash: None,
+                is_final: false,
+                review_status: GenerationReviewStatus::Pending,
+                review_feedback: None,
+                reviewed_at: None,
+                source: "image_i2i".to_string(),
+                task_id: None,
+                asset_spec: serde_json::json!({}),
+                created_at: 1,
+            })
+            .await
+            .expect("seed generation");
+        let message = |id: &str, role: &str, status| ConversationMessage {
+            id: id.to_string(),
+            conversation_id: conversation.id.clone(),
+            turn: 2,
+            role: role.to_string(),
+            content: String::new(),
+            agent_code: role.to_string(),
+            recipient_agent_code: None,
+            status,
+            token_count: 0,
+            folded: false,
+            attachments: Vec::new(),
+            action: None,
+            created_at: 2,
+        };
+
+        assert!(
+            store
+                .begin_generation_revision_turn(
+                    &conversation,
+                    &message("message-user", "user", MessageStatus::Completed),
+                    &message(
+                        "message-assistant",
+                        "studio_director",
+                        MessageStatus::Thinking,
+                    ),
+                    "generation-1",
+                    "character-1",
+                    "重试",
+                    2,
+                )
+                .await
+                .is_err()
+        );
+
+        let generation = store
+            .read_generation("generation-1")
+            .await
+            .expect("read generation")
+            .expect("generation exists");
+        assert_eq!(generation.review_status, GenerationReviewStatus::Pending);
+        let message_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = 'conversation-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("count messages");
+        assert_eq!(message_count, 0);
     }
 
     #[tokio::test]

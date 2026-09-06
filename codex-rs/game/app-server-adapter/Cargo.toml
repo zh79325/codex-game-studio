@@ -13,6 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 codex-game-app-server-protocol = { workspace = true }
 codex-game-domain = { workspace = true }
 codex-game-import = { workspace = true }

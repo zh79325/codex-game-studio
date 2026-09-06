@@ -14,6 +14,7 @@ pub struct ImageGenerationToolRoute {
 pub struct StartThreadRequest {
     pub cwd: String,
     pub agent_code: String,
+    pub stage: String,
     pub route: RouteDecision,
     pub image_generation_tools: Vec<ImageGenerationToolRoute>,
 }
@@ -28,8 +29,10 @@ pub struct StartedThread {
 pub struct StartTurnRequest {
     pub thread_id: String,
     pub attempt_id: String,
+    pub media_generation_scope: String,
     pub agent_definition: String,
     pub prompt: String,
+    pub local_image_paths: Vec<String>,
     pub context: ContextPackage,
     pub max_output_tokens: Option<u64>,
     pub audit_context: Option<TurnAuditContext>,

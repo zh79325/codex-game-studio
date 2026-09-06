@@ -24,6 +24,8 @@ import type {
   ChoiceGroup,
   ConversationMessage,
   ConversationSnapshot,
+  FeedbackImage,
+  Generation,
 } from "../types";
 import InteractionDrawer from "./InteractionDrawer";
 import type { ChoiceSubmission } from "./ChoiceQuestions";
@@ -47,6 +49,14 @@ export type ChatPanelProps = {
   onConfirmDraft?: (draft: ArtifactDraft) => Promise<unknown>;
   confirmingDraft?: boolean;
   onSubmitDraftFeedback?: (content: string) => Promise<unknown>;
+  mediaGenerations?: Generation[];
+  onConfirmMedia?: (generation: Generation) => Promise<unknown>;
+  onSubmitMediaFeedback?: (
+    generation: Generation,
+    content: string,
+    image?: FeedbackImage,
+  ) => Promise<unknown>;
+  confirmingMedia?: boolean;
   choiceInteractionEnabled?: boolean;
   onResolveChoice?: (
     groups: ChoiceGroup[],
@@ -208,12 +218,16 @@ export default function ChatPanel(props: ChatPanelProps) {
       <InteractionDrawer
         choice={pendingChoice}
         drafts={props.busy ? [] : pendingDrafts}
-        disabled={!props.canWrite || (props.busy && !pendingChoice)}
+        mediaGenerations={props.mediaGenerations}
+        disabled={!props.canWrite || props.busy}
         onSubmitChoice={submitChoice}
         onSubmitFeedback={submitDraftFeedback}
         onCommitDrafts={props.onCommitDrafts}
         onConfirmDraft={props.onConfirmDraft}
         confirmingDraft={props.confirmingDraft}
+        onConfirmMedia={props.onConfirmMedia}
+        onSubmitMediaFeedback={props.onSubmitMediaFeedback}
+        confirmingMedia={props.confirmingMedia}
       />
     </>
   );

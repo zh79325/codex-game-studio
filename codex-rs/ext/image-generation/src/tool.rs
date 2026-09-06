@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -61,6 +63,48 @@ const MAX_EXECUTOR_GENERATED_IMAGE_BASE64_BYTES: usize =
     MAX_EXECUTOR_GENERATED_IMAGE_BYTES.div_ceil(3) * 4;
 const IMAGEGEN_DESCRIPTION: &str = include_str!("../imagegen_description.md");
 
+#[derive(Debug, Default)]
+pub struct ImageGenerationTurnGate {
+    state: Mutex<ImageGenerationTurnGateState>,
+}
+
+#[derive(Debug, Default)]
+struct ImageGenerationTurnGateState {
+    logical_scope: Option<String>,
+    fallback_turn_id: Option<String>,
+    consumed: bool,
+}
+
+impl ImageGenerationTurnGate {
+    /// Selects the host-owned logical turn. Re-selecting the same scope preserves consumption,
+    /// which prevents contract retries from receiving another paid image call.
+    pub fn begin_scope(&self, scope: impl Into<String>) {
+        let scope = scope.into();
+        if let Ok(mut state) = self.state.lock()
+            && state.logical_scope.as_deref() != Some(scope.as_str())
+        {
+            state.logical_scope = Some(scope);
+            state.fallback_turn_id = None;
+            state.consumed = false;
+        }
+    }
+
+    fn consume(&self, turn_id: &str) -> bool {
+        self.state.lock().is_ok_and(|mut state| {
+            if state.logical_scope.is_none() && state.fallback_turn_id.as_deref() != Some(turn_id) {
+                state.fallback_turn_id = Some(turn_id.to_string());
+                state.consumed = false;
+            }
+            if state.consumed {
+                false
+            } else {
+                state.consumed = true;
+                true
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ImageGenerationTool {
     backend: CodexImagesBackend,
@@ -68,6 +112,7 @@ pub(crate) struct ImageGenerationTool {
     thread_id: String,
     model: String,
     tool_name: Option<String>,
+    turn_gate: Arc<ImageGenerationTurnGate>,
 }
 
 impl ImageGenerationTool {
@@ -78,6 +123,7 @@ impl ImageGenerationTool {
         thread_id: String,
         model: String,
         tool_name: Option<String>,
+        turn_gate: Arc<ImageGenerationTurnGate>,
     ) -> Self {
         Self {
             backend,
@@ -85,6 +131,7 @@ impl ImageGenerationTool {
             thread_id,
             model,
             tool_name,
+            turn_gate,
         }
     }
 }
@@ -162,6 +209,11 @@ impl ImageGenerationTool {
             &self.model,
         )
         .await?;
+        if !self.turn_gate.consume(&call.turn_id) {
+            return Err(FunctionCallError::RespondToModel(
+                "本轮已经调用过一次图片生成工具；请提交当前结果并等待用户确认后再生成".to_string(),
+            ));
+        }
         call.turn_item_emitter
             .emit_started(extension_turn_item(
                 ImageGenerationItem {

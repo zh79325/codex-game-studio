@@ -154,6 +154,12 @@ export type CharacterWorkflowProgress = {
   continuationKey: string | null;
 };
 
+export type GenerationReviewStatus =
+  | "pending"
+  | "accepted"
+  | "revisionRequested"
+  | "superseded";
+
 export type Generation = {
   id: string;
   projectId: string;
@@ -164,10 +170,18 @@ export type Generation = {
   filePath: string;
   fileHash: string | null;
   isFinal: boolean;
+  reviewStatus: GenerationReviewStatus;
+  reviewFeedback: string | null;
+  reviewedAt: number | null;
   source: string;
   taskId: string | null;
   assetSpec: unknown;
   createdAt: number;
+};
+
+export type FeedbackImage = {
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  dataBase64: string;
 };
 
 export type AiLimit = {

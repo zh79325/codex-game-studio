@@ -254,6 +254,25 @@ export const charactersApi = {
         stage,
       })
     ).generations,
+  readGenerationMedia: (projectId: string, generationId: string) =>
+    rpc<{ mimeType: string; dataBase64: string }>(
+      "game/generation/readMedia",
+      { projectId, generationId },
+    ),
+  requestGenerationRevision: (
+    projectId: string,
+    characterId: string,
+    generationId: string,
+    feedback: string,
+    image?: { mimeType: string; dataBase64: string },
+  ) =>
+    rpc<{ executionStarted: boolean }>("game/generation/requestRevision", {
+      projectId,
+      characterId,
+      generationId,
+      feedback,
+      image,
+    }),
 };
 
 export const aiApi = {

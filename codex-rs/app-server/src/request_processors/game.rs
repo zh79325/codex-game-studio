@@ -535,6 +535,35 @@ impl GameRequestProcessor {
             .map_err(game_error)
     }
 
+    pub(crate) async fn generation_read_media(
+        &self,
+        params: GameGenerationReadMediaParams,
+    ) -> std::result::Result<GameGenerationReadMediaResponse, JSONRPCErrorError> {
+        self.adapter
+            .generation_read_media(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn generation_request_revision(
+        &self,
+        connection_id: ConnectionId,
+        params: GameGenerationRequestRevisionParams,
+    ) -> std::result::Result<GameGenerationRequestRevisionResponse, JSONRPCErrorError> {
+        let execution = self.execution.scoped(connection_id);
+        let (response, task_execution) = self
+            .adapter
+            .generation_request_revision(&execution, params)
+            .await
+            .map_err(game_error)?;
+        if let Some(task_execution) = task_execution {
+            let conversation_id = task_execution.binding.conversation_id.as_str().to_string();
+            self.notify_task_started(&conversation_id, task_execution)
+                .await;
+        }
+        Ok(response)
+    }
+
     pub(crate) async fn task_list(
         &self,
         params: GameTaskListParams,

@@ -19,6 +19,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
 use super::GeneratedImageOutput;
+use super::ImageGenerationTurnGate;
 use super::ImageRequest;
 use super::ImagegenArgs;
 use super::image_executor_tool_spec;
@@ -63,6 +64,28 @@ fn exposes_stage_executor_as_a_plain_function_tool() {
         panic!("stage executor should advertise a function tool");
     };
     assert_eq!(spec.name, "image_t2i");
+}
+
+#[test]
+fn image_tools_share_one_call_per_turn() {
+    let gate = ImageGenerationTurnGate::default();
+
+    assert!(gate.consume("turn-1"));
+    assert!(!gate.consume("turn-1"));
+    assert!(gate.consume("turn-2"));
+}
+
+#[test]
+fn logical_scope_survives_contract_retry_and_resets_for_new_task() {
+    let gate = ImageGenerationTurnGate::default();
+
+    gate.begin_scope("task-1");
+    assert!(gate.consume("provider-turn-1"));
+    gate.begin_scope("task-1");
+    assert!(!gate.consume("provider-turn-2"));
+
+    gate.begin_scope("task-2");
+    assert!(gate.consume("provider-turn-3"));
 }
 
 #[test]

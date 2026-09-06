@@ -1209,6 +1209,20 @@ impl MessageProcessor {
                 .generation_list(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameGenerationReadMedia { params, .. } => self
+                .game_processor
+                .generation_read_media(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameGenerationRequestRevision { params, .. } => self
+                .game_processor
+                .generation_request_revision(connection_id, params)
+                .await
+                .map(|response| {
+                    Some(ClientResponsePayload::GameGenerationRequestRevision(
+                        response,
+                    ))
+                }),
             ClientRequest::GameTaskList { params, .. } => self
                 .game_processor
                 .task_list(params)

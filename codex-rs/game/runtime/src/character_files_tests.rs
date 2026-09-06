@@ -18,25 +18,30 @@ fn character_file_uses_disk_location_as_ownership_source() {
     let document: Value =
         serde_json::from_str(&fs::read_to_string(&source_path).expect("read character document"))
             .expect("parse character document");
-    assert_eq!(document["schemaVersion"], 3);
-    assert!(document["character"].get("dirName").is_none());
-    assert!(document["character"].get("group").is_none());
-    assert!(document["character"].get("projectId").is_none());
+    let object = document.as_object().expect("flat character object");
+    assert_eq!(
+        object.keys().cloned().collect::<BTreeSet<_>>(),
+        ["id", "name", "renderPath", "specPath", "state", "viewPaths"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+    assert_eq!(document["id"], "stable-id");
+    assert_eq!(document["name"], "孙悟空");
+    assert_eq!(document["state"], "s0_spec_drafting");
 
     let target_dir = Path::new(&target.root).join("characters/共享角色/孙悟空");
     fs::create_dir_all(&target_dir).expect("target dir");
     fs::copy(source_path, target_dir.join(CHARACTER_FILE_NAME)).expect("copy character document");
 
     let loaded = read_project_characters(&target).expect("read target characters");
-    assert_eq!(
-        loaded,
-        vec![Character {
-            project_id: target.id.as_str().to_string(),
-            group: Some("共享角色".to_string()),
-            dir_name: "characters/共享角色/孙悟空".to_string(),
-            ..character
-        }]
-    );
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, character.id);
+    assert_eq!(loaded[0].name, character.name);
+    assert_eq!(loaded[0].project_id, target.id.as_str());
+    assert_eq!(loaded[0].group.as_deref(), Some("共享角色"));
+    assert_eq!(loaded[0].dir_name, "characters/共享角色/孙悟空");
+    assert!(loaded[0].hard_constraints.is_empty());
 }
 
 #[test]

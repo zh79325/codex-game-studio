@@ -75,6 +75,15 @@ pub enum MessageStatus {
     Interrupted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackImageAttachment {
+    pub kind: String,
+    pub path: String,
+    pub mime_type: String,
+    pub content_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
@@ -218,6 +227,14 @@ pub struct ReviewSubject {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VisualFocusContext {
+    pub stage: String,
+    pub accepted_render_path: Option<String>,
+    pub revision_candidate_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextPackage {
     pub conversation_history: Vec<String>,
     pub context_version: u64,
@@ -238,6 +255,8 @@ pub struct ContextPackage {
     pub workflow_context: Option<WorkflowContext>,
     #[serde(default)]
     pub review_subject: Option<ReviewSubject>,
+    #[serde(default)]
+    pub visual_focus: Option<VisualFocusContext>,
     #[serde(default)]
     pub memories: Vec<String>,
     #[serde(default)]
@@ -268,6 +287,17 @@ impl ContextPackage {
                     && subject.target_path.len() <= MAX_CONTEXT_SUMMARY_BYTES
                     && subject.content.len() <= MAX_REVIEW_SUBJECT_BYTES
             })
+            && self.visual_focus.as_ref().is_none_or(|focus| {
+                focus.stage.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && focus
+                        .accepted_render_path
+                        .as_ref()
+                        .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+                    && focus
+                        .revision_candidate_path
+                        .as_ref()
+                        .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+            })
             && self.action_protocol.len() <= MAX_CONTEXT_SUMMARY_BYTES
     }
 }
@@ -294,6 +324,7 @@ mod tests {
                 target_path: "docs/角色定稿.md".to_string(),
                 content,
             }),
+            visual_focus: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: String::new(),

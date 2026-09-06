@@ -718,6 +718,19 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameGenerationListResponse,
     },
+    #[experimental("game/generation/readMedia")]
+    GameGenerationReadMedia => "game/generation/readMedia" {
+        params: v2::GameGenerationReadMediaParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameGenerationReadMediaResponse,
+    },
+    #[experimental("game/generation/requestRevision")]
+    GameGenerationRequestRevision => "game/generation/requestRevision" {
+        params: v2::GameGenerationRequestRevisionParams,
+        serialization: global("game"),
+        manual_payload_conversion: manual,
+        response: v2::GameGenerationRequestRevisionResponse,
+    },
     #[experimental("game/task/list")]
     GameTaskList => "game/task/list" {
         params: v2::GameTaskListParams,

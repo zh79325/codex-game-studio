@@ -1,6 +1,7 @@
 use super::ConnectionSessionState;
 use super::MessageProcessor;
 use super::MessageProcessorArgs;
+use super::studio_mode_rejects_method;
 use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
 use crate::outgoing_message::ConnectionId;
@@ -271,6 +272,7 @@ async fn build_test_processor(
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
         plugin_startup_tasks: Some(PluginStartupConfig::Current),
+        studio_mode: false,
     }));
     (processor, outgoing_rx)
 }
@@ -719,4 +721,35 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
     harness.shutdown().await;
 
     Ok(())
+}
+
+#[test]
+fn studio_mode_blocks_direct_model_execution_methods() {
+    for method in [
+        "thread/start",
+        "thread/resume",
+        "thread/fork",
+        "thread/compact/start",
+        "thread/inject_items",
+        "thread/queue/start",
+        "thread/realtime/start",
+        "thread/realtime/appendAudio",
+        "thread/realtime/appendText",
+        "thread/realtime/appendSpeech",
+        "turn/start",
+        "turn/steer",
+        "review/start",
+    ] {
+        assert!(studio_mode_rejects_method(method), "method: {method}");
+    }
+    for method in [
+        "game/conversation/send",
+        "thread/read",
+        "turn/interrupt",
+        "model/list",
+        "fs/readFile",
+        "config/read",
+    ] {
+        assert!(!studio_mode_rejects_method(method), "method: {method}");
+    }
 }

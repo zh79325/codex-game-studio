@@ -76,7 +76,7 @@ pub async fn load_route_binding(
     scope_key: &str,
 ) -> Result<Option<StoredRouteBinding>, StoreError> {
     let row = sqlx::query(
-        "SELECT rb.scope_key, rb.provider_account_id, pa.provider, rb.model FROM route_bindings rb JOIN provider_accounts pa ON pa.id = rb.provider_account_id WHERE rb.scope_key = ? AND pa.enabled = 1",
+        "SELECT rb.scope_key, rb.provider_account_id, m.provider_code AS provider, rb.model FROM route_bindings rb JOIN ai_models m ON m.id = rb.provider_account_id JOIN ai_providers p ON p.code = m.provider_code WHERE rb.scope_key = ? AND m.enabled = 1 AND p.enabled = 1",
     )
     .bind(scope_key)
     .fetch_optional(studio)
@@ -193,26 +193,53 @@ async fn insert_route_event(
 mod tests {
     use super::*;
     use crate::open_studio_store;
+    use crate::upsert_ai_model;
+    use crate::upsert_ai_provider;
+    use codex_game_domain::AiCapability;
+    use codex_game_domain::AiProvider;
+    use codex_game_domain::ProviderModel;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn route_selection_and_usage_are_durable_and_idempotent() {
         let directory = tempdir().expect("tempdir");
         let studio = open_studio_store(directory.path()).await.expect("studio");
-        let account = ProviderAccountMetadata {
-            id: "account-a".to_string(),
-            provider: "provider-a".to_string(),
-            model: "model-a".to_string(),
+        let provider = AiProvider {
+            code: "provider-a".to_string(),
+            name: "Provider A".to_string(),
+            base_url: "https://example.test".to_string(),
+            driver: "openai".to_string(),
+            auth_style: "bearer".to_string(),
+            priority: 0,
             enabled: true,
+            remark: String::new(),
+            has_key: false,
+            key_mask: None,
+            models: Vec::new(),
         };
-        upsert_provider_accounts(&studio, std::slice::from_ref(&account))
+        upsert_ai_provider(&studio, &provider)
             .await
-            .expect("accounts");
+            .expect("provider");
+        let model = ProviderModel {
+            id: "account-a".to_string(),
+            provider_code: provider.code.clone(),
+            model_id: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            capabilities: vec![AiCapability::TextReasoning],
+            driver: "openai".to_string(),
+            api_path: "/v1/responses".to_string(),
+            enabled: true,
+            sort_no: 0,
+            params: serde_json::json!({}),
+            remark: String::new(),
+            limits: Vec::new(),
+        };
+        upsert_ai_model(&studio, &model).await.expect("model");
         let binding = StoredRouteBinding {
             scope_key: "conversation:c1".to_string(),
-            provider_account_id: account.id,
-            provider: account.provider,
-            model: account.model,
+            provider_account_id: model.id,
+            provider: provider.code,
+            model: model.model_id,
         };
         record_route_selection(&studio, &binding, "route.selected", "{}", 1)
             .await

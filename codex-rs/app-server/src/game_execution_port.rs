@@ -1,6 +1,8 @@
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionDataInit;
+use codex_game_app_server_adapter::AiExecutionRoute;
+use codex_game_app_server_adapter::GameAppServerAdapter;
 use codex_game_runtime::CodexExecutionPort;
 use codex_game_runtime::ExecutionError;
 use codex_game_runtime::StartThreadRequest;
@@ -15,6 +17,7 @@ use codex_http_client::StreamResponseAuditEvent;
 use codex_http_client::register_stream_response_audit;
 use codex_http_client::unregister_stream_response_audit;
 use codex_image_generation_extension::ImageGenerationRouteOverride;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
 use codex_protocol::turn_input::StartIfIdleSubmission;
@@ -22,6 +25,8 @@ use codex_protocol::turn_input::SteerSubmission;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_redacted_string::RedactedString;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::outgoing_message::ConnectionId;
@@ -31,6 +36,7 @@ use crate::request_processors::ensure_conversation_listener;
 pub(crate) struct AppServerCodexExecutionPort {
     thread_manager: Arc<ThreadManager>,
     base_config: Arc<Config>,
+    game_adapter: Arc<GameAppServerAdapter>,
     listener_context: ListenerTaskContext,
 }
 
@@ -77,11 +83,13 @@ impl AppServerCodexExecutionPort {
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
         base_config: Arc<Config>,
+        game_adapter: Arc<GameAppServerAdapter>,
         listener_context: ListenerTaskContext,
     ) -> Self {
         Self {
             thread_manager,
             base_config,
+            game_adapter,
             listener_context,
         }
     }
@@ -104,6 +112,50 @@ impl AppServerCodexExecutionPort {
             .await
             .map_err(|error| ExecutionError::Retryable(error.to_string()))
     }
+
+    async fn resolve_model_provider(
+        &self,
+        route: &codex_game_runtime::RouteDecision,
+    ) -> Result<(String, ModelProviderInfo), ExecutionError> {
+        let resolved = self
+            .game_adapter
+            .resolve_ai_execution_route(route)
+            .await
+            .map_err(|message| ExecutionError::RouteUnavailable {
+                route: route.clone(),
+                message,
+            })?;
+        let model = resolved.model.clone();
+        let provider =
+            model_provider_info(resolved).map_err(|message| ExecutionError::RouteUnavailable {
+                route: route.clone(),
+                message,
+            })?;
+        Ok((model, provider))
+    }
+}
+
+fn model_provider_info(route: AiExecutionRoute) -> Result<ModelProviderInfo, String> {
+    let (experimental_bearer_token, http_headers) = match route.auth_style.as_str() {
+        "bearer" => (Some(RedactedString::from(route.api_key)), None),
+        "x-api-key" => (
+            None,
+            Some(HashMap::from([(
+                "x-api-key".to_string(),
+                RedactedString::from(route.api_key),
+            )])),
+        ),
+        other => return Err(format!("不支持的 Provider 鉴权方式：{other}")),
+    };
+    Ok(ModelProviderInfo {
+        name: route.provider_name,
+        base_url: Some(route.base_url),
+        experimental_bearer_token,
+        http_headers,
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(60_000),
+        ..Default::default()
+    })
 }
 
 impl CodexExecutionPort for ConnectionCodexExecutionPort<'_> {
@@ -153,43 +205,17 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
     ) -> Result<StartedThread, ExecutionError> {
         let cwd = AbsolutePathBuf::from_absolute_path_checked(&request.cwd)
             .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+        let (model, provider) = self.resolve_model_provider(&request.route).await?;
         let mut config = self.base_config.as_ref().clone();
-        if !request.route.model.is_empty() {
-            config.model = Some(request.route.model.clone());
-        }
-        if !request.route.provider.is_empty() && config.model_provider_id != request.route.provider
-        {
-            config.model_provider = config
-                .model_providers
-                .get(&request.route.provider)
-                .cloned()
-                .ok_or_else(|| {
-                    ExecutionError::CapabilityUnavailable(format!(
-                        "model provider `{}` is not configured",
-                        request.route.provider
-                    ))
-                })?;
-            config.model_provider_id = request.route.provider;
-        }
+        config.model = Some(model);
+        config.model_provider = provider;
+        config.model_provider_id = request.route.provider.clone();
         let mut thread_extension_init = ExtensionDataInit::new();
         if let Some(route) = request.image_generation_route {
-            let provider = if route.provider.is_empty() {
-                config.model_provider.clone()
-            } else {
-                config
-                    .model_providers
-                    .get(&route.provider)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExecutionError::CapabilityUnavailable(format!(
-                            "image model provider `{}` is not configured",
-                            route.provider
-                        ))
-                    })?
-            };
+            let (model, provider) = self.resolve_model_provider(&route).await?;
             thread_extension_init.insert(ImageGenerationRouteOverride {
                 provider,
-                model: route.model,
+                model,
                 save_root: Some(cwd.join("tmp")),
             });
         }
@@ -287,5 +313,61 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             .await
             .map(|_| ())
             .map_err(|error| ExecutionError::Retryable(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn execution_route(auth_style: &str) -> AiExecutionRoute {
+        AiExecutionRoute {
+            provider_code: "provider".to_string(),
+            provider_name: "Provider".to_string(),
+            model: "model".to_string(),
+            driver: "openai".to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            auth_style: auth_style.to_string(),
+            api_key: "secret-key".to_string(),
+        }
+    }
+
+    #[test]
+    fn builds_redacted_bearer_auth_from_database_route() {
+        let provider = model_provider_info(execution_route("bearer")).expect("provider");
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(
+            provider
+                .experimental_bearer_token
+                .as_ref()
+                .map(|token| token.as_str()),
+            Some("secret-key")
+        );
+        assert!(provider.http_headers.is_none());
+        assert_eq!(
+            format!("{:?}", provider.experimental_bearer_token),
+            "Some(<redacted>)"
+        );
+    }
+
+    #[test]
+    fn builds_redacted_x_api_key_auth_from_database_route() {
+        let provider = model_provider_info(execution_route("x-api-key")).expect("provider");
+        assert!(provider.experimental_bearer_token.is_none());
+        assert_eq!(
+            provider
+                .http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-api-key"))
+                .map(|key| key.as_str()),
+            Some("secret-key")
+        );
+        assert_eq!(
+            format!("{:?}", provider.http_headers),
+            "Some({\"x-api-key\": <redacted>})"
+        );
     }
 }

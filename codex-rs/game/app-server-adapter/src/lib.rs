@@ -25,7 +25,6 @@ use codex_game_runtime::GameRuntime;
 use codex_game_runtime::GameServiceError;
 use codex_game_runtime::MAX_ACTION_CONTRACT_RETRIES;
 use codex_game_runtime::PreparedConversationTurn;
-use codex_game_runtime::RouteCandidate;
 use codex_game_runtime::RouteFailureKind;
 use codex_game_runtime::RouteOutcome;
 use codex_game_runtime::TaskExecution;
@@ -41,6 +40,7 @@ use std::path::PathBuf;
 
 mod ai_config;
 
+pub use ai_config::AiExecutionRoute;
 pub use ai_config::RealtimeSpeechRoute;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,17 +73,14 @@ pub struct GameAppServerAdapter {
 
 impl GameAppServerAdapter {
     pub fn new(studio_storage: PathBuf) -> Self {
-        Self {
+        let adapter = Self {
             runtime: GameRuntime::new(studio_storage.clone()),
             studio_storage,
+        };
+        if let Err(error) = adapter.cleanup_legacy_model_config() {
+            tracing::warn!("清理旧模型配置失败：{error}");
         }
-    }
-
-    pub fn new_with_routes(studio_storage: PathBuf, candidates: Vec<RouteCandidate>) -> Self {
-        Self {
-            runtime: GameRuntime::new_with_routes(studio_storage.clone(), candidates),
-            studio_storage,
-        }
+        adapter
     }
 
     pub fn ping(&self) -> GamePingResponse {
@@ -1351,12 +1348,16 @@ fn art_bible_dto(version: ArtBibleVersion) -> GameArtBibleVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_game_domain::AiCapability;
+    use codex_game_domain::AiProvider;
+    use codex_game_domain::ProviderModel;
     use codex_game_runtime::ExecutionError;
     use codex_game_runtime::StartThreadRequest;
     use codex_game_runtime::StartTurnRequest;
     use codex_game_runtime::StartedThread;
     use codex_game_runtime::StartedTurn;
     use codex_game_runtime::SteerTurnRequest;
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -1419,7 +1420,58 @@ mod tests {
         String,
     ) {
         let directory = tempdir().expect("tempdir");
-        let adapter = GameAppServerAdapter::new(directory.path().join("studio"));
+        let studio_root = directory.path().join("studio");
+        let adapter = GameAppServerAdapter::new(studio_root.clone());
+        let pool = codex_game_store::open_studio_store(&studio_root)
+            .await
+            .expect("studio store");
+        let model_id = "test-model-uuid".to_string();
+        let provider = AiProvider {
+            code: "test-provider".to_string(),
+            name: "Test Provider".to_string(),
+            base_url: "https://example.test".to_string(),
+            driver: "openai".to_string(),
+            auth_style: "bearer".to_string(),
+            priority: 0,
+            enabled: true,
+            remark: String::new(),
+            has_key: false,
+            key_mask: None,
+            models: vec![ProviderModel {
+                id: model_id.clone(),
+                provider_code: "test-provider".to_string(),
+                model_id: "test-model".to_string(),
+                display_name: "Test Model".to_string(),
+                capabilities: vec![
+                    AiCapability::TextReasoning,
+                    AiCapability::TextStructuredOutput,
+                    AiCapability::VisionAnalysis,
+                    AiCapability::ImageTextToImage,
+                    AiCapability::ImageImageToImage,
+                    AiCapability::ImageReferenceConsistency,
+                    AiCapability::VideoTextToVideo,
+                    AiCapability::VideoImageToVideo,
+                    AiCapability::Model3d,
+                    AiCapability::SpeechRecognition,
+                ],
+                driver: "openai".to_string(),
+                api_path: "/v1/responses".to_string(),
+                enabled: true,
+                sort_no: 0,
+                params: serde_json::json!({}),
+                remark: String::new(),
+                limits: Vec::new(),
+            }],
+        };
+        let bindings = bundled_agent_definitions()
+            .expect("agent definitions")
+            .into_iter()
+            .map(|agent| (agent.agent_code, vec![model_id.clone()]))
+            .collect::<HashMap<_, _>>();
+        codex_game_store::create_ai_provider_configuration(&pool, &provider, &bindings)
+            .await
+            .expect("seed AI configuration");
+        pool.close().await;
         let project_id = "project-1".to_string();
         adapter
             .project_create(

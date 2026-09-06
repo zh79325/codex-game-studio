@@ -181,10 +181,16 @@ impl RouteSelector {
         capability: Capability,
         binding_scope: &str,
     ) -> Result<(RouteDecision, RouteEvent), RouteError> {
-        let candidates = self
-            .candidates
-            .lock()
-            .map_err(|_| RouteError::StateUnavailable)?;
+        let candidates = self.candidates()?;
+        self.select_candidates(capability, binding_scope, &candidates)
+    }
+
+    pub fn select_candidates(
+        &self,
+        capability: Capability,
+        binding_scope: &str,
+        candidates: &[RouteCandidate],
+    ) -> Result<(RouteDecision, RouteEvent), RouteError> {
         let mut bindings = self
             .bindings
             .lock()

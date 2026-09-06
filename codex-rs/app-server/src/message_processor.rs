@@ -80,8 +80,6 @@ use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
-use codex_game_runtime::Capability;
-use codex_game_runtime::RouteCandidate;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
@@ -107,35 +105,30 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
 
-fn game_route_candidates(config: &Config) -> Vec<RouteCandidate> {
-    let mut providers = config.model_providers.keys().cloned().collect::<Vec<_>>();
-    providers.sort();
-    if let Some(position) = providers
-        .iter()
-        .position(|provider| provider == &config.model_provider_id)
-    {
-        providers.swap(0, position);
-    } else {
-        providers.insert(0, config.model_provider_id.clone());
-    }
-    let model = config.model.clone().unwrap_or_default();
-    providers
-        .into_iter()
-        .map(|provider| RouteCandidate {
-            account_id: provider.clone(),
-            provider,
-            model: model.clone(),
-            capabilities: vec![Capability::TextReasoning, Capability::TextStructuredOutput],
-            available: true,
-        })
-        .collect()
-}
-
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
     reject_obsolete_request_fields(&request)?;
 
     ClientRequest::try_from(request)
         .map_err(|err| invalid_request(format!("Invalid request: {err}")))
+}
+
+fn studio_mode_rejects_method(method: &str) -> bool {
+    matches!(
+        method,
+        "thread/start"
+            | "thread/resume"
+            | "thread/fork"
+            | "thread/compact/start"
+            | "thread/inject_items"
+            | "thread/queue/start"
+            | "thread/realtime/start"
+            | "thread/realtime/appendAudio"
+            | "thread/realtime/appendText"
+            | "thread/realtime/appendSpeech"
+            | "turn/start"
+            | "turn/steer"
+            | "review/start"
+    )
 }
 
 fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRPCErrorError> {
@@ -192,6 +185,7 @@ pub(crate) struct MessageProcessor {
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
     request_serialization_queues: RequestSerializationQueues,
+    studio_mode: bool,
 }
 
 #[derive(Debug)]
@@ -291,6 +285,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     /// `None` skips startup tasks; otherwise preserve the initial config-loading path.
     pub(crate) plugin_startup_tasks: Option<PluginStartupConfig>,
+    pub(crate) studio_mode: bool,
 }
 
 impl MessageProcessor {
@@ -315,6 +310,7 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            studio_mode,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -359,6 +355,7 @@ impl MessageProcessor {
                 environment_manager,
                 thread_extensions(
                     guardian_agent_spawner(thread_manager.clone()),
+                    !studio_mode,
                     ThreadExtensionDependencies {
                         event_sink: Arc::clone(&extension_event_sink),
                         auth_manager: auth_manager.clone(),
@@ -390,9 +387,9 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
-            match code_mode_session_provider {
-                Some(provider) => manager.with_code_mode_session_provider(provider),
-                None => manager,
+            match (studio_mode, code_mode_session_provider) {
+                (false, Some(provider)) => manager.with_code_mode_session_provider(provider),
+                _ => manager,
             }
         });
         let models_manager = thread_manager.get_models_manager();
@@ -469,12 +466,9 @@ impl MessageProcessor {
             log_db.clone(),
             state_db.clone(),
         );
-        let game_adapter = Arc::new(
-            codex_game_app_server_adapter::GameAppServerAdapter::new_with_routes(
-                config.codex_home.to_path_buf(),
-                game_route_candidates(&config),
-            ),
-        );
+        let game_adapter = Arc::new(codex_game_app_server_adapter::GameAppServerAdapter::new(
+            config.codex_home.to_path_buf(),
+        ));
         let (game_event_sender, game_event_receiver) = crate::game_events::game_event_channel();
         let game_listener_context = ListenerTaskContext {
             thread_manager: Arc::clone(&thread_manager),
@@ -494,6 +488,7 @@ impl MessageProcessor {
             crate::game_execution_port::AppServerCodexExecutionPort::new(
                 Arc::clone(&thread_manager),
                 Arc::clone(&config),
+                Arc::clone(&game_adapter),
                 game_listener_context,
             ),
         );
@@ -666,6 +661,7 @@ impl MessageProcessor {
             turn_processor,
             windows_sandbox_processor,
             request_serialization_queues,
+            studio_mode,
         }
     }
 
@@ -969,6 +965,12 @@ impl MessageProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         if !session.initialized() {
             return Err(invalid_request("Not initialized"));
+        }
+        if self.studio_mode && studio_mode_rejects_method(codex_request.method_name()) {
+            return Err(invalid_request(format!(
+                "Studio 模式不允许直接调用模型入口 `{}`；请使用 game/* 工作流",
+                codex_request.method_name()
+            )));
         }
 
         if let Some(reason) = codex_request.experimental_reason()

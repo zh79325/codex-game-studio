@@ -11,6 +11,7 @@ use codex_game_domain::ProviderModel;
 use codex_game_domain::ProviderPreset;
 use codex_game_domain::ProviderPresetModel;
 use codex_game_runtime::REALTIME_SPEECH_AGENT;
+use codex_game_runtime::RouteDecision;
 use codex_game_runtime::bundled_agent_definitions;
 use codex_game_store::clear_ai_breaker;
 use codex_game_store::create_ai_provider_configuration;
@@ -18,6 +19,7 @@ use codex_game_store::delete_ai_model;
 use codex_game_store::delete_ai_provider;
 use codex_game_store::list_agent_bindings;
 use codex_game_store::list_ai_providers;
+use codex_game_store::load_ai_execution_model;
 use codex_game_store::load_ai_route_models;
 use codex_game_store::open_studio_store;
 use codex_game_store::read_ai_usage;
@@ -38,7 +40,6 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-const GAME_STREAM_IDLE_TIMEOUT_MS: i64 = 60_000;
 const DEFAULT_ASR_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,17 @@ pub struct RealtimeSpeechRoute {
     pub sample_rate: u32,
     pub channels: u16,
     pub chunk_ms: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiExecutionRoute {
+    pub provider_code: String,
+    pub provider_name: String,
+    pub model: String,
+    pub driver: String,
+    pub base_url: String,
+    pub auth_style: String,
+    pub api_key: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -74,6 +86,52 @@ struct ProviderPresetFile {
 }
 
 impl GameAppServerAdapter {
+    pub async fn resolve_ai_execution_route(
+        &self,
+        route: &RouteDecision,
+    ) -> Result<AiExecutionRoute, String> {
+        let pool = open_studio_store(&self.studio_storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        let execution_model = load_ai_execution_model(&pool, &route.account_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("AI 模型不存在：{}", route.account_id))?;
+        pool.close().await;
+        if !execution_model.provider_enabled || !execution_model.model_enabled {
+            return Err(format!("AI 模型已停用：{}", route.account_id));
+        }
+        if execution_model.provider_code != route.provider
+            || execution_model.model_id != route.model
+        {
+            return Err(format!(
+                "AI 路由与数据库不一致：{} / {}",
+                route.provider, route.model
+            ));
+        }
+        let api_key = self
+            .read_secrets()?
+            .provider_keys
+            .get(&execution_model.provider_code)
+            .cloned()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| format!("Provider {} 未配置 API Key", execution_model.provider_code))?;
+        let base_url = execution_base_url(
+            &execution_model.provider_base_url,
+            &execution_model.api_path,
+            &execution_model.driver,
+        )?;
+        Ok(AiExecutionRoute {
+            provider_code: execution_model.provider_code,
+            provider_name: execution_model.provider_name,
+            model: execution_model.model_id,
+            driver: execution_model.driver,
+            base_url,
+            auth_style: execution_model.auth_style,
+            api_key,
+        })
+    }
+
     pub async fn realtime_speech_route(&self) -> Result<RealtimeSpeechRoute, String> {
         let now = current_timestamp();
         let pool = open_studio_store(&self.studio_storage)
@@ -112,7 +170,6 @@ impl GameAppServerAdapter {
             .provider_keys
             .get(&provider.code)
             .cloned()
-            .or_else(|| std::env::var(provider_key_environment(&provider.code)).ok())
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| format!("语音识别 Provider {} 未配置 API Key", provider.code))?;
         Ok(RealtimeSpeechRoute {
@@ -225,7 +282,6 @@ impl GameAppServerAdapter {
         pool.close().await;
         let secrets = self.update_provider_secret(&provider.code, params.api_key)?;
         apply_secret_metadata(&mut provider, &secrets);
-        self.sync_codex_provider_config().await?;
         Ok(provider_dto(provider))
     }
 
@@ -254,7 +310,6 @@ impl GameAppServerAdapter {
         pool.close().await;
         let secrets = self.update_provider_secret(&provider.code, params.api_key)?;
         apply_secret_metadata(&mut provider, &secrets);
-        self.sync_codex_provider_config().await?;
         Ok(provider_dto(provider))
     }
 
@@ -273,7 +328,6 @@ impl GameAppServerAdapter {
         if secrets.provider_keys.remove(&params.code).is_some() {
             self.write_secrets(&secrets)?;
         }
-        self.sync_codex_provider_config().await?;
         Ok(GameAiProviderDeleteResponse {})
     }
 
@@ -290,7 +344,6 @@ impl GameAppServerAdapter {
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
-        self.sync_codex_provider_config().await?;
         Ok(model_dto(model))
     }
 
@@ -305,7 +358,6 @@ impl GameAppServerAdapter {
             .await
             .map_err(|error| error.to_string())?;
         pool.close().await;
-        self.sync_codex_provider_config().await?;
         Ok(GameAiModelDeleteResponse {})
     }
 
@@ -486,7 +538,6 @@ impl GameAppServerAdapter {
             if secrets.provider_keys.len() != previous_secret_count {
                 self.write_secrets(&secrets)?;
             }
-            self.sync_codex_provider_config().await?;
         }
         Ok(GameAiConfigImportResponse {
             provider_count,
@@ -495,90 +546,55 @@ impl GameAppServerAdapter {
         })
     }
 
-    async fn sync_codex_provider_config(&self) -> Result<(), String> {
-        let pool = open_studio_store(&self.studio_storage)
-            .await
-            .map_err(|error| error.to_string())?;
-        let providers = list_ai_providers(&pool)
-            .await
-            .map_err(|error| error.to_string())?;
-        pool.close().await;
-        fs::create_dir_all(&self.studio_storage).map_err(|error| error.to_string())?;
-        let config_path = self.studio_storage.join("config.toml");
-        let mut config = match fs::read_to_string(&config_path) {
-            Ok(document) => document
-                .parse::<toml::Table>()
-                .map_err(|error| format!("invalid project-local config.toml: {error}"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-            Err(error) => return Err(error.to_string()),
-        };
+    pub fn cleanup_legacy_model_config(&self) -> Result<(), String> {
         let managed_path = self
             .studio_storage
             .parent()
             .ok_or_else(|| "invalid project-local Codex home".to_string())?
             .join("codex-provider-codes.json");
-        let previous = fs::read_to_string(&managed_path)
-            .ok()
-            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-            .unwrap_or_default();
-        let model_providers = config
-            .entry("model_providers")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .ok_or_else(|| "config.toml model_providers must be a table".to_string())?;
-        for code in previous {
-            model_providers.remove(&code);
-        }
-        let mut managed = Vec::with_capacity(providers.len());
-        for provider in providers {
-            let Some(base_url) = responses_base_url(&provider) else {
-                continue;
-            };
-            managed.push(provider.code.clone());
-            let mut entry = toml::Table::new();
-            entry.insert("name".to_string(), toml::Value::String(provider.name));
-            if !base_url.is_empty() {
-                entry.insert("base_url".to_string(), toml::Value::String(base_url));
+        let managed = match fs::read_to_string(&managed_path) {
+            Ok(value) => serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|error| format!("invalid managed Provider marker: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        let config_path = self.studio_storage.join("config.toml");
+        let mut config = match fs::read_to_string(&config_path) {
+            Ok(document) => document
+                .parse::<toml::Table>()
+                .map_err(|error| format!("invalid project-local config.toml: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::remove_file(managed_path).map_err(|error| error.to_string())?;
+                return Ok(());
             }
-            let environment = provider_key_environment(&provider.code);
-            match provider.auth_style.as_str() {
-                "bearer" => {
-                    entry.insert("env_key".to_string(), toml::Value::String(environment));
-                }
-                "x-api-key" => {
-                    let mut headers = toml::Table::new();
-                    headers.insert("x-api-key".to_string(), toml::Value::String(environment));
-                    entry.insert("env_http_headers".to_string(), toml::Value::Table(headers));
-                }
-                _ => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut changed = false;
+        let remove_model_providers = if let Some(value) = config.get_mut("model_providers") {
+            let model_providers = value
+                .as_table_mut()
+                .ok_or_else(|| "config.toml model_providers must be a table".to_string())?;
+            for code in managed {
+                changed |= model_providers.remove(&code).is_some();
             }
-            entry.insert(
-                "wire_api".to_string(),
-                toml::Value::String("responses".to_string()),
-            );
-            entry.insert(
-                "requires_openai_auth".to_string(),
-                toml::Value::Boolean(false),
-            );
-            entry.insert(
-                "stream_idle_timeout_ms".to_string(),
-                toml::Value::Integer(GAME_STREAM_IDLE_TIMEOUT_MS),
-            );
-            entry.insert("stream_max_retries".to_string(), toml::Value::Integer(0));
-            model_providers.insert(provider.code, toml::Value::Table(entry));
+            model_providers.is_empty()
+        } else {
+            false
+        };
+        if remove_model_providers {
+            config.remove("model_providers");
+            changed = true;
         }
-        let temporary = config_path.with_extension("toml.tmp");
-        fs::write(
-            &temporary,
-            toml::to_string_pretty(&config).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        fs::rename(temporary, config_path).map_err(|error| error.to_string())?;
-        fs::write(
-            managed_path,
-            serde_json::to_vec_pretty(&managed).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        if changed {
+            let temporary = config_path.with_extension("toml.tmp");
+            fs::write(
+                &temporary,
+                toml::to_string_pretty(&config).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            fs::rename(temporary, config_path).map_err(|error| error.to_string())?;
+        }
+        fs::remove_file(managed_path).map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -733,24 +749,6 @@ fn validate_presets(presets: &[ProviderPreset]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn responses_base_url(provider: &AiProvider) -> Option<String> {
-    let model = provider.models.iter().find(|model| {
-        model.enabled && matches!(model.driver.as_str(), "openai" | "openai_compat")
-    })?;
-    let base = provider.base_url.trim_end_matches('/');
-    let mut api_path = model.api_path.trim().trim_end_matches('/');
-    if let Some(prefix) = api_path.strip_suffix("/responses") {
-        api_path = prefix;
-    }
-    if api_path.is_empty() {
-        Some(base.to_string())
-    } else if base.is_empty() {
-        Some(api_path.to_string())
-    } else {
-        Some(format!("{base}/{}", api_path.trim_start_matches('/')))
-    }
 }
 
 fn validate_import_bundle(bundle: &ExportedAiConfig) -> Result<(), String> {
@@ -1101,6 +1099,17 @@ fn limit_kind_name(kind: &LimitKind) -> String {
     .to_string()
 }
 
+fn execution_base_url(base_url: &str, api_path: &str, driver: &str) -> Result<String, String> {
+    let api_root = match driver {
+        "openai" | "openai_compat" => api_path.trim_end_matches("/responses"),
+        "ark_image" => api_path
+            .trim_end_matches("/images/generations")
+            .trim_end_matches("/images/edits"),
+        other => return Err(format!("不支持的模型 driver：{other}")),
+    };
+    Ok(join_endpoint(base_url, api_root))
+}
+
 fn join_endpoint(base_url: &str, api_path: &str) -> String {
     format!(
         "{}/{}",
@@ -1132,19 +1141,6 @@ fn current_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn provider_key_environment(code: &str) -> String {
-    format!(
-        "CODEX_GAME_PROVIDER_{}_API_KEY",
-        code.chars()
-            .map(|character| if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    )
 }
 
 fn mask_key(key: &str) -> String {
@@ -1272,6 +1268,149 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[tokio::test]
+    async fn resolves_text_and_image_execution_routes_from_database_and_secrets() {
+        let directory = tempdir().expect("tempdir");
+        let codex_home = directory.path().join(".codex-game/local/codex-home");
+        let adapter = GameAppServerAdapter::new(codex_home);
+
+        let mut text_provider = provider_dto_for_test();
+        text_provider.base_url = "https://text.example".to_string();
+        text_provider.models.push(GameAiModel {
+            id: "text-model-uuid".to_string(),
+            provider_code: text_provider.code.clone(),
+            model_id: "text-model".to_string(),
+            display_name: "Text Model".to_string(),
+            capabilities: vec!["text_reasoning".to_string()],
+            driver: "openai_compat".to_string(),
+            api_path: "/v1/responses".to_string(),
+            enabled: true,
+            sort_no: 0,
+            params_json: "{}".to_string(),
+            remark: String::new(),
+            limits: Vec::new(),
+        });
+        adapter
+            .ai_provider_create(GameAiProviderCreateParams {
+                provider: text_provider,
+                api_key: Some("text-secret".to_string()),
+                agent_bindings: Vec::new(),
+            })
+            .await
+            .expect("create text provider");
+
+        let mut image_provider = provider_dto_for_test();
+        image_provider.code = "ark-images".to_string();
+        image_provider.name = "Ark Images".to_string();
+        image_provider.base_url = "https://image.example/api/v3".to_string();
+        image_provider.driver = "ark_image".to_string();
+        image_provider.auth_style = "x-api-key".to_string();
+        image_provider.models.push(GameAiModel {
+            id: "image-model-uuid".to_string(),
+            provider_code: image_provider.code.clone(),
+            model_id: "image-model".to_string(),
+            display_name: "Image Model".to_string(),
+            capabilities: vec!["image_text_to_image".to_string()],
+            driver: "ark_image".to_string(),
+            api_path: "/images/generations".to_string(),
+            enabled: true,
+            sort_no: 0,
+            params_json: "{}".to_string(),
+            remark: String::new(),
+            limits: Vec::new(),
+        });
+        adapter
+            .ai_provider_create(GameAiProviderCreateParams {
+                provider: image_provider,
+                api_key: Some("image-secret".to_string()),
+                agent_bindings: Vec::new(),
+            })
+            .await
+            .expect("create image provider");
+
+        let text = adapter
+            .resolve_ai_execution_route(&RouteDecision {
+                account_id: "text-model-uuid".to_string(),
+                provider: "test-provider".to_string(),
+                model: "text-model".to_string(),
+            })
+            .await
+            .expect("resolve text route");
+        assert_eq!(text.base_url, "https://text.example/v1");
+        assert_eq!(text.auth_style, "bearer");
+        assert_eq!(text.api_key, "text-secret");
+
+        let image = adapter
+            .resolve_ai_execution_route(&RouteDecision {
+                account_id: "image-model-uuid".to_string(),
+                provider: "ark-images".to_string(),
+                model: "image-model".to_string(),
+            })
+            .await
+            .expect("resolve image route");
+        assert_eq!(image.base_url, "https://image.example/api/v3/");
+        assert_eq!(image.auth_style, "x-api-key");
+        assert_eq!(image.api_key, "image-secret");
+
+        let missing_key_route = RouteDecision {
+            account_id: "text-model-uuid".to_string(),
+            provider: "test-provider".to_string(),
+            model: "text-model".to_string(),
+        };
+        fs::remove_file(directory.path().join(".codex-game/local/ai-secrets.json"))
+            .expect("remove secrets");
+        let error = adapter
+            .resolve_ai_execution_route(&missing_key_route)
+            .await
+            .err()
+            .expect("missing key must fail");
+        assert!(error.contains("未配置 API Key"));
+    }
+
+    #[test]
+    fn cleanup_removes_only_managed_legacy_model_providers() {
+        let directory = tempdir().expect("tempdir");
+        let local = directory.path().join(".codex-game/local");
+        let codex_home = local.join("codex-home");
+        fs::create_dir_all(&codex_home).expect("create codex home");
+        fs::write(
+            codex_home.join("config.toml"),
+            r#"
+model = "legacy-model"
+model_provider = "managed"
+
+[model_providers.managed]
+base_url = "https://managed.example/v1"
+
+[model_providers.user_owned]
+base_url = "https://user.example/v1"
+
+[mcp_servers.local]
+command = "node"
+"#,
+        )
+        .expect("write config");
+        fs::write(local.join("codex-provider-codes.json"), r#"["managed"]"#)
+            .expect("write managed marker");
+
+        let adapter = GameAppServerAdapter::new(codex_home.clone());
+        adapter
+            .cleanup_legacy_model_config()
+            .expect("cleanup is idempotent");
+
+        let config = fs::read_to_string(codex_home.join("config.toml"))
+            .expect("read cleaned config")
+            .parse::<toml::Table>()
+            .expect("parse cleaned config");
+        let providers = config["model_providers"]
+            .as_table()
+            .expect("model providers");
+        assert!(!providers.contains_key("managed"));
+        assert!(providers.contains_key("user_owned"));
+        assert!(config.contains_key("mcp_servers"));
+        assert!(!local.join("codex-provider-codes.json").exists());
     }
 
     #[test]

@@ -49,30 +49,17 @@ impl Default for GameRuntime {
 }
 
 impl GameRuntime {
-    pub fn new(studio_storage: PathBuf) -> Self {
-        Self::new_with_routes(
-            studio_storage,
-            vec![RouteCandidate {
-                account_id: "configured".to_string(),
-                provider: String::new(),
-                model: String::new(),
-                capabilities: vec![Capability::TextReasoning, Capability::TextStructuredOutput],
-                available: true,
-            }],
-        )
-    }
-
     #[expect(
         clippy::expect_used,
         reason = "bundled agent definitions are static and covered by tests"
     )]
-    pub fn new_with_routes(studio_storage: PathBuf, candidates: Vec<RouteCandidate>) -> Self {
+    pub fn new(studio_storage: PathBuf) -> Self {
         validate_bundled_agents().expect("bundled agent definitions must be valid");
         Self {
             store_state: StoreState::new(BackendStatus::Ready),
             recovery_lock: Mutex::new(()),
             service: GameService::new(studio_storage.clone()),
-            orchestrator: TaskOrchestrator::new(candidates, Some(studio_storage)),
+            orchestrator: TaskOrchestrator::new(Vec::new(), Some(studio_storage)),
         }
     }
 

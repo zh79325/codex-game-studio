@@ -462,6 +462,7 @@ pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
     pub install_shutdown_signal_handler: bool,
+    pub studio_mode: bool,
 }
 
 impl Default for AppServerRuntimeOptions {
@@ -471,6 +472,7 @@ impl Default for AppServerRuntimeOptions {
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
             install_shutdown_signal_handler: true,
+            studio_mode: false,
         }
     }
 }
@@ -575,7 +577,11 @@ pub async fn run_main_with_transport_options(
     let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
         codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
     );
-    let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
+    let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> = if runtime_options
+        .studio_mode
+    {
+        None
+    } else {
         match &runtime_options.code_mode_host_transport {
             CodeModeHostTransport::Local => None,
             CodeModeHostTransport::Grpc(url) => {
@@ -592,7 +598,8 @@ pub async fn run_main_with_transport_options(
                     ),
                 ))
             }
-        };
+        }
+    };
     let environment_manager = if ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory()).await
     } else {
@@ -951,6 +958,7 @@ pub async fn run_main_with_transport_options(
                 PluginStartupTasks::Start
             )
             .then_some(plugin_startup_config),
+            studio_mode: runtime_options.studio_mode,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

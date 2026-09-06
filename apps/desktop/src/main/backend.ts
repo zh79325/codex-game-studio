@@ -1,8 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type {
   BackendState,
   GamePingResponse,
@@ -104,35 +102,22 @@ export class BackendSupervisor extends EventEmitter {
     this.child.kill();
   }
 
-  private providerEnvironment(): NodeJS.ProcessEnv {
-    const path = join(dirname(this.codexHome), "ai-secrets.json");
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-        providerKeys?: Record<string, string>;
-      };
-      return Object.fromEntries(
-        Object.entries(parsed.providerKeys ?? {}).map(([code, key]) => [
-          providerKeyEnvironment(code),
-          key,
-        ]),
-      );
-    } catch {
-      return {};
-    }
-  }
-
   private spawnBackend(): void {
     this.emitState({ type: "starting" });
     this.initialized = false;
     const child = spawn(
       this.executable,
-      ["--listen", "stdio://", "--disable-plugin-startup-tasks"],
+      [
+        "--listen",
+        "stdio://",
+        "--disable-plugin-startup-tasks",
+        "--studio-mode",
+      ],
       {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: this.workspaceRoot,
         env: {
           ...process.env,
-          ...this.providerEnvironment(),
           CODEX_HOME: this.codexHome,
           CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
           RUST_LOG: process.env.RUST_LOG
@@ -288,10 +273,6 @@ const READ_ONLY_METHODS = new Set([
   "game/providerPreset/list",
   "game/aiConfig/export",
 ]);
-
-function providerKeyEnvironment(code: string): string {
-  return `CODEX_GAME_PROVIDER_${code.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}_API_KEY`;
-}
 
 function isReadOnlyMethod(method: string): boolean {
   return READ_ONLY_METHODS.has(method);

@@ -20,6 +20,20 @@ pub struct AiRouteModel {
     pub available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiExecutionModel {
+    pub id: String,
+    pub provider_code: String,
+    pub provider_name: String,
+    pub provider_base_url: String,
+    pub auth_style: String,
+    pub provider_enabled: bool,
+    pub model_id: String,
+    pub driver: String,
+    pub api_path: String,
+    pub model_enabled: bool,
+}
+
 const AI_CONFIG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS ai_config_migrations (
     name TEXT PRIMARY KEY,
@@ -206,6 +220,33 @@ pub async fn load_ai_route_models(
         });
     }
     Ok(result)
+}
+
+pub async fn load_ai_execution_model(
+    pool: &SqlitePool,
+    model_id: &str,
+) -> Result<Option<AiExecutionModel>, StoreError> {
+    let row = sqlx::query(
+        "SELECT m.id, m.provider_code, p.name AS provider_name, p.base_url AS provider_base_url, p.auth_style, p.enabled AS provider_enabled, m.model_id, m.driver, m.api_path, m.enabled AS model_enabled FROM ai_models m JOIN ai_providers p ON p.code = m.provider_code WHERE m.id = ?",
+    )
+    .bind(model_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        Ok(AiExecutionModel {
+            id: row.try_get("id")?,
+            provider_code: row.try_get("provider_code")?,
+            provider_name: row.try_get("provider_name")?,
+            provider_base_url: row.try_get("provider_base_url")?,
+            auth_style: row.try_get("auth_style")?,
+            provider_enabled: row.try_get("provider_enabled")?,
+            model_id: row.try_get("model_id")?,
+            driver: row.try_get("driver")?,
+            api_path: row.try_get("api_path")?,
+            model_enabled: row.try_get("model_enabled")?,
+        })
+    })
+    .transpose()
 }
 
 pub async fn reserve_ai_usage(
@@ -1117,6 +1158,62 @@ mod tests {
             list_agent_bindings(&pool).await.expect("list bindings")["brief"],
             ["model-b", "model-a"]
         );
+    }
+
+    #[tokio::test]
+    async fn loads_execution_metadata_by_model_uuid() {
+        let pool = test_pool().await;
+        let mut configured_provider = provider("ark", Vec::new());
+        configured_provider.name = "Ark Images".to_string();
+        configured_provider.base_url = "https://ark.example/api/v3".to_string();
+        configured_provider.driver = "ark_image".to_string();
+        configured_provider.auth_style = "x-api-key".to_string();
+        upsert_ai_provider(&pool, &configured_provider)
+            .await
+            .expect("seed provider");
+        let mut configured_model = model("model-uuid", "ark", 0, "default");
+        configured_model.model_id = "image-model".to_string();
+        configured_model.driver = "ark_image".to_string();
+        configured_model.api_path = "/images/generations".to_string();
+        upsert_ai_model(&pool, &configured_model)
+            .await
+            .expect("seed model");
+
+        let execution = load_ai_execution_model(&pool, "model-uuid")
+            .await
+            .expect("load execution model")
+            .expect("execution model");
+        assert_eq!(execution.id, "model-uuid");
+        assert_eq!(execution.provider_code, "ark");
+        assert_eq!(execution.provider_name, "Ark Images");
+        assert_eq!(execution.provider_base_url, "https://ark.example/api/v3");
+        assert_eq!(execution.auth_style, "x-api-key");
+        assert_eq!(execution.model_id, "image-model");
+        assert_eq!(execution.driver, "ark_image");
+        assert_eq!(execution.api_path, "/images/generations");
+        assert!(execution.provider_enabled);
+        assert!(execution.model_enabled);
+        assert!(
+            load_ai_execution_model(&pool, "missing-model")
+                .await
+                .expect("load missing model")
+                .is_none()
+        );
+
+        configured_provider.enabled = false;
+        upsert_ai_provider(&pool, &configured_provider)
+            .await
+            .expect("disable provider");
+        configured_model.enabled = false;
+        upsert_ai_model(&pool, &configured_model)
+            .await
+            .expect("disable model");
+        let disabled = load_ai_execution_model(&pool, "model-uuid")
+            .await
+            .expect("load disabled model")
+            .expect("disabled model");
+        assert!(!disabled.provider_enabled);
+        assert!(!disabled.model_enabled);
     }
 
     #[tokio::test]

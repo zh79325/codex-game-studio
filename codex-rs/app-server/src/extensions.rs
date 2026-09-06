@@ -54,6 +54,7 @@ pub(crate) struct ThreadExtensionDependencies {
 
 pub(crate) fn thread_extensions<S>(
     guardian_agent_spawner: S,
+    enable_guardian: bool,
     dependencies: ThreadExtensionDependencies,
 ) -> Arc<ExtensionRegistry<Config>>
 where
@@ -97,13 +98,15 @@ where
         git_attribution_base_url,
         http_client_factory,
     );
-    codex_guardian_v2::install(
-        &mut builder,
-        guardian_agent_spawner,
-        internal_session_spawner(thread_manager.clone()),
-        auth_manager.clone(),
-        thread_manager,
-    );
+    if enable_guardian {
+        codex_guardian_v2::install(
+            &mut builder,
+            guardian_agent_spawner,
+            internal_session_spawner(thread_manager.clone()),
+            auth_manager.clone(),
+            thread_manager,
+        );
+    }
     codex_memories_extension::install(&mut builder, codex_otel::global());
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);

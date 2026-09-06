@@ -61,8 +61,26 @@ pub enum ExecutionError {
     ContextTooLarge(String),
     #[error("execution capability is unavailable: {0}")]
     CapabilityUnavailable(String),
+    #[error("execution route {} / {} is unavailable: {message}", route.provider, route.model)]
+    RouteUnavailable {
+        route: RouteDecision,
+        message: String,
+    },
     #[error("execution failed: {0}")]
     Fatal(String),
+}
+
+impl ExecutionError {
+    pub fn failed_route(&self) -> Option<&RouteDecision> {
+        match self {
+            Self::RouteUnavailable { route, .. } => Some(route),
+            Self::InvalidRequest(_)
+            | Self::Retryable(_)
+            | Self::ContextTooLarge(_)
+            | Self::CapabilityUnavailable(_)
+            | Self::Fatal(_) => None,
+        }
+    }
 }
 
 /// Boundary through which deterministic game workflows invoke Codex sessions.

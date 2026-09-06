@@ -2162,6 +2162,7 @@ dependencies = [
  "codex-utils-json-to-toml",
  "codex-utils-path-uri",
  "codex-utils-pty",
+ "codex-utils-redacted-string",
  "codex-utils-rustls-provider",
  "codex-web-search-extension",
  "codex-windows-sandbox",
@@ -3420,6 +3421,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.9.11+spec-1.1.0",
+ "tracing",
  "uuid",
 ]
 

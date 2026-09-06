@@ -33,11 +33,9 @@ use codex_game_domain::TaskId;
 use codex_game_domain::TaskStatus;
 use codex_game_domain::ThreadBindingStatus;
 use codex_game_store::ProjectStore;
-use codex_game_store::ProviderAccountMetadata;
 use codex_game_store::StoreError;
 use codex_game_store::StoredRouteBinding;
 use codex_game_store::StudioUsageEntry;
-use codex_game_store::list_ai_providers;
 use codex_game_store::load_ai_route_models;
 use codex_game_store::load_route_binding;
 use codex_game_store::open_studio_store;
@@ -46,7 +44,6 @@ use codex_game_store::record_ai_route_success;
 use codex_game_store::record_route_selection;
 use codex_game_store::record_usage;
 use codex_game_store::reserve_ai_usage;
-use codex_game_store::upsert_provider_accounts;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -115,16 +112,7 @@ pub struct TaskOrchestrator {
 
 impl Default for TaskOrchestrator {
     fn default() -> Self {
-        Self::new(
-            vec![RouteCandidate {
-                account_id: "configured".to_string(),
-                provider: String::new(),
-                model: String::new(),
-                capabilities: vec![Capability::TextReasoning, Capability::TextStructuredOutput],
-                available: true,
-            }],
-            None,
-        )
+        Self::new(Vec::new(), None)
     }
 }
 
@@ -533,7 +521,7 @@ impl TaskOrchestrator {
             .active_thread(&request.conversation_id, &request.agent_code)
             .await?;
         let scope = format!("conversation:{}", request.conversation_id);
-        let (route, event) = self
+        let (mut route, event) = self
             .select_route(request.capability, &scope, &request.agent_code)
             .await?;
         if request.internal_executor_code.is_none()
@@ -543,80 +531,63 @@ impl TaskOrchestrator {
         {
             return Ok((binding.clone(), route));
         }
-        let image_generation_route = self.internal_executor_route(request).await?;
-        match execution
-            .start_thread(StartThreadRequest {
-                cwd: request.project_root.clone(),
-                agent_code: request.agent_code.clone(),
-                route: route.clone(),
-                image_generation_route,
-            })
-            .await
-        {
-            Ok(started) => {
-                self.persist_binding(
-                    store,
-                    request,
-                    previous,
-                    started,
-                    route,
-                    "thread-unavailable",
-                )
-                .await
-            }
-            Err(error) => {
-                let Some(kind) = route_failure_kind(&error) else {
-                    return Err(error.into());
-                };
-                self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
-                    .await?;
-                let next_route = self
-                    .select_route(request.capability, &scope, &request.agent_code)
-                    .await?
-                    .0;
-                self.start_replacement_thread(execution, store, request, previous, next_route)
-                    .await
-            }
-        }
-    }
-
-    async fn start_replacement_thread<E: CodexExecutionPort>(
-        &self,
-        execution: &E,
-        store: &ProjectStore,
-        request: &ExecuteTaskRequest,
-        previous: Option<ConversationCodexThread>,
-        mut route: RouteDecision,
-    ) -> Result<(ConversationCodexThread, RouteDecision), OrchestrationError> {
+        let mut image_generation_route = self.internal_executor_route(request).await?;
+        let mut replacement_reason = "thread-unavailable";
         loop {
             match execution
                 .start_thread(StartThreadRequest {
                     cwd: request.project_root.clone(),
                     agent_code: request.agent_code.clone(),
                     route: route.clone(),
-                    image_generation_route: self.internal_executor_route(request).await?,
+                    image_generation_route: image_generation_route.clone(),
                 })
                 .await
             {
                 Ok(started) => {
                     return self
-                        .persist_binding(store, request, previous, started, route, "route-switched")
+                        .persist_binding(
+                            store,
+                            request,
+                            previous,
+                            started,
+                            route,
+                            replacement_reason,
+                        )
                         .await;
                 }
                 Err(error) => {
                     let Some(kind) = route_failure_kind(&error) else {
                         return Err(error.into());
                     };
-                    self.report_route(&route, RouteOutcome::Failed(kind), &error.to_string())
-                        .await?;
-                    route = self
-                        .select_route(
-                            request.capability,
-                            &format!("conversation:{}", request.conversation_id),
-                            &request.agent_code,
-                        )
-                        .await?
-                        .0;
+                    let failed_route = error
+                        .failed_route()
+                        .cloned()
+                        .unwrap_or_else(|| route.clone());
+                    self.report_route(
+                        &failed_route,
+                        RouteOutcome::Failed(kind),
+                        &error.to_string(),
+                    )
+                    .await?;
+                    replacement_reason = "route-switched";
+                    if image_generation_route.as_ref() == Some(&failed_route) {
+                        image_generation_route = self
+                            .internal_executor_route(request)
+                            .await
+                            .map_err(|next_error| {
+                                route_exhausted_error(next_error, &failed_route, &error.to_string())
+                            })?;
+                    } else if failed_route == route {
+                        route = self
+                            .select_route(request.capability, &scope, &request.agent_code)
+                            .await
+                            .map_err(|next_error| {
+                                route_exhausted_error(next_error, &failed_route, &error.to_string())
+                            })?
+                            .0;
+                    } else {
+                        return Err(error.into());
+                    }
                 }
             }
         }
@@ -677,32 +648,13 @@ impl TaskOrchestrator {
             }
             return Ok(None);
         };
-        let candidates = if let Some(studio_storage) = &self.studio_storage {
-            let studio = open_studio_store(studio_storage).await?;
-            load_ai_route_models(&studio, agent_code, now())
-                .await?
-                .into_iter()
-                .map(|candidate| RouteCandidate {
-                    account_id: candidate.id,
-                    provider: candidate.provider,
-                    model: candidate.model,
-                    capabilities: candidate
-                        .capabilities
-                        .into_iter()
-                        .map(runtime_capability)
-                        .collect(),
-                    available: candidate.available,
-                })
-                .collect()
-        } else {
-            self.routes.candidates()?
-        };
-        let selector = RouteSelector::new(candidates);
         let scope = format!(
             "conversation:{}:internal:{}",
             request.conversation_id, agent_code
         );
-        Ok(Some(selector.select(capability, &scope)?.0))
+        Ok(Some(
+            self.select_route(capability, &scope, agent_code).await?.0,
+        ))
     }
 
     async fn select_route(
@@ -711,68 +663,64 @@ impl TaskOrchestrator {
         scope: &str,
         agent_code: &str,
     ) -> Result<(RouteDecision, RouteEvent), OrchestrationError> {
-        if let Some(studio_storage) = &self.studio_storage {
-            let studio = open_studio_store(studio_storage).await?;
-            let candidates = load_ai_route_models(&studio, agent_code, now())
-                .await?
-                .into_iter()
-                .map(|candidate| RouteCandidate {
-                    account_id: candidate.id,
-                    provider: candidate.provider,
-                    model: candidate.model,
-                    capabilities: candidate
-                        .capabilities
-                        .into_iter()
-                        .map(runtime_capability)
-                        .collect(),
-                    available: candidate.available,
-                })
-                .collect::<Vec<_>>();
-            if !candidates.is_empty() || !list_ai_providers(&studio).await?.is_empty() {
-                self.routes.replace_candidates(candidates)?;
-            }
-            let accounts = self
+        let Some(studio_storage) = &self.studio_storage else {
+            return self
                 .routes
-                .candidates()?
-                .into_iter()
-                .map(|candidate| ProviderAccountMetadata {
-                    id: candidate.account_id,
-                    provider: candidate.provider,
-                    model: candidate.model,
-                    enabled: candidate.available,
-                })
-                .collect::<Vec<_>>();
-            upsert_provider_accounts(&studio, &accounts).await?;
-            if let Some(binding) = load_route_binding(&studio, scope).await? {
-                self.routes.restore_binding(
-                    binding.scope_key,
-                    RouteDecision {
-                        account_id: binding.provider_account_id,
-                        provider: binding.provider,
-                        model: binding.model,
-                    },
-                )?;
-            }
-        }
-        let (decision, event) = self.routes.select(capability, scope)?;
-        if let Some(studio_storage) = &self.studio_storage {
-            let studio = open_studio_store(studio_storage).await?;
-            let event_payload_json =
-                serde_json::to_string(&event).map_err(StoreError::Serialization)?;
-            record_route_selection(
-                &studio,
-                &StoredRouteBinding {
-                    scope_key: scope.to_string(),
-                    provider_account_id: decision.account_id.clone(),
-                    provider: decision.provider.clone(),
-                    model: decision.model.clone(),
+                .select(capability, scope)
+                .map_err(OrchestrationError::Route);
+        };
+        let studio = open_studio_store(studio_storage).await?;
+        let candidates = load_ai_route_models(&studio, agent_code, now())
+            .await?
+            .into_iter()
+            .map(|candidate| RouteCandidate {
+                account_id: candidate.id,
+                provider: candidate.provider,
+                model: candidate.model,
+                capabilities: candidate
+                    .capabilities
+                    .into_iter()
+                    .map(runtime_capability)
+                    .collect(),
+                available: candidate.available,
+            })
+            .collect::<Vec<_>>();
+        if let Some(binding) = load_route_binding(&studio, scope).await? {
+            self.routes.restore_binding(
+                binding.scope_key,
+                RouteDecision {
+                    account_id: binding.provider_account_id,
+                    provider: binding.provider,
+                    model: binding.model,
                 },
-                RouteSelector::event_type(&event),
-                &event_payload_json,
-                now(),
-            )
-            .await?;
+            )?;
         }
+        let (decision, event) = self
+            .routes
+            .select_candidates(capability, scope, &candidates)
+            .map_err(|error| match error {
+                RouteError::CapabilityUnavailable => {
+                    OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(format!(
+                        "agent `{agent_code}` 没有可用的 `{capability:?}` 模型绑定"
+                    )))
+                }
+                other => OrchestrationError::Route(other),
+            })?;
+        let event_payload_json =
+            serde_json::to_string(&event).map_err(StoreError::Serialization)?;
+        record_route_selection(
+            &studio,
+            &StoredRouteBinding {
+                scope_key: scope.to_string(),
+                provider_account_id: decision.account_id.clone(),
+                provider: decision.provider.clone(),
+                model: decision.model.clone(),
+            },
+            RouteSelector::event_type(&event),
+            &event_payload_json,
+            now(),
+        )
+        .await?;
         Ok((decision, event))
     }
 
@@ -937,10 +885,28 @@ fn runtime_capability(capability: AiCapability) -> Capability {
     }
 }
 
+fn route_exhausted_error(
+    error: OrchestrationError,
+    failed_route: &RouteDecision,
+    last_reason: &str,
+) -> OrchestrationError {
+    match error {
+        OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(message)) => {
+            OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(format!(
+                "{message}；最后失败路由：{}/{}；最后失败原因：{last_reason}",
+                failed_route.provider, failed_route.model
+            )))
+        }
+        other => other,
+    }
+}
+
 fn route_failure_kind(error: &ExecutionError) -> Option<RouteFailureKind> {
     match error {
         ExecutionError::Retryable(_) => Some(RouteFailureKind::Retryable),
-        ExecutionError::CapabilityUnavailable(_) => Some(RouteFailureKind::CapabilityUnavailable),
+        ExecutionError::CapabilityUnavailable(_) | ExecutionError::RouteUnavailable { .. } => {
+            Some(RouteFailureKind::CapabilityUnavailable)
+        }
         ExecutionError::Fatal(_) => Some(RouteFailureKind::Fatal),
         ExecutionError::ContextTooLarge(_) | ExecutionError::InvalidRequest(_) => None,
     }

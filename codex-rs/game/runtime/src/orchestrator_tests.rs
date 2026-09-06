@@ -73,6 +73,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
         idempotency_key: key.to_string(),
         prompt: "design a game".to_string(),
         local_image_paths: Vec::new(),
+        media_generation_consumed: false,
         context: ContextPackage {
             conversation_history: Vec::new(),
             context_version: 1,
@@ -87,6 +88,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             workflow_context: None,
             review_subject: None,
             visual_focus: None,
+            recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "strict action".to_string(),

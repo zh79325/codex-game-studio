@@ -10,7 +10,9 @@ use codex_app_server_protocol::GameGenerationUpdatedNotification;
 use codex_app_server_protocol::GameTaskUpdatedNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_game_app_server_adapter::GameAppServerAdapter;
+use codex_game_app_server_adapter::GameTurnEventContext;
 use codex_game_runtime::TurnAuditCompletion;
+use codex_game_runtime::TurnAuditEvent;
 use codex_game_runtime::TurnAuditUsage;
 use codex_game_runtime::append_turn_audit_completion;
 use codex_http_client::unregister_stream_response_audit;
@@ -18,6 +20,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -48,6 +51,8 @@ pub(crate) fn spawn_game_event_observer(
     tokio::spawn(async move {
         let mut active_game_turns = HashMap::<ThreadId, String>::new();
         let mut usage_by_thread = HashMap::<ThreadId, TurnAuditUsage>::new();
+        let mut partial_output_by_turn = HashMap::<String, String>::new();
+        let mut first_output_turns = HashSet::<String>::new();
         while let Some(observed) = receiver.recv().await {
             if let EventMsg::TurnStarted(started) = &observed.event.msg {
                 if matches!(
@@ -55,6 +60,16 @@ pub(crate) fn spawn_game_event_observer(
                     Ok(Some(_))
                 ) {
                     active_game_turns.insert(observed.thread_id, started.turn_id.clone());
+                    partial_output_by_turn.insert(started.turn_id.clone(), String::new());
+                    record_turn_event(
+                        adapter.as_ref(),
+                        &started.turn_id,
+                        "ai_turn_started",
+                        "started",
+                        "AI 已开始处理本轮请求",
+                        serde_json::json!({}),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -80,6 +95,23 @@ pub(crate) fn spawn_game_event_observer(
                 match adapter.turn_event_context(&delta.turn_id).await {
                     Ok(Some(context)) => {
                         active_game_turns.insert(observed.thread_id, delta.turn_id.clone());
+                        append_bounded_partial(
+                            partial_output_by_turn
+                                .entry(delta.turn_id.clone())
+                                .or_default(),
+                            &delta.delta,
+                        );
+                        if first_output_turns.insert(delta.turn_id.clone()) {
+                            record_turn_event(
+                                adapter.as_ref(),
+                                &delta.turn_id,
+                                "ai_first_output",
+                                "succeeded",
+                                "AI 已返回首段输出",
+                                serde_json::json!({}),
+                            )
+                            .await;
+                        }
                         outgoing
                             .send_server_notification(ServerNotification::GameConversationDelta(
                                 GameConversationDeltaNotification {
@@ -100,6 +132,101 @@ pub(crate) fn spawn_game_event_observer(
                 }
                 continue;
             }
+            let lifecycle = match &observed.event.msg {
+                EventMsg::ImageGenerationBegin(event) => active_game_turns
+                    .get(&observed.thread_id)
+                    .cloned()
+                    .map(|turn_id| {
+                        (
+                            turn_id,
+                            "image_generation_started",
+                            "started",
+                            "图片生成请求已开始".to_string(),
+                            serde_json::json!({
+                                "callId": event.call_id.as_str(),
+                                "tool": event.tool_name.as_deref(),
+                            }),
+                        )
+                    }),
+                EventMsg::ImageGenerationEnd(event) => active_game_turns
+                    .get(&observed.thread_id)
+                    .cloned()
+                    .map(|turn_id| {
+                        let succeeded = event.status == "completed" && event.saved_path.is_some();
+                        let event_name = if succeeded {
+                            "image_generation_succeeded"
+                        } else {
+                            "image_generation_failed"
+                        };
+                        (
+                            turn_id,
+                            event_name,
+                            if succeeded { "succeeded" } else { "failed" },
+                            if succeeded {
+                                "AI 合图已返回并保存".to_string()
+                            } else {
+                                "AI 合图失败或未保存".to_string()
+                            },
+                            serde_json::json!({
+                                "callId": event.call_id.as_str(),
+                                "tool": event.tool_name.as_deref(),
+                                "status": event.status.as_str(),
+                                "savedPath": event.saved_path.as_ref().map(|path| path.as_path().display().to_string()),
+                                "prompt": event.revised_prompt.as_deref().map(|prompt| truncate_text(prompt, 2048)),
+                                "resultBytes": event.result.len(),
+                                "failure": event.failure,
+                            }),
+                        )
+                    }),
+                EventMsg::ExecCommandBegin(event) => Some((
+                    event.turn_id.clone(),
+                    "tool_started",
+                    "started",
+                    "命令工具已开始".to_string(),
+                    serde_json::json!({
+                        "callId": event.call_id,
+                        "tool": "exec_command",
+                        "command": truncate_text(&event.command.join(" "), 2048),
+                    }),
+                )),
+                EventMsg::ExecCommandEnd(event) => Some((
+                    event.turn_id.clone(),
+                    if event.exit_code == 0 {
+                        "tool_succeeded"
+                    } else {
+                        "tool_failed"
+                    },
+                    if event.exit_code == 0 {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    "命令工具已结束".to_string(),
+                    serde_json::json!({
+                        "callId": event.call_id,
+                        "tool": "exec_command",
+                        "exitCode": event.exit_code,
+                        "output": truncate_text(&event.aggregated_output, 4096),
+                    }),
+                )),
+                EventMsg::ExecApprovalRequest(event) => Some((
+                    event.turn_id.clone(),
+                    "approval_requested",
+                    "waiting",
+                    "命令工具正在等待权限确认".to_string(),
+                    serde_json::json!({
+                        "callId": event.call_id,
+                        "command": truncate_text(&event.command.join(" "), 2048),
+                        "reason": event.reason,
+                    }),
+                )),
+                _ => None,
+            };
+            if let Some((turn_id, event, status, message, payload)) = lifecycle {
+                record_turn_event(adapter.as_ref(), &turn_id, event, status, &message, payload)
+                    .await;
+                continue;
+            }
             let terminal_error = match &observed.event.msg {
                 EventMsg::TurnComplete(completed) => {
                     completed.error.as_ref().map(|error| error.message.clone())
@@ -115,38 +242,55 @@ pub(crate) fn spawn_game_event_observer(
             };
             active_game_turns.remove(&observed.thread_id);
             unregister_stream_response_audit(&observed.thread_id.to_string());
-            match adapter.turn_audit_context(turn_id).await {
-                Ok(Some(context)) => {
-                    let completion = match &observed.event.msg {
-                        EventMsg::TurnComplete(completed) => TurnAuditCompletion {
-                            response: completed.last_agent_message.clone(),
-                            error: terminal_error.clone(),
-                            usage: usage_by_thread.remove(&observed.thread_id),
-                            duration_ms: completed.duration_ms,
-                            time_to_first_token_ms: completed.time_to_first_token_ms,
-                        },
-                        EventMsg::TurnAborted(aborted) => TurnAuditCompletion {
-                            error: Some(format!("运行已中断：{:?}", aborted.reason)),
-                            usage: usage_by_thread.remove(&observed.thread_id),
-                            duration_ms: aborted.duration_ms,
-                            ..TurnAuditCompletion::default()
-                        },
-                        _ => unreachable!(),
-                    };
-                    if let Err(error) = append_turn_audit_completion(&context, &completion) {
-                        tracing::warn!(
-                            thread_id = %observed.thread_id,
-                            turn_id,
-                            "failed to write game turn audit completion: {error}"
-                        );
-                    }
+            let event_context = adapter.turn_event_context(turn_id).await.ok().flatten();
+            let audit_context = adapter.turn_audit_context(turn_id).await.ok().flatten();
+            let partial_output = partial_output_by_turn.remove(turn_id);
+            first_output_turns.remove(turn_id);
+            record_turn_event(
+                adapter.as_ref(),
+                turn_id,
+                if matches!(observed.event.msg, EventMsg::TurnAborted(_)) {
+                    "ai_turn_aborted"
+                } else if terminal_error.is_some() {
+                    "ai_turn_failed"
+                } else {
+                    "ai_turn_completed"
+                },
+                if terminal_error.is_some()
+                    || matches!(observed.event.msg, EventMsg::TurnAborted(_))
+                {
+                    "failed"
+                } else {
+                    "succeeded"
+                },
+                terminal_error.as_deref().unwrap_or("AI 本轮处理已结束"),
+                serde_json::json!({}),
+            )
+            .await;
+            if let Some(context) = audit_context.as_ref() {
+                let completion = match &observed.event.msg {
+                    EventMsg::TurnComplete(completed) => TurnAuditCompletion {
+                        response: completed.last_agent_message.clone(),
+                        error: terminal_error.clone(),
+                        usage: usage_by_thread.remove(&observed.thread_id),
+                        duration_ms: completed.duration_ms,
+                        time_to_first_token_ms: completed.time_to_first_token_ms,
+                    },
+                    EventMsg::TurnAborted(aborted) => TurnAuditCompletion {
+                        error: Some(format!("运行已中断：{:?}", aborted.reason)),
+                        usage: usage_by_thread.remove(&observed.thread_id),
+                        duration_ms: aborted.duration_ms,
+                        ..TurnAuditCompletion::default()
+                    },
+                    _ => unreachable!(),
+                };
+                if let Err(error) = append_turn_audit_completion(context, &completion) {
+                    tracing::warn!(
+                        thread_id = %observed.thread_id,
+                        turn_id,
+                        "failed to write game turn audit completion: {error}"
+                    );
                 }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    thread_id = %observed.thread_id,
-                    turn_id,
-                    "failed to resolve game turn audit context: {error}"
-                ),
             }
             let result = match &observed.event.msg {
                 EventMsg::TurnComplete(completed) => {
@@ -159,7 +303,11 @@ pub(crate) fn spawn_game_event_observer(
                         )
                         .await
                 }
-                EventMsg::TurnAborted(_) => adapter.observe_turn_aborted(turn_id).await,
+                EventMsg::TurnAborted(_) => {
+                    adapter
+                        .observe_turn_aborted(turn_id, partial_output.as_deref())
+                        .await
+                }
                 _ => unreachable!(),
             };
             match result {
@@ -171,6 +319,44 @@ pub(crate) fn spawn_game_event_observer(
                         .unwrap_or_else(|| turn_id.to_string());
                     let is_running = projection.status == "running";
                     let director_resume_reason = projection.director_resume_reason.clone();
+                    if let Some(context) = event_context.as_ref() {
+                        record_task_event(
+                            adapter.as_ref(),
+                            context,
+                            audit_context.as_ref(),
+                            "attempt_terminal",
+                            if matches!(observed.event.msg, EventMsg::TurnAborted(_)) {
+                                "interrupted"
+                            } else if terminal_error.is_some() {
+                                "failed"
+                            } else {
+                                "succeeded"
+                            },
+                            "任务尝试已进入终态",
+                            serde_json::json!({ "projectionStatus": projection.status.as_str() }),
+                        )
+                        .await;
+                    }
+                    if let Some(context) = event_context.as_ref() {
+                        let (action, target) =
+                            if let Some(target) = projection.handoff_target.as_deref() {
+                                ("handoff", Some(target))
+                            } else if director_resume_reason.is_some() {
+                                ("resume_director", Some("studio_director"))
+                            } else {
+                                ("none", None)
+                            };
+                        record_task_event(
+                            adapter.as_ref(),
+                            context,
+                            audit_context.as_ref(),
+                            "next_action_selected",
+                            "succeeded",
+                            "已根据本轮结果选择后续动作",
+                            serde_json::json!({ "action": action, "targetAgent": target }),
+                        )
+                        .await;
+                    }
                     outgoing
                         .send_server_notification(ServerNotification::GameAttemptUpdated(
                             GameAttemptUpdatedNotification {
@@ -268,11 +454,38 @@ pub(crate) fn spawn_game_event_observer(
                             continue;
                         };
                         let scoped_execution = execution.scoped(connection_id);
+                        if let Some(context) = event_context.as_ref() {
+                            record_task_event(
+                                adapter.as_ref(),
+                                context,
+                                audit_context.as_ref(),
+                                "next_action_started",
+                                "started",
+                                "开始执行 Agent handoff",
+                                serde_json::json!({ "targetAgent": target_agent.as_str() }),
+                            )
+                            .await;
+                        }
                         match adapter
                             .continue_handoff(&scoped_execution, &conversation_id, &target_agent)
                             .await
                         {
                             Ok(Some(started)) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_succeeded",
+                                        "succeeded",
+                                        "Agent handoff 已启动",
+                                        serde_json::json!({
+                                            "targetAgent": target_agent.as_str(),
+                                            "startedTaskId": started.task.id.as_str(),
+                                        }),
+                                    )
+                                    .await;
+                                }
                                 let task_id = started.task.id.as_str().to_string();
                                 let agent_code = started.task.agent_code;
                                 let turn_id = started.attempt.codex_turn_id;
@@ -332,6 +545,18 @@ pub(crate) fn spawn_game_event_observer(
                                     .await;
                             }
                             Ok(None) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_failed",
+                                        "failed",
+                                        "Agent handoff 未启动",
+                                        serde_json::json!({ "targetAgent": target_agent.as_str() }),
+                                    )
+                                    .await;
+                                }
                                 outgoing
                                     .send_server_notification(
                                         ServerNotification::GameConversationTurn(
@@ -344,6 +569,21 @@ pub(crate) fn spawn_game_event_observer(
                                     .await;
                             }
                             Err(error) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_failed",
+                                        "failed",
+                                        "Agent handoff 执行失败",
+                                        serde_json::json!({
+                                            "targetAgent": target_agent.as_str(),
+                                            "error": error.as_str(),
+                                        }),
+                                    )
+                                    .await;
+                                }
                                 tracing::warn!(
                                     thread_id = %observed.thread_id,
                                     "failed to continue game handoff: {error}"
@@ -371,11 +611,38 @@ pub(crate) fn spawn_game_event_observer(
                             continue;
                         };
                         let scoped_execution = execution.scoped(connection_id);
+                        if let Some(context) = event_context.as_ref() {
+                            record_task_event(
+                                adapter.as_ref(),
+                                context,
+                                audit_context.as_ref(),
+                                "next_action_started",
+                                "started",
+                                "开始将控制权回交总管",
+                                serde_json::json!({ "targetAgent": "studio_director" }),
+                            )
+                            .await;
+                        }
                         match adapter
                             .resume_director(&scoped_execution, &conversation_id, reason)
                             .await
                         {
                             Ok(Some(started)) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_succeeded",
+                                        "succeeded",
+                                        "控制权已回交总管",
+                                        serde_json::json!({
+                                            "targetAgent": "studio_director",
+                                            "startedTaskId": started.task.id.as_str(),
+                                        }),
+                                    )
+                                    .await;
+                                }
                                 let task_id = started.task.id.as_str().to_string();
                                 let agent_code = started.task.agent_code;
                                 let resumed_turn_id = started.attempt.codex_turn_id;
@@ -434,8 +701,36 @@ pub(crate) fn spawn_game_event_observer(
                                     )
                                     .await;
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_failed",
+                                        "failed",
+                                        "总管恢复未启动",
+                                        serde_json::json!({ "targetAgent": "studio_director" }),
+                                    )
+                                    .await;
+                                }
+                            }
                             Err(error) => {
+                                if let Some(context) = event_context.as_ref() {
+                                    record_task_event(
+                                        adapter.as_ref(),
+                                        context,
+                                        audit_context.as_ref(),
+                                        "next_action_failed",
+                                        "failed",
+                                        "总管恢复执行失败",
+                                        serde_json::json!({
+                                            "targetAgent": "studio_director",
+                                            "error": error.as_str(),
+                                        }),
+                                    )
+                                    .await;
+                                }
                                 tracing::warn!(
                                     thread_id = %observed.thread_id,
                                     "failed to resume game director: {error}"
@@ -466,4 +761,93 @@ pub(crate) fn spawn_game_event_observer(
             }
         }
     });
+}
+
+async fn record_task_event(
+    adapter: &GameAppServerAdapter,
+    context: &GameTurnEventContext,
+    audit_context: Option<&codex_game_runtime::TurnAuditContext>,
+    event: &str,
+    status: &str,
+    message: &str,
+    payload: serde_json::Value,
+) {
+    let mut payload = payload;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+        object.insert(
+            "attemptId".to_string(),
+            serde_json::Value::String(context.attempt_id.clone()),
+        );
+        object.insert(
+            "stage".to_string(),
+            serde_json::Value::String(context.stage.clone()),
+        );
+    }
+    if let Err(error) = adapter
+        .record_task_event(
+            context,
+            audit_context,
+            &TurnAuditEvent {
+                event: event.to_string(),
+                status: status.to_string(),
+                message: message.to_string(),
+                payload,
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = context.task_id,
+            event,
+            "failed to record game task lifecycle event: {error}"
+        );
+    }
+}
+
+async fn record_turn_event(
+    adapter: &GameAppServerAdapter,
+    turn_id: &str,
+    event: &str,
+    status: &str,
+    message: &str,
+    payload: serde_json::Value,
+) {
+    if let Err(error) = adapter
+        .record_turn_event(
+            turn_id,
+            &TurnAuditEvent {
+                event: event.to_string(),
+                status: status.to_string(),
+                message: message.to_string(),
+                payload,
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            turn_id,
+            event,
+            "failed to record game lifecycle event: {error}"
+        );
+    }
+}
+
+fn append_bounded_partial(output: &mut String, delta: &str) {
+    const MAX_PARTIAL_OUTPUT_CHARS: usize = 8 * 1024;
+    let remaining = MAX_PARTIAL_OUTPUT_CHARS.saturating_sub(output.chars().count());
+    output.extend(delta.chars().take(remaining));
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}\n[truncated after {max_chars} characters]")
+    } else {
+        truncated
+    }
 }

@@ -14,7 +14,9 @@ use crate::StartThreadRequest;
 use crate::StartTurnRequest;
 use crate::SteerTurnRequest;
 use crate::TurnAuditContext;
+use crate::TurnAuditEvent;
 use crate::TurnAuditRetry;
+use crate::append_turn_audit_event;
 use crate::append_turn_audit_retry;
 use crate::append_turn_audit_start_error;
 use crate::bundled_agent_definition;
@@ -75,6 +77,7 @@ pub struct ExecuteTaskRequest {
     pub idempotency_key: String,
     pub prompt: String,
     pub local_image_paths: Vec<String>,
+    pub media_generation_consumed: bool,
     pub context: ContextPackage,
     pub capability: Capability,
     pub internal_executors: Vec<InternalExecutor>,
@@ -252,6 +255,7 @@ impl TaskOrchestrator {
             thread_id: binding.codex_thread_id.clone(),
             attempt_id: attempt.id.as_str().to_string(),
             media_generation_scope: task.id.as_str().to_string(),
+            media_generation_consumed: request.media_generation_consumed,
             agent_definition: bundled_agent_definition(&request.agent_code)
                 .ok_or_else(|| {
                     ExecutionError::InvalidRequest(format!(
@@ -272,9 +276,36 @@ impl TaskOrchestrator {
                 "failed to write game turn audit request: {error}"
             );
         }
+        record_lifecycle_event(
+            store,
+            task.id.as_str(),
+            &audit_context,
+            TurnAuditEvent {
+                event: "request_submit_started".to_string(),
+                status: "started".to_string(),
+                message: "正在向 AI 执行端提交请求".to_string(),
+                payload: serde_json::json!({
+                    "attemptId": attempt.id.as_str(),
+                    "agentCode": request.agent_code.as_str(),
+                }),
+            },
+        )
+        .await?;
         let turn = match execution.start_turn(start_request).await {
             Ok(turn) => turn,
             Err(error) => {
+                record_lifecycle_event(
+                    store,
+                    task.id.as_str(),
+                    &audit_context,
+                    TurnAuditEvent {
+                        event: "request_submit_failed".to_string(),
+                        status: "failed".to_string(),
+                        message: error.to_string(),
+                        payload: serde_json::json!({ "attemptId": attempt.id.as_str() }),
+                    },
+                )
+                .await?;
                 if let Err(audit_error) =
                     append_turn_audit_start_error(&audit_context, &error.to_string())
                 {
@@ -290,12 +321,48 @@ impl TaskOrchestrator {
                 store
                     .mark_attempt_status(attempt.id.as_str(), TaskAttemptStatus::Failed)
                     .await?;
+                if let Err(audit_error) = record_lifecycle_event(
+                    store,
+                    task.id.as_str(),
+                    &audit_context,
+                    TurnAuditEvent {
+                        event: "attempt_terminal".to_string(),
+                        status: "failed".to_string(),
+                        message: "任务尝试在请求提交阶段失败".to_string(),
+                        payload: serde_json::json!({
+                            "attemptId": attempt.id.as_str(),
+                            "error": error.to_string(),
+                        }),
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(
+                        attempt_id = attempt.id.as_str(),
+                        "failed to record terminal lifecycle event: {audit_error}"
+                    );
+                }
                 return Err(error.into());
             }
         };
         store
             .bind_turn_to_attempt(attempt.id.as_str(), &turn.turn_id, now())
             .await?;
+        record_lifecycle_event(
+            store,
+            task.id.as_str(),
+            &audit_context,
+            TurnAuditEvent {
+                event: "request_submit_succeeded".to_string(),
+                status: "succeeded".to_string(),
+                message: "AI 执行端已接受请求".to_string(),
+                payload: serde_json::json!({
+                    "attemptId": attempt.id.as_str(),
+                    "codexTurnId": turn.turn_id.as_str(),
+                }),
+            },
+        )
+        .await?;
         task.status = TaskStatus::Running;
         attempt.status = TaskAttemptStatus::Running;
         attempt.codex_turn_id = Some(turn.turn_id);
@@ -408,6 +475,11 @@ impl TaskOrchestrator {
             thread_id: context.codex_thread_id.clone(),
             attempt_id: retry_attempt.id.as_str().to_string(),
             media_generation_scope: context.task_id.clone(),
+            media_generation_consumed: context
+                .context
+                .recovery_context
+                .as_ref()
+                .is_some_and(|recovery| recovery.recoverable_artifact_path.is_some()),
             agent_definition: bundled_agent_definition(&context.agent_code)
                 .ok_or_else(|| {
                     ExecutionError::InvalidRequest(format!(
@@ -875,6 +947,42 @@ impl TaskOrchestrator {
         let mut locks = self.binding_locks.lock().await;
         Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
+}
+
+async fn record_lifecycle_event(
+    store: &ProjectStore,
+    task_id: &str,
+    context: &TurnAuditContext,
+    event: TurnAuditEvent,
+) -> Result<(), StoreError> {
+    let mut payload = event.payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String(event.status.clone()),
+        );
+    }
+    store
+        .append_task_event(
+            task_id,
+            if event.status == "failed" {
+                "error"
+            } else {
+                "info"
+            },
+            &event.event,
+            &event.message,
+            &payload,
+            now(),
+        )
+        .await?;
+    if let Err(error) = append_turn_audit_event(context, &event) {
+        tracing::warn!(
+            attempt_id = %context.attempt_id,
+            "failed to write game lifecycle audit event: {error}"
+        );
+    }
+    Ok(())
 }
 
 fn record_retry_audit(context: &TurnAuditContext, retry: TurnAuditRetry) {

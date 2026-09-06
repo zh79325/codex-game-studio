@@ -568,6 +568,7 @@ mod tests {
                 item: expected_started_item.clone(),
                 legacy_events: vec![EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent {
                     call_id: "call-image".to_string(),
+                    tool_name: None,
                 })],
             },
         )
@@ -578,6 +579,7 @@ mod tests {
                 item: expected_completed_item.clone(),
                 legacy_events: vec![EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
                     call_id: "call-image".to_string(),
+                    tool_name: None,
                     status: "completed".to_string(),
                     revised_prompt: Some("A tiny blue square".to_string()),
                     result: "cG5n".to_string(),

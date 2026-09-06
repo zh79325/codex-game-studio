@@ -235,6 +235,27 @@ pub struct VisualFocusContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecoveryEventSummary {
+    pub event: String,
+    pub status: String,
+    pub message: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryContext {
+    pub source_task_id: String,
+    pub source_attempt_id: String,
+    pub agent_code: String,
+    pub stage: String,
+    pub partial_response: Option<String>,
+    pub recoverable_artifact_path: Option<String>,
+    pub events: Vec<RecoveryEventSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextPackage {
     pub conversation_history: Vec<String>,
     pub context_version: u64,
@@ -257,6 +278,8 @@ pub struct ContextPackage {
     pub review_subject: Option<ReviewSubject>,
     #[serde(default)]
     pub visual_focus: Option<VisualFocusContext>,
+    #[serde(default)]
+    pub recovery_context: Option<RecoveryContext>,
     #[serde(default)]
     pub memories: Vec<String>,
     #[serde(default)]
@@ -298,6 +321,26 @@ impl ContextPackage {
                         .as_ref()
                         .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
             })
+            && self.recovery_context.as_ref().is_none_or(|recovery| {
+                recovery.source_task_id.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && recovery.source_attempt_id.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && recovery.agent_code.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && recovery.stage.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && recovery
+                        .partial_response
+                        .as_ref()
+                        .is_none_or(|text| text.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+                    && recovery
+                        .recoverable_artifact_path
+                        .as_ref()
+                        .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+                    && recovery.events.len() <= MAX_CONTEXT_SUMMARIES
+                    && recovery.events.iter().all(|event| {
+                        event.event.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                            && event.status.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                            && event.message.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    })
+            })
             && self.action_protocol.len() <= MAX_CONTEXT_SUMMARY_BYTES
     }
 }
@@ -325,10 +368,45 @@ mod tests {
                 content,
             }),
             visual_focus: None,
+            recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: String::new(),
         }
+    }
+
+    #[test]
+    fn recovery_context_is_bounded_by_bytes_and_event_count() {
+        let mut context = context_with_review_subject(String::new());
+        context.recovery_context = Some(RecoveryContext {
+            source_task_id: "task-1".to_string(),
+            source_attempt_id: "attempt-1".to_string(),
+            agent_code: "visual_designer".to_string(),
+            stage: "render".to_string(),
+            partial_response: Some("x".repeat(MAX_CONTEXT_SUMMARY_BYTES)),
+            recoverable_artifact_path: Some("media/render/result.png".to_string()),
+            events: Vec::new(),
+        });
+        assert!(context.is_bounded());
+
+        context
+            .recovery_context
+            .as_mut()
+            .expect("recovery context")
+            .partial_response = Some("x".repeat(MAX_CONTEXT_SUMMARY_BYTES + 1));
+        assert!(!context.is_bounded());
+
+        let recovery = context.recovery_context.as_mut().expect("recovery context");
+        recovery.partial_response = None;
+        recovery.events = (0..=MAX_CONTEXT_SUMMARIES)
+            .map(|index| RecoveryEventSummary {
+                event: format!("event-{index}"),
+                status: "succeeded".to_string(),
+                message: String::new(),
+                timestamp: index as i64,
+            })
+            .collect();
+        assert!(!context.is_bounded());
     }
 
     #[test]

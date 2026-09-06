@@ -30,6 +30,7 @@ use codex_game_domain::ProjectMemory;
 use codex_game_domain::Task;
 use codex_game_domain::TaskAttempt;
 use codex_game_domain::TaskAttemptStatus;
+use codex_game_domain::TaskEvent;
 use codex_game_domain::TaskId;
 use codex_game_domain::TaskStatus;
 use codex_game_domain::ThreadBindingStatus;
@@ -49,6 +50,8 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 const PROJECT_SCHEMA: &str = r#"
@@ -320,6 +323,16 @@ pub struct RunningAttempt {
     pub agent_code: String,
     pub thread_id: String,
     pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterruptedTaskRecovery {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub codex_turn_id: Option<String>,
+    pub agent_code: String,
+    pub stage: String,
+    pub events: Vec<TaskEvent>,
 }
 
 #[derive(Debug, Error)]
@@ -792,6 +805,21 @@ impl ProjectStore {
                 .await?;
         }
         for generation in generations {
+            if let Some(file_hash) = generation.file_hash.as_deref() {
+                let duplicate_id: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM generations WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = ? AND file_hash = ? LIMIT 1",
+                )
+                .bind(&generation.project_id)
+                .bind(&generation.target_kind)
+                .bind(&generation.target_ref)
+                .bind(&generation.stage)
+                .bind(file_hash)
+                .fetch_optional(&mut *transaction)
+                .await?;
+                if duplicate_id.is_some() {
+                    continue;
+                }
+            }
             sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ?, is_final = 0 WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = ? AND review_status IN ('pending', 'revisionRequested', 'accepted')")
                 .bind(created_at)
                 .bind(&generation.project_id)
@@ -1863,6 +1891,111 @@ impl ProjectStore {
             .collect()
     }
 
+    pub async fn append_task_event(
+        &self,
+        task_id: &str,
+        level: &str,
+        event: &str,
+        message: &str,
+        payload: &serde_json::Value,
+        timestamp: i64,
+    ) -> Result<TaskEvent, StoreError> {
+        self.require_writable()?;
+        let level = bounded_event_text(level, 64);
+        let event = bounded_event_text(event, 128);
+        let message = bounded_event_text(message, 8 * 1024);
+        let mut payload = sanitize_task_event_payload(payload, None);
+        let mut payload_json = serde_json::to_string(&payload)?;
+        if payload_json.len() > 64 * 1024 {
+            payload = serde_json::json!({
+                "truncated": true,
+                "originalBytes": payload_json.len(),
+            });
+            payload_json = serde_json::to_string(&payload)?;
+        }
+        let mut transaction = self.pool.begin().await?;
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE task_id = ?",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let result = sqlx::query(
+            "INSERT INTO task_events(task_id, sequence, timestamp, level, event, message, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(task_id)
+        .bind(sequence)
+        .bind(timestamp)
+        .bind(&level)
+        .bind(&event)
+        .bind(&message)
+        .bind(&payload_json)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(TaskEvent {
+            id: result.last_insert_rowid(),
+            task_id: task_id.to_string(),
+            sequence: sequence as u64,
+            timestamp,
+            level,
+            event,
+            message,
+            payload,
+        })
+    }
+
+    pub async fn list_task_events(&self, task_id: &str) -> Result<Vec<TaskEvent>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, task_id, sequence, timestamp, level, event, message, payload_json FROM task_events WHERE task_id = ? ORDER BY sequence",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let payload_json: String = row.try_get("payload_json")?;
+                Ok(TaskEvent {
+                    id: row.try_get("id")?,
+                    task_id: row.try_get("task_id")?,
+                    sequence: row.try_get::<i64, _>("sequence")? as u64,
+                    timestamp: row.try_get("timestamp")?,
+                    level: row.try_get("level")?,
+                    event: row.try_get("event")?,
+                    message: row.try_get("message")?,
+                    payload: serde_json::from_str(&payload_json)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn latest_interrupted_task_recovery(
+        &self,
+        conversation_id: &str,
+        director_agent_code: &str,
+    ) -> Result<Option<InterruptedTaskRecovery>, StoreError> {
+        let row = sqlx::query(
+            "SELECT t.id AS task_id, ta.id AS attempt_id, ta.codex_turn_id, t.agent_code, t.stage FROM task_attempts ta JOIN tasks t ON t.id = ta.task_id JOIN interactions i ON i.id = t.interaction_id WHERE i.conversation_id = ? AND t.agent_code != ? AND ta.status IN ('cancelled', 'interrupted') AND NOT EXISTS (SELECT 1 FROM tasks newer JOIN interactions ni ON ni.id = newer.interaction_id WHERE ni.conversation_id = i.conversation_id AND newer.agent_code = t.agent_code AND newer.stage = t.stage AND newer.rowid > t.rowid) ORDER BY t.rowid DESC, ta.attempt_no DESC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .bind(director_agent_code)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let task_id: String = row.try_get("task_id")?;
+        let events = self.list_task_events(&task_id).await?;
+        Ok(Some(InterruptedTaskRecovery {
+            task_id,
+            attempt_id: row.try_get("attempt_id")?,
+            codex_turn_id: row.try_get("codex_turn_id")?,
+            agent_code: row.try_get("agent_code")?,
+            stage: row.try_get("stage")?,
+            events,
+        }))
+    }
+
     pub async fn running_attempts(
         &self,
         conversation_id: &str,
@@ -1986,6 +2119,16 @@ impl ProjectStore {
         codex_turn_id: &str,
         attempt_status: TaskAttemptStatus,
     ) -> Result<Option<TurnAttemptCompletion>, StoreError> {
+        self.complete_turn_with_partial(codex_turn_id, attempt_status, None)
+            .await
+    }
+
+    pub async fn complete_turn_with_partial(
+        &self,
+        codex_turn_id: &str,
+        attempt_status: TaskAttemptStatus,
+        partial_output: Option<&str>,
+    ) -> Result<Option<TurnAttemptCompletion>, StoreError> {
         self.require_writable()?;
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
@@ -2017,10 +2160,13 @@ impl ProjectStore {
             TaskAttemptStatus::Failed | TaskAttemptStatus::Unknown => "failed",
             _ => "completed",
         };
+        let partial_output = partial_output.filter(|output| !output.trim().is_empty());
         sqlx::query(
-            "UPDATE messages SET status = ?, content = CASE WHEN content = '' AND ? = 'failed' THEN 'Agent 执行失败，可重试本轮。' WHEN content = '' AND ? = 'interrupted' THEN '运行已中断' ELSE content END WHERE id = (SELECT id FROM messages WHERE conversation_id = ? AND status = 'thinking' ORDER BY turn DESC, created_at DESC LIMIT 1)",
+            "UPDATE messages SET status = ?, content = CASE WHEN content = '' AND ? IS NOT NULL THEN ? WHEN content = '' AND ? = 'failed' THEN 'Agent 执行失败，可重试本轮。' WHEN content = '' AND ? = 'interrupted' THEN '运行已中断' ELSE content END WHERE id = (SELECT id FROM messages WHERE conversation_id = ? AND status = 'thinking' ORDER BY turn DESC, created_at DESC LIMIT 1)",
         )
         .bind(message_status)
+        .bind(partial_output)
+        .bind(partial_output)
         .bind(message_status)
         .bind(message_status)
         .bind(&completion.conversation_id)
@@ -2037,6 +2183,11 @@ impl ProjectStore {
     pub async fn recover_incomplete_attempts(&self) -> Result<u64, StoreError> {
         self.require_writable()?;
         let mut transaction = self.pool.begin().await?;
+        let interrupted = sqlx::query(
+            "SELECT id, task_id, codex_turn_id FROM task_attempts WHERE status IN ('pending', 'running')",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
         let result = sqlx::query(
             "UPDATE task_attempts SET status = 'interrupted' WHERE status IN ('pending', 'running')",
         )
@@ -2053,6 +2204,34 @@ impl ProjectStore {
         sqlx::query("UPDATE conversations SET status = 'active' WHERE status = 'running'")
             .execute(&mut *transaction)
             .await?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for row in interrupted {
+            let task_id: String = row.try_get("task_id")?;
+            let attempt_id: String = row.try_get("id")?;
+            let codex_turn_id: Option<String> = row.try_get("codex_turn_id")?;
+            let sequence: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE task_id = ?",
+            )
+            .bind(&task_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let payload = serde_json::json!({
+                "status": "interrupted",
+                "attemptId": attempt_id,
+                "codexTurnId": codex_turn_id,
+                "reason": "application_restarted",
+            });
+            sqlx::query("INSERT INTO task_events(task_id, sequence, timestamp, level, event, message, payload_json) VALUES (?, ?, ?, 'error', 'attempt_terminal', '应用退出后恢复未完成任务', ?)")
+                .bind(task_id)
+                .bind(sequence)
+                .bind(timestamp)
+                .bind(serde_json::to_string(&payload)?)
+                .execute(&mut *transaction)
+                .await?;
+        }
         transaction.commit().await?;
         Ok(result.rows_affected())
     }
@@ -2646,6 +2825,71 @@ async fn migrate_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+fn bounded_event_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    const SUFFIX: &str = "\n[truncated]";
+    let mut boundary = max_bytes.saturating_sub(SUFFIX.len());
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    format!("{}{SUFFIX}", &value[..boundary])
+}
+
+fn sanitize_task_event_payload(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
+    if key.is_some_and(is_sensitive_event_key) {
+        return serde_json::Value::String("[redacted]".to_string());
+    }
+    match value {
+        serde_json::Value::String(value) => {
+            let sanitized = if value.starts_with("data:") && value.contains(";base64,") {
+                "[data URL omitted]".to_string()
+            } else {
+                bounded_event_text(value, 8 * 1024)
+            };
+            serde_json::Value::String(sanitized)
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .take(64)
+                .map(|value| sanitize_task_event_payload(value, None))
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .take(64)
+                .map(|(key, value)| {
+                    (
+                        bounded_event_text(key, 128),
+                        sanitize_task_event_payload(value, Some(key)),
+                    )
+                })
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+fn is_sensitive_event_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "token"
+            | "access_token"
+            | "refreshtoken"
+            | "refresh_token"
+            | "bearer_token"
+            | "secret"
+            | "password"
+            | "api_key"
+            | "apikey"
+            | "authorization"
+    ) || key.ends_with("_secret")
+}
+
 async fn ensure_column(
     pool: &SqlitePool,
     count_sql: &'static str,
@@ -2708,6 +2952,71 @@ mod tests {
                 .expect("list groups"),
             vec!["主角".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn task_events_are_ordered_bounded_and_recoverable() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        sqlx::query("INSERT INTO conversations(id, project_id, target_kind, title, director_agent_code, status, turn, created_at, updated_at) VALUES ('conversation-1', 'project-1', 'character', '角色', 'studio_director', 'active', 1, 1, 1)")
+            .execute(store.pool())
+            .await
+            .expect("seed conversation");
+        sqlx::query("INSERT INTO interactions(id, conversation_id, idempotency_key, created_at) VALUES ('interaction-1', 'conversation-1', 'key-1', 1)")
+            .execute(store.pool())
+            .await
+            .expect("seed interaction");
+        sqlx::query("INSERT INTO tasks(id, interaction_id, target_id, stage, agent_code, status) VALUES ('task-1', 'interaction-1', 'character-1', 'render', 'visual_designer', 'failed')")
+            .execute(store.pool())
+            .await
+            .expect("seed task");
+        sqlx::query("INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, codex_turn_id, status) VALUES ('attempt-1', 'task-1', 1, 'thread-1', 'turn-1', 'interrupted')")
+            .execute(store.pool())
+            .await
+            .expect("seed attempt");
+
+        store
+            .append_task_event(
+                "task-1",
+                "info",
+                "image_generation_succeeded",
+                &"m".repeat(9 * 1024),
+                &serde_json::json!({
+                    "attemptId": "attempt-1",
+                    "savedPath": "media/render/result.png",
+                    "api_key": "secret-value",
+                    "result": "data:image/png;base64,aGVsbG8=",
+                }),
+                10,
+            )
+            .await
+            .expect("append event");
+        store
+            .append_task_event(
+                "task-1",
+                "info",
+                "partial_response",
+                "partial",
+                &serde_json::json!({ "attemptId": "attempt-1", "text": "done" }),
+                11,
+            )
+            .await
+            .expect("append second event");
+
+        let recovery = store
+            .latest_interrupted_task_recovery("conversation-1", "studio_director")
+            .await
+            .expect("load recovery")
+            .expect("recovery exists");
+        assert_eq!(recovery.attempt_id, "attempt-1");
+        assert_eq!(recovery.events.len(), 2);
+        assert_eq!(recovery.events[0].sequence, 1);
+        assert_eq!(recovery.events[1].sequence, 2);
+        assert!(recovery.events[0].message.len() <= 8 * 1024);
+        assert_eq!(recovery.events[0].payload["api_key"], "[redacted]");
+        assert_eq!(recovery.events[0].payload["result"], "[data URL omitted]");
     }
 
     #[tokio::test]
@@ -3129,6 +3438,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_action_deduplicates_generation_by_stage_and_hash() {
+        let directory = tempdir().expect("tempdir");
+        let store = ProjectStore::open(directory.path())
+            .await
+            .expect("open store");
+        sqlx::query("INSERT INTO conversations(id, project_id, target_kind, target_ref, title, director_agent_code, status, turn, created_at, updated_at) VALUES ('c1', 'project-1', 'character', 'character-1', '角色', 'studio_director', 'running', 1, 1, 1)")
+            .execute(store.pool())
+            .await
+            .expect("seed conversation");
+        sqlx::query("INSERT INTO interactions(id, conversation_id, idempotency_key, created_at) VALUES ('i1', 'c1', 'key1', 1)")
+            .execute(store.pool())
+            .await
+            .expect("seed interaction");
+        sqlx::query("INSERT INTO tasks(id, interaction_id, target_id, stage, agent_code, status) VALUES ('t1', 'i1', 'character-1', 'render', 'visual_designer', 'running')")
+            .execute(store.pool())
+            .await
+            .expect("seed task");
+        sqlx::query("INSERT INTO task_attempts(id, task_id, attempt_no, conversation_codex_thread_id, codex_turn_id, status) VALUES ('a1', 't1', 1, 'ct1', 'turn1', 'running')")
+            .execute(store.pool())
+            .await
+            .expect("seed attempt");
+        sqlx::query("INSERT INTO messages(id, conversation_id, role, content, agent_code, status, created_at) VALUES ('m1', 'c1', 'assistant', '', 'visual_designer', 'thinking', 1)")
+            .execute(store.pool())
+            .await
+            .expect("seed message");
+        let generation = |id: &str, task_id: &str| Generation {
+            id: id.to_string(),
+            project_id: "project-1".to_string(),
+            target_kind: "character".to_string(),
+            target_ref: "character-1".to_string(),
+            stage: "render".to_string(),
+            variant: None,
+            file_path: "characters/character-1/tmp/focus/media/render/hash.png".to_string(),
+            file_hash: Some("same-hash".to_string()),
+            is_final: false,
+            review_status: GenerationReviewStatus::Pending,
+            review_feedback: None,
+            reviewed_at: None,
+            source: "image_t2i".to_string(),
+            task_id: Some(task_id.to_string()),
+            asset_spec: serde_json::json!({}),
+            created_at: 1,
+        };
+        store
+            .insert_generation(&generation("generation-existing", "old-task"))
+            .await
+            .expect("seed generation");
+        let action = AgentAction {
+            action: AgentActionKind::Handoff,
+            target_agent: Some("studio_director".to_string()),
+            reason: "提交恢复产物".to_string(),
+            payload: AgentActionPayload::default(),
+        };
+
+        store
+            .commit_action_turn(
+                "turn1",
+                "m1",
+                "done",
+                &action,
+                &[generation("generation-duplicate", "t1")],
+                None,
+                2,
+            )
+            .await
+            .expect("commit duplicate generation");
+
+        let generations = store
+            .list_generations("project-1", "character", "character-1", Some("render"))
+            .await
+            .expect("list generations");
+        assert_eq!(generations.len(), 1);
+        assert_eq!(generations[0].id, "generation-existing");
+        assert_eq!(
+            generations[0].review_status,
+            GenerationReviewStatus::Pending
+        );
+    }
+
+    #[tokio::test]
     async fn recovery_interrupts_unfinished_attempts() {
         let directory = tempdir().expect("tempdir");
         let store = ProjectStore::open(directory.path())
@@ -3144,6 +3533,11 @@ mod tests {
             store.recover_incomplete_attempts().await.expect("recover"),
             1
         );
+        let events = store.list_task_events("t1").await.expect("task events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "attempt_terminal");
+        assert_eq!(events[0].payload["status"], "interrupted");
+        assert_eq!(events[0].payload["attemptId"], "a1");
     }
 
     #[test]

@@ -120,6 +120,40 @@ fn writes_structured_failure_and_retry_events() {
 }
 
 #[test]
+fn writes_structured_lifecycle_event_with_redaction() {
+    let temp = TempDir::new().expect("temp dir");
+    fs::write(
+        temp.path().join("project.json"),
+        r#"{"schemaVersion":2,"projectId":"project-1"}"#,
+    )
+    .expect("project config");
+    let context = audit_context(&temp);
+    write_turn_audit_request(&context, &route(), &start_request("hello"))
+        .expect("write request audit");
+
+    append_turn_audit_event(
+        &context,
+        &TurnAuditEvent {
+            event: "image_generation_succeeded".to_string(),
+            status: "succeeded".to_string(),
+            message: "image ready".to_string(),
+            payload: serde_json::json!({
+                "result": "data:image/png;base64,aGVsbG8=",
+                "savedPath": "media/render/result.png",
+            }),
+        },
+    )
+    .expect("write lifecycle event");
+
+    let contents = fs::read_to_string(audit_path(&context)).expect("audit contents");
+    assert!(contents.contains("### Lifecycle Event"));
+    assert!(contents.contains("image_generation_succeeded"));
+    assert!(contents.contains("media/render/result.png"));
+    assert!(contents.contains("[data URL omitted:"));
+    assert!(!contents.contains("aGVsbG8="));
+}
+
+#[test]
 fn skips_audit_when_explicitly_disabled() {
     let temp = TempDir::new().expect("temp dir");
     fs::write(
@@ -160,6 +194,7 @@ fn start_request(prompt: &str) -> StartTurnRequest {
         thread_id: "thread-1".to_string(),
         attempt_id: "attempt-1".to_string(),
         media_generation_scope: "task-1".to_string(),
+        media_generation_consumed: false,
         agent_definition: "agent definition".to_string(),
         prompt: prompt.to_string(),
         local_image_paths: Vec::new(),
@@ -177,6 +212,7 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             workflow_context: None,
             review_subject: None,
             visual_focus: None,
+            recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
             action_protocol: "json".to_string(),

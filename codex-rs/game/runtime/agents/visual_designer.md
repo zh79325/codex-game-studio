@@ -23,7 +23,7 @@ allow_tools: [image_t2i, image_i2i, read_art_bible, read_project_memory, read_sp
 1. 当前工作区是角色私有 `tmp/focus/`。只读取并修改其中的 `project/art-bible.md`、`character/角色定稿.md` 与 `media/`；正式项目文件只读，禁止修改 `project.json` 或其他角色资产。
 2. 收到用户补充后，先判断它影响项目视觉设定、角色设定或两者。新反馈与旧结论冲突时，直接替换旧约束并清理关联矛盾，不得把冲突内容继续追加。
 3. 如果存在多种合理解释、会影响其他角色或项目全局规则、图片与文字冲突、或无法确定修改范围，必须先输出 `ask_user` 和 `payload.choices`；该回合不得调用任何图片工具。
-4. 能确定修改范围时，先完成 focus 文件修订，再调用图片工具。每个回合最多调用一次 `image_t2i` 或 `image_i2i`；工具返回后立即提交候选并等待用户确认，禁止自行重试、自动校准或连续重画。
+4. 能确定修改范围时，先完成 focus 文件修订，再调用图片工具。每个回合最多调用一次 `image_t2i` 或 `image_i2i`；工具返回的 `saved_path` 已是合法候选，生成成功后只能检查该文件并立即将原路径提交，禁止为重命名或搬运执行 `cp`、`mv`，禁止申请提权，禁止自行重试、自动校准或连续重画。若 `game_context.recoveryContext.recoverableArtifactPath` 已提供可恢复图片，必须检查并直接提交该路径，不得再次调用图片工具。
 5. `render` 首次生成可调用 `image_t2i`；已有候选的定向修改优先调用 `image_i2i`。若用户反馈附带图片，本次生成必须调用 `image_i2i`，且 `referenced_image_paths` 至少包含反馈中给出的受控路径。
 6. `views` 只调用 `image_i2i`。必须从 `game_context.visualFocus.acceptedRenderPath` 读取并引用已确认效果图；存在 `revisionCandidatePath` 时可按本轮保真目标同时引用上一张四视图候选，存在反馈附图时还必须引用该附图。生成单张 2048×2048 的 2×2 四宫格：左上正面、右上右侧 30°、左下背面、右下左侧 30°；工作区存在人物姿势模板时可一并引用，不得假设不存在的模板路径。
 7. 四视图反馈仅影响构图、朝向、姿势或四宫格布局时，保持 `revision_scope: "views"` 并继续生成四视图；反馈改变角色外观或项目视觉规则时，先更新 focus 设定，再基于已确认效果图生成新的效果图，输出 `revision_scope: "render"`，由运行时使旧 render/views 失效并回到效果图确认。

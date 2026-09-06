@@ -27,6 +27,8 @@ use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
 use codex_game_domain::ProjectMemory;
 use codex_game_domain::ProjectState;
+use codex_game_domain::RecoveryContext;
+use codex_game_domain::RecoveryEventSummary;
 use codex_game_domain::ReviewSubject;
 use codex_game_domain::Task;
 use codex_game_domain::TaskAttemptStatus;
@@ -85,6 +87,7 @@ pub struct ConversationSnapshot {
 #[derive(Debug, Clone)]
 pub struct PreparedConversationTurn {
     pub user_message: ConversationMessage,
+    pub execution_prompt: String,
     pub assistant_message: ConversationMessage,
     pub conversation: Conversation,
     pub agent_code: String,
@@ -367,10 +370,12 @@ impl GameService {
             ProjectStore::open(&root_path).await?
         });
         let recovered = store.access() == ProjectAccess::ReadOnly;
+        if store.access() == ProjectAccess::ReadWrite {
+            store.recover_incomplete_attempts().await?;
+        }
         let conversations = store.load_conversations(project.id.as_str()).await?;
         let art_bibles = store.load_art_bible_versions(project.id.as_str()).await?;
         if store.access() == ProjectAccess::ReadWrite {
-            store.recover_incomplete_attempts().await?;
             if let Some((_, markdown)) = art_bibles.last() {
                 write_art_bible(&root_path.join("art-bible.md"), markdown)?;
             }
@@ -556,18 +561,137 @@ impl GameService {
         Ok(None)
     }
 
+    pub async fn record_turn_event(
+        &self,
+        codex_turn_id: &str,
+        event: &crate::TurnAuditEvent,
+    ) -> Result<(), GameServiceError> {
+        let audit_context = self.turn_audit_context(codex_turn_id).await?;
+        for store in self.writable_stores()? {
+            let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
+                continue;
+            };
+            let mut payload = event.payload.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "status".to_string(),
+                    serde_json::Value::String(event.status.clone()),
+                );
+                object.insert(
+                    "attemptId".to_string(),
+                    serde_json::Value::String(context.attempt_id.clone()),
+                );
+                object.insert(
+                    "codexTurnId".to_string(),
+                    serde_json::Value::String(codex_turn_id.to_string()),
+                );
+            }
+            store
+                .append_task_event(
+                    &context.task_id,
+                    if event.status == "failed" {
+                        "error"
+                    } else {
+                        "info"
+                    },
+                    &event.event,
+                    &event.message,
+                    &payload,
+                    now(),
+                )
+                .await?;
+            if let Some(audit_context) = audit_context.as_ref()
+                && let Err(error) = crate::append_turn_audit_event(audit_context, event)
+            {
+                tracing::warn!(
+                    attempt_id = %context.attempt_id,
+                    "failed to append game lifecycle audit event: {error}"
+                );
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    pub async fn record_task_event(
+        &self,
+        conversation_id: &str,
+        task_id: &str,
+        audit_context: Option<&crate::TurnAuditContext>,
+        event: &crate::TurnAuditEvent,
+    ) -> Result<(), GameServiceError> {
+        let (_, store) = self.execution_context(conversation_id)?;
+        let mut payload = event.payload.clone();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "status".to_string(),
+                serde_json::Value::String(event.status.clone()),
+            );
+        }
+        store
+            .append_task_event(
+                task_id,
+                if event.status == "failed" {
+                    "error"
+                } else {
+                    "info"
+                },
+                &event.event,
+                &event.message,
+                &payload,
+                now(),
+            )
+            .await?;
+        if let Some(audit_context) = audit_context
+            && let Err(error) = crate::append_turn_audit_event(audit_context, event)
+        {
+            tracing::warn!(
+                attempt_id = %audit_context.attempt_id,
+                "failed to append game lifecycle audit event: {error}"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn complete_turn(
         &self,
         codex_turn_id: &str,
         status: TaskAttemptStatus,
     ) -> Result<Option<CompletedTaskAttempt>, GameServiceError> {
+        self.complete_turn_with_partial(codex_turn_id, status, None)
+            .await
+    }
+
+    pub async fn complete_turn_with_partial(
+        &self,
+        codex_turn_id: &str,
+        status: TaskAttemptStatus,
+        partial_output: Option<&str>,
+    ) -> Result<Option<CompletedTaskAttempt>, GameServiceError> {
+        if let Some(partial_output) = partial_output.filter(|output| !output.trim().is_empty()) {
+            self.record_turn_event(
+                codex_turn_id,
+                &crate::TurnAuditEvent {
+                    event: "partial_response".to_string(),
+                    status: "interrupted".to_string(),
+                    message: "已保存 Agent 中断前的输出".to_string(),
+                    payload: serde_json::json!({
+                        "text": truncate_recovery_text(partial_output, 8 * 1024),
+                    }),
+                },
+            )
+            .await?;
+        }
         let stores = self.writable_stores()?;
         for store in stores {
             let agent_code = store
                 .turn_attempt_context(codex_turn_id)
                 .await?
                 .map(|context| context.agent_code);
-            if let Some(completion) = store.complete_turn(codex_turn_id, status).await? {
+            if let Some(completion) = store
+                .complete_turn_with_partial(codex_turn_id, status, partial_output)
+                .await?
+            {
                 let message_status = match status {
                     TaskAttemptStatus::Cancelled | TaskAttemptStatus::Interrupted => {
                         MessageStatus::Interrupted
@@ -575,11 +699,14 @@ impl GameService {
                     TaskAttemptStatus::Failed | TaskAttemptStatus::Unknown => MessageStatus::Failed,
                     _ => MessageStatus::Completed,
                 };
-                let fallback = match message_status {
-                    MessageStatus::Interrupted => "运行已中断".to_string(),
-                    MessageStatus::Failed => "Agent 执行失败，可重试本轮。".to_string(),
-                    _ => String::new(),
-                };
+                let fallback = partial_output
+                    .filter(|output| !output.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| match message_status {
+                        MessageStatus::Interrupted => "运行已中断".to_string(),
+                        MessageStatus::Failed => "Agent 执行失败，可重试本轮。".to_string(),
+                        _ => String::new(),
+                    });
                 self.apply_latest_running_message(
                     &completion.conversation_id,
                     message_status,
@@ -603,6 +730,17 @@ impl GameService {
         codex_turn_id: &str,
         output: Option<&str>,
     ) -> Result<TurnOutputCompletion, GameServiceError> {
+        let audit_context = self.turn_audit_context(codex_turn_id).await?;
+        self.record_turn_event(
+            codex_turn_id,
+            &crate::TurnAuditEvent {
+                event: "protocol_parse_started".to_string(),
+                status: "started".to_string(),
+                message: "开始解析并校验 Agent Action 协议".to_string(),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await?;
         for store in self.writable_stores()? {
             let Some(context) = store.turn_attempt_context(codex_turn_id).await? else {
                 continue;
@@ -649,6 +787,16 @@ impl GameService {
             let parsed = match parsed {
                 Ok(parsed) => parsed,
                 Err(error) => {
+                    self.record_turn_event(
+                        codex_turn_id,
+                        &crate::TurnAuditEvent {
+                            event: "protocol_parse_failed".to_string(),
+                            status: "failed".to_string(),
+                            message: error.clone(),
+                            payload: serde_json::json!({}),
+                        },
+                    )
+                    .await?;
                     return Ok(TurnOutputCompletion::ActionProtocolViolation(
                         ActionProtocolViolation {
                             codex_turn_id: codex_turn_id.to_string(),
@@ -660,6 +808,20 @@ impl GameService {
                     ));
                 }
             };
+            self.record_turn_event(
+                codex_turn_id,
+                &crate::TurnAuditEvent {
+                    event: "protocol_parse_succeeded".to_string(),
+                    status: "succeeded".to_string(),
+                    message: "Agent Action 协议解析成功".to_string(),
+                    payload: serde_json::json!({
+                        "action": format!("{:?}", parsed.action.action).to_lowercase(),
+                        "targetAgent": parsed.action.target_agent.as_deref(),
+                        "reason": &parsed.action.reason,
+                    }),
+                },
+            )
+            .await?;
             if context.agent_code == "spec_reviewer"
                 && parsed.action.action == AgentActionKind::Handoff
             {
@@ -684,6 +846,18 @@ impl GameService {
                     ));
                 }
             }
+            if context.agent_code == "visual_designer" {
+                self.record_turn_event(
+                    codex_turn_id,
+                    &crate::TurnAuditEvent {
+                        event: "artifact_validation_started".to_string(),
+                        status: "started".to_string(),
+                        message: "开始校验视觉产物".to_string(),
+                        payload: serde_json::json!({}),
+                    },
+                )
+                .await?;
+            }
             let (generations, updated_character) = match self
                 .prepare_action_generations(&context, &parsed.action)
                 .await
@@ -691,6 +865,16 @@ impl GameService {
                 Ok(result) => result,
                 Err(error) => {
                     let message = format!("Action 产物校验失败：{error}");
+                    self.record_turn_event(
+                        codex_turn_id,
+                        &crate::TurnAuditEvent {
+                            event: "artifact_validation_failed".to_string(),
+                            status: "failed".to_string(),
+                            message: message.clone(),
+                            payload: serde_json::json!({}),
+                        },
+                    )
+                    .await?;
                     let completion = store
                         .fail_action_turn(
                             codex_turn_id,
@@ -717,6 +901,18 @@ impl GameService {
                     )));
                 }
             };
+            if context.agent_code == "visual_designer" {
+                self.record_turn_event(
+                    codex_turn_id,
+                    &crate::TurnAuditEvent {
+                        event: "artifact_validation_succeeded".to_string(),
+                        status: "succeeded".to_string(),
+                        message: "视觉产物校验成功".to_string(),
+                        payload: serde_json::json!({ "artifactCount": generations.len() }),
+                    },
+                )
+                .await?;
+            }
             let metadata_backups = if let Some(character) = updated_character.as_ref() {
                 let project = self.read_project(&character.project_id)?;
                 let meta_path = Path::new(&project.root)
@@ -790,6 +986,23 @@ impl GameService {
                     return Err(error.into());
                 }
             };
+            self.record_task_event(
+                &context.conversation_id,
+                &context.task_id,
+                audit_context.as_ref(),
+                &crate::TurnAuditEvent {
+                    event: "artifact_committed".to_string(),
+                    status: "succeeded".to_string(),
+                    message: "Agent Action 与产物已提交".to_string(),
+                    payload: serde_json::json!({
+                        "attemptId": context.attempt_id.as_str(),
+                        "codexTurnId": codex_turn_id,
+                        "artifactCount": generations.len(),
+                        "action": format!("{:?}", parsed.action.action).to_lowercase(),
+                    }),
+                },
+            )
+            .await?;
             let drafts = store.list_drafts(&context.conversation_id).await?;
             let memories = store
                 .list_conversation_memories(&context.conversation_id)
@@ -1585,8 +1798,10 @@ impl GameService {
             }
             return Err(error.into());
         }
+        let execution_prompt = user_message.content.clone();
         Ok(PreparedConversationTurn {
             user_message,
+            execution_prompt,
             assistant_message,
             conversation,
             agent_code,
@@ -1799,8 +2014,20 @@ impl GameService {
             .ok_or_else(|| {
                 GameServiceError::InvalidAction("handoff 缺少原始用户消息".to_string())
             })?;
+        let execution_prompt = if target_agent == snapshot.conversation.director_agent_code {
+            format!(
+                "专业 Agent {} 已回交控制权：{}。请先核对 conversationHistory 与 recoveryContext 中的实际执行进度，再决定下一步。",
+                latest_message.agent_code, latest_action.reason
+            )
+        } else {
+            format!(
+                "总管交接任务：{}。若 recoveryContext 存在，请只完成尚未完成的步骤，并复用其中已经成功的产物。",
+                latest_action.reason
+            )
+        };
         Ok(PreparedConversationTurn {
             user_message,
+            execution_prompt,
             assistant_message,
             conversation,
             agent_code: target_agent.to_string(),
@@ -1925,6 +2152,87 @@ impl GameService {
                 target_path: draft.target_path.clone(),
                 content: draft.content.clone(),
             });
+        let recovery_context = prepared
+            .store
+            .latest_interrupted_task_recovery(
+                prepared.conversation.id.as_str(),
+                &prepared.conversation.director_agent_code,
+            )
+            .await?
+            .filter(|recovery| recovery.stage == prepared.stage)
+            .filter(|recovery| {
+                !character_generations
+                    .iter()
+                    .any(|generation| generation.task_id.as_deref() == Some(&recovery.task_id))
+            })
+            .map(|recovery| {
+                let recovery_events = recovery
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .payload
+                            .get("attemptId")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(recovery.attempt_id.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                let partial_response = recovery_events
+                    .iter()
+                    .rev()
+                    .find(|event| event.event == "partial_response")
+                    .and_then(|event| event.payload.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| truncate_recovery_text(text, 8 * 1024));
+                let recoverable_artifact_path = character.as_ref().and_then(|character| {
+                    recovery_events
+                        .iter()
+                        .rev()
+                        .find(|event| event.event == "image_generation_succeeded")
+                        .and_then(|event| event.payload.get("savedPath"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|path| {
+                            focus::validate_stage_media_path(
+                                &prepared.project,
+                                character,
+                                &recovery.stage,
+                                path,
+                            )
+                            .ok()
+                        })
+                        .and_then(|path| {
+                            path.strip_prefix(&prepared.project.root)
+                                .ok()
+                                .map(|path| path.to_string_lossy().into_owned())
+                        })
+                });
+                let events = recovery_events
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .rev()
+                    .map(|event| RecoveryEventSummary {
+                        event: event.event.clone(),
+                        status: event
+                            .payload
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(&event.level)
+                            .to_string(),
+                        message: truncate_recovery_text(&event.message, 2 * 1024),
+                        timestamp: event.timestamp,
+                    })
+                    .collect();
+                RecoveryContext {
+                    source_task_id: recovery.task_id,
+                    source_attempt_id: recovery.attempt_id,
+                    agent_code: recovery.agent_code,
+                    stage: recovery.stage,
+                    partial_response,
+                    recoverable_artifact_path,
+                    events,
+                }
+            });
         let handoff_count = snapshot
             .handoffs
             .iter()
@@ -1971,6 +2279,7 @@ impl GameService {
             workflow_context,
             review_subject,
             visual_focus,
+            recovery_context,
             memories,
             allowed_handoffs,
             action_protocol: action_protocol_instruction(
@@ -3796,6 +4105,18 @@ fn absolute_root(root: &str) -> Result<PathBuf, GameServiceError> {
     } else {
         Err(GameServiceError::InvalidProjectPath(root.to_string()))
     }
+}
+
+fn truncate_recovery_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    const SUFFIX: &str = "\n[truncated]";
+    let mut boundary = max_bytes.saturating_sub(SUFFIX.len());
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    format!("{}{SUFFIX}", &value[..boundary])
 }
 
 fn now() -> i64 {

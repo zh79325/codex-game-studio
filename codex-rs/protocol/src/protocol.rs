@@ -2707,11 +2707,17 @@ pub struct WebSearchEndEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ImageGenerationBeginEvent {
     pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ImageGenerationEndEvent {
     pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_name: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

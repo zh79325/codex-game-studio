@@ -1,5 +1,7 @@
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_core::config::Constrained;
+use codex_core::config::Permissions;
 use codex_extension_api::ExtensionDataInit;
 use codex_game_app_server_adapter::AiExecutionRoute;
 use codex_game_app_server_adapter::GameAppServerAdapter;
@@ -22,6 +24,9 @@ use codex_image_generation_extension::ImageGenerationToolRouteOverride;
 use codex_image_generation_extension::ImageGenerationTurnGate;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Op;
 use codex_protocol::turn_input::StartIfIdleSubmission;
 use codex_protocol::turn_input::SteerSubmission;
@@ -149,6 +154,22 @@ impl AppServerCodexExecutionPort {
     }
 }
 
+fn game_thread_permissions(cwd: AbsolutePathBuf) -> Result<Permissions, ExecutionError> {
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Restricted,
+        /* exclude_tmpdir_env_var */ true,
+        /* exclude_slash_tmp */ true,
+    );
+    let mut permissions = Permissions::from_approval_and_profile(
+        Constrained::allow_only(AskForApproval::Never),
+        Constrained::allow_only(permission_profile),
+    )
+    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
+    permissions.set_workspace_roots(vec![cwd]);
+    Ok(permissions)
+}
+
 fn model_provider_info(route: AiExecutionRoute) -> Result<ModelProviderInfo, String> {
     let (experimental_bearer_token, http_headers) = match route.auth_style.as_str() {
         "bearer" => (Some(RedactedString::from(route.api_key)), None),
@@ -257,8 +278,9 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             thread_extension_init.insert(ImageGenerationRouteOverride { tools });
         }
         config.cwd = cwd.clone();
-        config.workspace_roots = vec![cwd];
+        config.workspace_roots = vec![cwd.clone()];
         config.workspace_roots_explicit = true;
+        config.permissions = game_thread_permissions(cwd)?;
         let mut options = codex_core::StartThreadOptions::new(config);
         options.thread_extension_init = thread_extension_init;
         let started = self
@@ -282,7 +304,10 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
             .thread_extension_data()
             .get::<ImageGenerationTurnGate>()
         {
-            gate.begin_scope(request.media_generation_scope.clone());
+            gate.begin_scope_with_consumed(
+                request.media_generation_scope.clone(),
+                request.media_generation_consumed,
+            );
         }
         let input = request
             .model_input()
@@ -382,6 +407,34 @@ mod tests {
             auth_style: auth_style.to_string(),
             api_key: "secret-key".to_string(),
         }
+    }
+
+    #[test]
+    fn game_thread_permissions_allow_only_workspace_write_without_approval() {
+        let cwd = AbsolutePathBuf::from_absolute_path_checked("/tmp/game-focus")
+            .expect("absolute test path");
+        let permissions = game_thread_permissions(cwd.clone()).expect("game permissions");
+
+        assert_eq!(permissions.approval_policy.value(), AskForApproval::Never);
+        assert_eq!(permissions.workspace_roots(), &[cwd]);
+        let policy = permissions.file_system_sandbox_policy();
+        assert!(policy.entries.iter().any(|entry| {
+            entry.access == codex_protocol::permissions::FileSystemAccessMode::Read
+                && matches!(
+                    entry.path,
+                    codex_protocol::permissions::FileSystemPath::Special {
+                        value: codex_protocol::permissions::FileSystemSpecialPath::Root,
+                    }
+                )
+        }));
+        assert_eq!(
+            policy
+                .entries
+                .iter()
+                .filter(|entry| entry.access.can_write())
+                .count(),
+            1
+        );
     }
 
     #[test]

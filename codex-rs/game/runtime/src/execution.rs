@@ -30,6 +30,7 @@ pub struct StartTurnRequest {
     pub thread_id: String,
     pub attempt_id: String,
     pub media_generation_scope: String,
+    pub media_generation_consumed: bool,
     pub agent_definition: String,
     pub prompt: String,
     pub local_image_paths: Vec<String>,

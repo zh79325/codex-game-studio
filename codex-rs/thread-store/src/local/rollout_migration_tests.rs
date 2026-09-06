@@ -454,6 +454,7 @@ async fn migration_preserves_image_generation_failure_metadata() {
     let image_completion =
         RolloutItem::EventMsg(EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
             call_id: expected_item.id.clone(),
+            tool_name: None,
             status: expected_item.status.clone(),
             revised_prompt: expected_item.revised_prompt.clone(),
             result: expected_item.result.clone(),

@@ -437,6 +437,7 @@ impl ImageGenerationItem {
     pub fn as_legacy_event(&self) -> EventMsg {
         EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
             call_id: self.id.clone(),
+            tool_name: None,
             status: self.status.clone(),
             revised_prompt: self.revised_prompt.clone(),
             result: self.result.clone(),
@@ -559,6 +560,7 @@ impl HasLegacyEvent for ItemStartedEvent {
             TurnItem::ImageGeneration(item) => {
                 vec![EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent {
                     call_id: item.id.clone(),
+                    tool_name: None,
                 })]
             }
             TurnItem::FileChange(item) => vec![item.as_legacy_begin_event(self.turn_id.clone())],

@@ -79,13 +79,17 @@ impl ImageGenerationTurnGate {
     /// Selects the host-owned logical turn. Re-selecting the same scope preserves consumption,
     /// which prevents contract retries from receiving another paid image call.
     pub fn begin_scope(&self, scope: impl Into<String>) {
+        self.begin_scope_with_consumed(scope, false);
+    }
+
+    pub fn begin_scope_with_consumed(&self, scope: impl Into<String>, consumed: bool) {
         let scope = scope.into();
         if let Ok(mut state) = self.state.lock()
-            && state.logical_scope.as_deref() != Some(scope.as_str())
+            && (state.logical_scope.as_deref() != Some(scope.as_str()) || consumed)
         {
             state.logical_scope = Some(scope);
             state.fallback_turn_id = None;
-            state.consumed = false;
+            state.consumed = consumed;
         }
     }
 
@@ -146,9 +150,10 @@ struct ImagegenArgs {
     num_last_images_to_include: Option<usize>,
 }
 
-fn legacy_end_event(item: &ImageGenerationItem) -> EventMsg {
+fn legacy_end_event(item: &ImageGenerationItem, tool_name: Option<&str>) -> EventMsg {
     EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
         call_id: item.id.clone(),
+        tool_name: Some(tool_name.unwrap_or(IMAGEGEN_TOOL_NAME).to_string()),
         status: item.status.clone(),
         revised_prompt: item.revised_prompt.clone(),
         result: item.result.clone(),
@@ -228,6 +233,12 @@ impl ImageGenerationTool {
                 },
                 EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent {
                     call_id: call.call_id.clone(),
+                    tool_name: Some(
+                        self.tool_name
+                            .as_deref()
+                            .unwrap_or(IMAGEGEN_TOOL_NAME)
+                            .to_string(),
+                    ),
                 }),
             ))
             .await;
@@ -267,7 +278,7 @@ impl ImageGenerationTool {
                     saved_path: None,
                     imagegen_request_id: None,
                 };
-                let legacy_event = legacy_end_event(&item);
+                let legacy_event = legacy_end_event(&item, self.tool_name.as_deref());
                 call.turn_item_emitter
                     .emit_completed(extension_turn_item(item, legacy_event))
                     .await;
@@ -292,7 +303,7 @@ impl ImageGenerationTool {
             saved_path: saved_path.clone(),
             imagegen_request_id,
         };
-        let legacy_event = legacy_end_event(&item);
+        let legacy_event = legacy_end_event(&item, self.tool_name.as_deref());
         call.turn_item_emitter
             .emit_completed(extension_turn_item(item, legacy_event))
             .await;

@@ -9,6 +9,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::io::Cursor;
 use std::io::ErrorKind;
@@ -122,6 +123,7 @@ pub(crate) fn validate_media_path(
             "media path is outside the current character focus workspace",
         ));
     }
+    File::open(&candidate)?;
     Ok(candidate)
 }
 

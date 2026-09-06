@@ -65,6 +65,9 @@ pub struct GameTurnProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameTurnEventContext {
     pub conversation_id: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    pub stage: String,
     pub agent_code: String,
 }
 
@@ -106,6 +109,9 @@ impl GameAppServerAdapter {
             .map(|context| {
                 context.map(|context| GameTurnEventContext {
                     conversation_id: context.conversation_id,
+                    task_id: context.task_id,
+                    attempt_id: context.attempt_id,
+                    stage: context.stage,
                     agent_code: context.agent_code,
                 })
             })
@@ -116,6 +122,34 @@ impl GameAppServerAdapter {
         turn_id: &str,
     ) -> Result<Option<codex_game_runtime::TurnAuditContext>, GameServiceError> {
         self.runtime.service().turn_audit_context(turn_id).await
+    }
+
+    pub async fn record_turn_event(
+        &self,
+        turn_id: &str,
+        event: &codex_game_runtime::TurnAuditEvent,
+    ) -> Result<(), GameServiceError> {
+        self.runtime
+            .service()
+            .record_turn_event(turn_id, event)
+            .await
+    }
+
+    pub async fn record_task_event(
+        &self,
+        context: &GameTurnEventContext,
+        audit_context: Option<&codex_game_runtime::TurnAuditContext>,
+        event: &codex_game_runtime::TurnAuditEvent,
+    ) -> Result<(), GameServiceError> {
+        self.runtime
+            .service()
+            .record_task_event(
+                &context.conversation_id,
+                &context.task_id,
+                audit_context,
+                event,
+            )
+            .await
     }
 
     pub async fn observe_turn_completed<E: CodexExecutionPort>(
@@ -273,12 +307,27 @@ impl GameAppServerAdapter {
     pub async fn observe_turn_aborted(
         &self,
         turn_id: &str,
+        partial_output: Option<&str>,
     ) -> Result<Option<GameTurnProjection>, GameServiceError> {
-        self.runtime
+        let completion = self
+            .runtime
             .service()
-            .complete_turn(turn_id, TaskAttemptStatus::Cancelled)
-            .await
-            .map(|completion| completion.map(turn_projection))
+            .complete_turn_with_partial(turn_id, TaskAttemptStatus::Interrupted, partial_output)
+            .await?;
+        Ok(completion.map(|completion| {
+            let should_resume_director = completion
+                .agent_code
+                .as_deref()
+                .is_some_and(|agent| agent != "studio_director");
+            let agent_code = completion.agent_code.clone().unwrap_or_default();
+            let mut projection = turn_projection(completion);
+            if should_resume_director {
+                projection.director_resume_reason = Some(format!(
+                    "专业 Agent {agent_code} 的执行已中断。请先读取 recoveryContext 和该 Agent 的最后消息，确认已完成步骤与可恢复产物，再决定后续任务；禁止原样重试整项任务。"
+                ));
+            }
+            projection
+        }))
     }
 
     pub fn project_inspect(
@@ -550,7 +599,15 @@ impl GameAppServerAdapter {
         } else {
             PathBuf::from(&prepared.project.root)
         };
-        let local_image_paths = prepared
+        let recovery_artifact = (prepared.agent_code == "visual_designer")
+            .then(|| {
+                context
+                    .recovery_context
+                    .as_ref()
+                    .and_then(|recovery| recovery.recoverable_artifact_path.as_deref())
+            })
+            .flatten();
+        let mut local_image_paths = prepared
             .user_message
             .attachments
             .iter()
@@ -563,7 +620,16 @@ impl GameAppServerAdapter {
                     .to_string_lossy()
                     .into_owned()
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(path) = recovery_artifact {
+            local_image_paths.push(
+                Path::new(&prepared.project.root)
+                    .join(path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let media_generation_consumed = recovery_artifact.is_some();
         match self
             .runtime
             .orchestrator()
@@ -585,8 +651,9 @@ impl GameAppServerAdapter {
                     stage: prepared.stage.clone(),
                     agent_code: prepared.agent_code.clone(),
                     idempotency_key: prepared.assistant_message.id.clone(),
-                    prompt: prepared.user_message.content.clone(),
+                    prompt: prepared.execution_prompt.clone(),
                     local_image_paths,
+                    media_generation_consumed,
                     context,
                     capability,
                     internal_executors,
@@ -1672,6 +1739,57 @@ mod tests {
 
         assert!(projection.handoff_target.is_none());
         assert!(projection.director_resume_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn interrupted_specialist_returns_recovery_context_to_director() {
+        let (_directory, adapter, execution, conversation_id) = setup().await;
+        let director_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let handoff = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
+        adapter
+            .observe_turn_completed(&execution, &director_turn, Some(&handoff), None)
+            .await
+            .expect("director handoff")
+            .expect("projection");
+        let specialist = adapter
+            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .await
+            .expect("continue handoff")
+            .expect("specialist task");
+        let projection = adapter
+            .observe_turn_aborted(
+                specialist
+                    .attempt
+                    .codex_turn_id
+                    .as_deref()
+                    .expect("turn id"),
+                Some("已完成构图分析，尚未写入草稿"),
+            )
+            .await
+            .expect("abort specialist")
+            .expect("projection");
+        let reason = projection
+            .director_resume_reason
+            .expect("director resume reason");
+
+        adapter
+            .resume_director(&execution, &conversation_id, reason)
+            .await
+            .expect("resume director")
+            .expect("director task");
+        let requests = execution.turn_requests.lock().expect("turn requests");
+        let request = requests.last().expect("director request");
+        let recovery = request
+            .context
+            .recovery_context
+            .as_ref()
+            .expect("recovery context");
+        assert_eq!(recovery.agent_code, "game_designer");
+        assert_eq!(
+            recovery.partial_response.as_deref(),
+            Some("已完成构图分析，尚未写入草稿")
+        );
+        assert!(request.prompt.contains("禁止原样重试整项任务"));
     }
 
     #[tokio::test]

@@ -61,6 +61,14 @@ pub struct TurnAuditCompletion {
     pub time_to_first_token_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAuditEvent {
+    pub event: String,
+    pub status: String,
+    pub message: String,
+    pub payload: Value,
+}
+
 pub fn write_turn_audit_request(
     context: &TurnAuditContext,
     route: &RouteDecision,
@@ -108,6 +116,27 @@ pub fn write_turn_audit_request(
     file.write_all(body.as_bytes())?;
     file.flush()?;
     file.sync_all()
+}
+
+pub fn append_turn_audit_event(
+    context: &TurnAuditContext,
+    event: &TurnAuditEvent,
+) -> io::Result<()> {
+    let path = audit_path(context);
+    if !path.exists() {
+        return Ok(());
+    }
+    let payload = serde_json::to_string_pretty(&event.payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let body = format!(
+        "\n### Lifecycle Event\n\n- Time：{}\n- Event：{}\n- Status：{}\n- Message：{}\n\n#### Payload\n\n{}",
+        now(),
+        event.event,
+        event.status,
+        truncate_chars(&redact_data_urls(&event.message), 4096),
+        code_block(&truncate_chars(&redact_data_urls(&payload), 8192), "json"),
+    );
+    append(&path, &body)
 }
 
 pub fn append_turn_audit_completion(

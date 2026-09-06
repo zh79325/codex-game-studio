@@ -89,6 +89,17 @@ fn logical_scope_survives_contract_retry_and_resets_for_new_task() {
 }
 
 #[test]
+fn recovered_artifact_preconsumes_generation_scope() {
+    let gate = ImageGenerationTurnGate::default();
+
+    gate.begin_scope_with_consumed("task-recovery", true);
+    assert!(!gate.consume("provider-turn-1"));
+
+    gate.begin_scope_with_consumed("task-new", false);
+    assert!(gate.consume("provider-turn-2"));
+}
+
+#[test]
 fn stage_executors_enforce_their_reference_contract() {
     let t2i_with_reference = ImagegenArgs {
         prompt: "render".to_string(),

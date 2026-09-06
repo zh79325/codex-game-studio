@@ -2487,6 +2487,7 @@ mod tests {
             })),
             RolloutItem::EventMsg(EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
                 call_id: "ig_123".into(),
+                tool_name: None,
                 status: "completed".into(),
                 revised_prompt: Some("final prompt".into()),
                 result: "Zm9v".into(),

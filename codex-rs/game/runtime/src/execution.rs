@@ -5,11 +5,17 @@ use std::future::Future;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageGenerationToolRoute {
+    pub tool_name: String,
+    pub route: RouteDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartThreadRequest {
     pub cwd: String,
     pub agent_code: String,
     pub route: RouteDecision,
-    pub image_generation_route: Option<RouteDecision>,
+    pub image_generation_tools: Vec<ImageGenerationToolRoute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

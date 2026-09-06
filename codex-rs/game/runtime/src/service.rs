@@ -873,9 +873,9 @@ impl GameService {
                 "图片执行成功时必须返回至少一个产物".to_string(),
             ));
         }
-        let expected_executor = match context.stage.as_str() {
-            "render" => "image_t2i",
-            "views" => "image_i2i",
+        let allowed_executors: &[&str] = match context.stage.as_str() {
+            "render" => &["image_t2i", "image_i2i"],
+            "views" => &["image_i2i"],
             _ => {
                 return Err(GameServiceError::InvalidAction(
                     "图片产物只能登记到 render 或 views 阶段".to_string(),
@@ -932,10 +932,11 @@ impl GameService {
                 .ok_or_else(|| {
                     GameServiceError::InvalidAction("视觉产物缺少内部 executor".to_string())
                 })?;
-            if executor != expected_executor {
+            if !allowed_executors.contains(&executor) {
                 return Err(GameServiceError::InvalidAction(format!(
-                    "{} 阶段必须使用 {expected_executor} 内部执行器",
-                    context.stage
+                    "{} 阶段只允许使用 {} 内部执行器",
+                    context.stage,
+                    allowed_executors.join(" 或 ")
                 )));
             }
             let file_path = artifact
@@ -1004,7 +1005,7 @@ impl GameService {
                 file_path,
                 file_hash: Some(bytes_hash(&fs::read(&canonical_path)?)),
                 is_final: false,
-                source: expected_executor.to_string(),
+                source: executor.to_string(),
                 task_id: Some(context.task_id.clone()),
                 asset_spec: serde_json::to_value(asset_spec)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,

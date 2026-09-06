@@ -11,6 +11,7 @@ max_turns: 1
 conversational: false
 memory_scope: project
 context_budget: 12000
+max_output_tokens: 64000
 output_contract: verdict
 allow_tools: [read_art_bible, read_spec]
 ---

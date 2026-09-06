@@ -4,6 +4,7 @@ mod extension;
 mod tool;
 
 pub use extension::ImageGenerationRouteOverride;
+pub use extension::ImageGenerationToolRouteOverride;
 pub use extension::install;
 
 pub(crate) const IMAGE_GEN_NAMESPACE: &str = "image_gen";

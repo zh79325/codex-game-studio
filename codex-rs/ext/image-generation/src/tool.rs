@@ -67,6 +67,7 @@ pub(crate) struct ImageGenerationTool {
     save_root: Option<AbsolutePathBuf>,
     thread_id: String,
     model: String,
+    tool_name: Option<String>,
 }
 
 impl ImageGenerationTool {
@@ -76,12 +77,14 @@ impl ImageGenerationTool {
         save_root: Option<AbsolutePathBuf>,
         thread_id: String,
         model: String,
+        tool_name: Option<String>,
     ) -> Self {
         Self {
             backend,
             save_root,
             thread_id,
             model,
+            tool_name,
         }
     }
 }
@@ -118,12 +121,17 @@ fn extension_turn_item(item: ImageGenerationItem, legacy_event: EventMsg) -> Ext
 impl<'call> ToolExecutor<ToolCall<'call>> for ImageGenerationTool {
     /// Keeps the tool in the existing image-generation Responses namespace.
     fn tool_name(&self) -> ToolName {
-        ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME)
+        self.tool_name.as_ref().map_or_else(
+            || ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME),
+            |name| ToolName::plain(name.clone()),
+        )
     }
 
     /// Advertises the model contract: a rewritten prompt and optional edit references.
     fn spec(&self) -> ToolSpec {
-        imagegen_tool_spec()
+        self.tool_name
+            .as_deref()
+            .map_or_else(imagegen_tool_spec, image_executor_tool_spec)
     }
 
     /// Exposes image generation directly and through the nested code-mode tool surface.
@@ -146,6 +154,7 @@ impl ImageGenerationTool {
         call: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args = parse_args(&call)?;
+        validate_executor_args(self.tool_name.as_deref(), &args)?;
         let request = request_for_call_args_with_model(
             &args,
             call.conversation_history.items(),
@@ -590,8 +599,53 @@ fn parse_args(call: &ToolCall<'_>) -> Result<ImagegenArgs, FunctionCallError> {
         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
 }
 
+fn validate_executor_args(
+    tool_name: Option<&str>,
+    args: &ImagegenArgs,
+) -> Result<(), FunctionCallError> {
+    match tool_name {
+        Some("image_t2i")
+            if args.referenced_image_paths.is_some()
+                || args.num_last_images_to_include.is_some() =>
+        {
+            Err(FunctionCallError::RespondToModel(
+                "image_t2i only accepts a prompt and does not accept reference images".to_string(),
+            ))
+        }
+        Some("image_i2i")
+            if args
+                .referenced_image_paths
+                .as_ref()
+                .is_none_or(|paths| paths.is_empty())
+                && args
+                    .num_last_images_to_include
+                    .is_none_or(|count| count == 0) =>
+        {
+            Err(FunctionCallError::RespondToModel(
+                "image_i2i requires at least one reference image".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Builds the namespace function schema exposed to the model.
 fn imagegen_tool_spec() -> ToolSpec {
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: IMAGE_GEN_NAMESPACE.to_string(),
+        description: default_namespace_description(IMAGE_GEN_NAMESPACE),
+        tools: vec![ResponsesApiNamespaceTool::Function(imagegen_function_spec(
+            IMAGEGEN_TOOL_NAME,
+        ))],
+    })
+}
+
+/// Exposes the stage-specific game executor as a regular model-callable tool.
+fn image_executor_tool_spec(tool_name: &str) -> ToolSpec {
+    ToolSpec::Function(imagegen_function_spec(tool_name))
+}
+
+fn imagegen_function_spec(tool_name: &str) -> ResponsesApiTool {
     let mut schema_value = serde_json::to_value(
         SchemaSettings::draft2019_09()
             .with(|settings| settings.inline_subschemas = true)
@@ -608,19 +662,15 @@ fn imagegen_tool_spec() -> ToolSpec {
             input_schema.insert(key.to_string(), value);
         }
     }
-    ToolSpec::Namespace(ResponsesApiNamespace {
-        name: IMAGE_GEN_NAMESPACE.to_string(),
-        description: default_namespace_description(IMAGE_GEN_NAMESPACE),
-        tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
-            name: IMAGEGEN_TOOL_NAME.to_string(),
-            description: IMAGEGEN_DESCRIPTION.to_string(),
-            strict: false,
-            parameters: parse_tool_input_schema(&Value::Object(input_schema))
-                .unwrap_or_else(|err| panic!("imagegen input schema should parse: {err}")),
-            output_schema: None,
-            defer_loading: None,
-        })],
-    })
+    ResponsesApiTool {
+        name: tool_name.to_string(),
+        description: IMAGEGEN_DESCRIPTION.to_string(),
+        strict: false,
+        parameters: parse_tool_input_schema(&Value::Object(input_schema))
+            .unwrap_or_else(|err| panic!("imagegen input schema should parse: {err}")),
+        output_schema: None,
+        defer_loading: None,
+    }
 }
 
 struct GeneratedImageOutput {

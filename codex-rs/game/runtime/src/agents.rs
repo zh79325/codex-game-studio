@@ -169,6 +169,15 @@ pub fn bundled_agent_definition(agent_code: &str) -> Option<&'static str> {
         .map(|definition| definition.markdown)
 }
 
+pub fn bundled_agent_max_output_tokens(agent_code: &str) -> Option<u64> {
+    bundled_agent_definitions()
+        .ok()?
+        .into_iter()
+        .find(|definition| definition.agent_code == agent_code)?
+        .max_output_tokens
+        .map(u64::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

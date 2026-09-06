@@ -90,7 +90,7 @@ pub fn agents_for_stage(target_kind: &str, stage: &str) -> &'static [&'static st
 
 pub fn internal_executors_for_stage(target_kind: &str, stage: &str) -> &'static [&'static str] {
     match (target_kind, stage) {
-        ("character", "render") => &["image_t2i"],
+        ("character", "render") => &["image_t2i", "image_i2i"],
         ("character", "views") => &["image_i2i"],
         _ => &[],
     }
@@ -151,7 +151,7 @@ mod tests {
         }
         assert_eq!(
             internal_executors_for_stage("character", "render"),
-            &["image_t2i"]
+            &["image_t2i", "image_i2i"]
         );
         assert_eq!(
             internal_executors_for_stage("character", "views"),

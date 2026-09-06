@@ -23,6 +23,7 @@ use codex_game_runtime::ExecuteTaskRequest;
 use codex_game_runtime::GAME_PROTOCOL_VERSION;
 use codex_game_runtime::GameRuntime;
 use codex_game_runtime::GameServiceError;
+use codex_game_runtime::InternalExecutor;
 use codex_game_runtime::MAX_ACTION_CONTRACT_RETRIES;
 use codex_game_runtime::PreparedConversationTurn;
 use codex_game_runtime::RouteFailureKind;
@@ -498,20 +499,26 @@ impl GameAppServerAdapter {
                 return Ok(None);
             }
         };
-        let internal_executor = (prepared.agent_code == "visual_designer")
-            .then(|| {
-                internal_executors_for_stage(
-                    prepared.conversation.target_kind.as_str(),
-                    &prepared.stage,
-                )
-                .first()
-                .copied()
+        let internal_executors = if prepared.agent_code == "visual_designer" {
+            internal_executors_for_stage(
+                prepared.conversation.target_kind.as_str(),
+                &prepared.stage,
+            )
+            .iter()
+            .map(|agent_code| {
+                let capability = match *agent_code {
+                    "image_t2i" => Capability::ImageTextToImage,
+                    "image_i2i" => Capability::ImageImageToImage,
+                    other => return Err(format!("未知的内部图片执行器：{other}")),
+                };
+                Ok(InternalExecutor {
+                    agent_code: (*agent_code).to_string(),
+                    capability,
+                })
             })
-            .flatten();
-        let internal_executor_capability = match internal_executor {
-            Some("image_t2i") => Some(Capability::ImageTextToImage),
-            Some("image_i2i") => Some(Capability::ImageImageToImage),
-            Some(_) | None => None,
+            .collect::<Result<Vec<_>, String>>()?
+        } else {
+            Vec::new()
         };
         let (audit_target, audit_target_dir) = match prepared.conversation.target_kind {
             ConversationTargetKind::Project => {
@@ -558,8 +565,7 @@ impl GameAppServerAdapter {
                     prompt: prepared.user_message.content.clone(),
                     context,
                     capability,
-                    internal_executor_code: internal_executor.map(str::to_string),
-                    internal_executor_capability,
+                    internal_executors,
                 },
             )
             .await

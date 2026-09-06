@@ -27,20 +27,31 @@ struct ImageGenerationExtension {
 
 type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
 
-/// Host-provided image route for threads whose chat model differs from the image executor.
+/// Host-provided image routes for threads whose chat model differs from image executors.
 #[derive(Clone, Debug)]
 pub struct ImageGenerationRouteOverride {
+    pub tools: Vec<ImageGenerationToolRouteOverride>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageGenerationToolRouteOverride {
     pub provider: ModelProviderInfo,
     pub model: String,
     pub save_root: Option<AbsolutePathBuf>,
+    pub tool_name: String,
 }
 
 #[derive(Clone)]
 struct ImageGenerationExtensionConfig {
-    available: bool,
+    tools: Vec<ImageGenerationToolConfig>,
+}
+
+#[derive(Clone)]
+struct ImageGenerationToolConfig {
     provider: ModelProviderInfo,
     model: String,
     save_root: Option<AbsolutePathBuf>,
+    tool_name: Option<String>,
 }
 
 impl ImageGenerationExtensionConfig {
@@ -52,19 +63,31 @@ impl ImageGenerationExtensionConfig {
     ) -> Self {
         if let Some(route_override) = route_override {
             return Self {
-                available: true,
-                provider: route_override.provider.clone(),
-                model: route_override.model.clone(),
-                save_root: route_override.save_root.clone(),
+                tools: route_override
+                    .tools
+                    .iter()
+                    .map(|tool| ImageGenerationToolConfig {
+                        provider: tool.provider.clone(),
+                        model: tool.model.clone(),
+                        save_root: tool.save_root.clone(),
+                        tool_name: Some(tool.tool_name.clone()),
+                    })
+                    .collect(),
             };
         }
+        let available = config.model_provider.is_openai()
+            || config.model_provider.requires_openai_auth
+            || config.model_provider.uses_openai_actor_authorization();
         Self {
-            available: config.model_provider.is_openai()
-                || config.model_provider.requires_openai_auth
-                || config.model_provider.uses_openai_actor_authorization(),
-            provider: config.model_provider.clone(),
-            model: "gpt-image-2".to_string(),
-            save_root: resolve_save_root(config),
+            tools: available
+                .then(|| ImageGenerationToolConfig {
+                    provider: config.model_provider.clone(),
+                    model: "gpt-image-2".to_string(),
+                    save_root: resolve_save_root(config),
+                    tool_name: None,
+                })
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -119,21 +142,28 @@ impl ToolContributor for ImageGenerationExtension {
         let Some(config) = thread_store.get::<ImageGenerationExtensionConfig>() else {
             return Vec::new();
         };
-        if !config.available {
-            return Vec::new();
-        }
-
-        vec![Arc::new(ImageGenerationTool::new(
-            CodexImagesBackend::new(
-                create_model_provider(config.provider.clone(), Some(self.auth_manager.clone())),
-                thread_store
-                    .get::<ThreadOriginator>()
-                    .map(|originator| originator.0.clone()),
-            ),
-            config.save_root.clone(),
-            thread_store.level_id().to_string(),
-            config.model.clone(),
-        ))]
+        let originator = thread_store
+            .get::<ThreadOriginator>()
+            .map(|originator| originator.0.clone());
+        config
+            .tools
+            .iter()
+            .map(|tool| {
+                Arc::new(ImageGenerationTool::new(
+                    CodexImagesBackend::new(
+                        create_model_provider(
+                            tool.provider.clone(),
+                            Some(self.auth_manager.clone()),
+                        ),
+                        originator.clone(),
+                    ),
+                    tool.save_root.clone(),
+                    thread_store.level_id().to_string(),
+                    tool.model.clone(),
+                    tool.tool_name.clone(),
+                )) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
+            })
+            .collect()
     }
 }
 

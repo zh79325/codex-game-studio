@@ -21,8 +21,10 @@ use pretty_assertions::assert_eq;
 use super::GeneratedImageOutput;
 use super::ImageRequest;
 use super::ImagegenArgs;
+use super::image_executor_tool_spec;
 use super::imagegen_tool_spec;
 use super::request_for_call_args;
+use super::validate_executor_args;
 use crate::IMAGE_GEN_NAMESPACE;
 use crate::IMAGEGEN_TOOL_NAME;
 use crate::artifact::image_generation_artifact_path;
@@ -53,6 +55,42 @@ fn uses_reserved_image_gen_namespace() {
         panic!("imagegen should advertise a function tool");
     };
     assert_eq!(function.name, IMAGEGEN_TOOL_NAME);
+}
+
+#[test]
+fn exposes_stage_executor_as_a_plain_function_tool() {
+    let ToolSpec::Function(spec) = image_executor_tool_spec("image_t2i") else {
+        panic!("stage executor should advertise a function tool");
+    };
+    assert_eq!(spec.name, "image_t2i");
+}
+
+#[test]
+fn stage_executors_enforce_their_reference_contract() {
+    let t2i_with_reference = ImagegenArgs {
+        prompt: "render".to_string(),
+        referenced_image_paths: Some(vec![
+            "/tmp/reference.png"
+                .try_into()
+                .expect("test path should be absolute"),
+        ]),
+        num_last_images_to_include: None,
+    };
+    assert!(validate_executor_args(Some("image_t2i"), &t2i_with_reference).is_err());
+
+    let i2i_without_references = ImagegenArgs {
+        prompt: "views".to_string(),
+        referenced_image_paths: None,
+        num_last_images_to_include: None,
+    };
+    assert!(validate_executor_args(Some("image_i2i"), &i2i_without_references).is_err());
+
+    let i2i_with_one_reference = ImagegenArgs {
+        prompt: "render revision".to_string(),
+        referenced_image_paths: None,
+        num_last_images_to_include: Some(1),
+    };
+    assert!(validate_executor_args(Some("image_i2i"), &i2i_with_one_reference).is_ok());
 }
 
 #[tokio::test]

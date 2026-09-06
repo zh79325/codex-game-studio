@@ -17,6 +17,7 @@ use codex_http_client::StreamResponseAuditEvent;
 use codex_http_client::register_stream_response_audit;
 use codex_http_client::unregister_stream_response_audit;
 use codex_image_generation_extension::ImageGenerationRouteOverride;
+use codex_image_generation_extension::ImageGenerationToolRouteOverride;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
@@ -211,13 +212,18 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
         config.model_provider = provider;
         config.model_provider_id = request.route.provider.clone();
         let mut thread_extension_init = ExtensionDataInit::new();
-        if let Some(route) = request.image_generation_route {
-            let (model, provider) = self.resolve_model_provider(&route).await?;
-            thread_extension_init.insert(ImageGenerationRouteOverride {
-                provider,
-                model,
-                save_root: Some(cwd.join("tmp")),
-            });
+        if !request.image_generation_tools.is_empty() {
+            let mut tools = Vec::with_capacity(request.image_generation_tools.len());
+            for tool in request.image_generation_tools {
+                let (model, provider) = self.resolve_model_provider(&tool.route).await?;
+                tools.push(ImageGenerationToolRouteOverride {
+                    provider,
+                    model,
+                    save_root: Some(cwd.join("tmp")),
+                    tool_name: tool.tool_name,
+                });
+            }
+            thread_extension_init.insert(ImageGenerationRouteOverride { tools });
         }
         config.cwd = cwd.clone();
         config.workspace_roots = vec![cwd];

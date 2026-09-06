@@ -1,6 +1,7 @@
 use crate::Capability;
 use crate::CodexExecutionPort;
 use crate::ExecutionError;
+use crate::ImageGenerationToolRoute;
 use crate::QuotaRequirement;
 use crate::RouteCandidate;
 use crate::RouteDecision;
@@ -17,6 +18,7 @@ use crate::TurnAuditRetry;
 use crate::append_turn_audit_retry;
 use crate::append_turn_audit_start_error;
 use crate::bundled_agent_definition;
+use crate::bundled_agent_max_output_tokens;
 use crate::write_turn_audit_request;
 use codex_game_domain::AiCapability;
 use codex_game_domain::ContextPackage;
@@ -53,6 +55,12 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalExecutor {
+    pub agent_code: String,
+    pub capability: Capability,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecuteTaskRequest {
     pub project_root: String,
@@ -67,8 +75,7 @@ pub struct ExecuteTaskRequest {
     pub prompt: String,
     pub context: ContextPackage,
     pub capability: Capability,
-    pub internal_executor_code: Option<String>,
-    pub internal_executor_capability: Option<Capability>,
+    pub internal_executors: Vec<InternalExecutor>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,14 +211,18 @@ impl TaskOrchestrator {
             )
             .await?;
         attempt.conversation_codex_thread_id = binding.id.clone();
-        if let (Some(capability), Some(route)) = (
-            request.internal_executor_capability,
-            self.internal_executor_route(&request).await?,
-        ) {
+        for (executor, tool_route) in request
+            .internal_executors
+            .iter()
+            .zip(self.internal_executor_routes(&request).await?)
+        {
             self.reserve_request_usage(
-                &route,
-                capability,
-                &format!("{}:internal-image", request.idempotency_key),
+                &tool_route.route,
+                executor.capability,
+                &format!(
+                    "{}:internal-image:{}",
+                    request.idempotency_key, executor.agent_code
+                ),
             )
             .await?;
         }
@@ -248,7 +259,7 @@ impl TaskOrchestrator {
                 .to_string(),
             prompt: request.prompt,
             context: request.context,
-            max_output_tokens: None,
+            max_output_tokens: bundled_agent_max_output_tokens(&request.agent_code),
             audit_context: Some(audit_context.clone()),
         };
         if let Err(error) = write_turn_audit_request(&audit_context, &route, &start_request) {
@@ -308,7 +319,7 @@ impl TaskOrchestrator {
                 "系统检测到上一轮输出未通过 Action 契约校验：{validation_error}\n这是第 {} 次自动重试。请根据校验错误修正输出，重新给出完整回复，并严格遵守 Agent 定义中的 Action 协议。不要解释本次重试。",
                 context.attempt_no
             ),
-            None,
+            bundled_agent_max_output_tokens(&context.agent_code),
             "action_contract",
         )
         .await
@@ -321,9 +332,11 @@ impl TaskOrchestrator {
         context: &codex_game_store::TurnAttemptContext,
         audit_context: TurnAuditContext,
     ) -> Result<Option<TaskAttemptRetry>, OrchestrationError> {
+        let initial_max_output_tokens = bundled_agent_max_output_tokens(&context.agent_code);
         let Some(max_output_tokens) = OUTPUT_LENGTH_RETRY_TOKEN_LIMITS
-            .get(context.attempt_no.saturating_sub(1) as usize)
-            .copied()
+            .into_iter()
+            .filter(|limit| initial_max_output_tokens.is_none_or(|initial| *limit > initial))
+            .nth(context.attempt_no.saturating_sub(1) as usize)
         else {
             record_retry_audit(
                 &audit_context,
@@ -524,14 +537,14 @@ impl TaskOrchestrator {
         let (mut route, event) = self
             .select_route(request.capability, &scope, &request.agent_code)
             .await?;
-        if request.internal_executor_code.is_none()
+        if request.internal_executors.is_empty()
             && matches!(event, RouteEvent::Selected { .. })
             && let Some(binding) = &previous
             && execution.thread_available(&binding.codex_thread_id).await
         {
             return Ok((binding.clone(), route));
         }
-        let mut image_generation_route = self.internal_executor_route(request).await?;
+        let mut image_generation_tools = self.internal_executor_routes(request).await?;
         let mut replacement_reason = "thread-unavailable";
         loop {
             match execution
@@ -539,7 +552,7 @@ impl TaskOrchestrator {
                     cwd: request.project_root.clone(),
                     agent_code: request.agent_code.clone(),
                     route: route.clone(),
-                    image_generation_route: image_generation_route.clone(),
+                    image_generation_tools: image_generation_tools.clone(),
                 })
                 .await
             {
@@ -570,9 +583,12 @@ impl TaskOrchestrator {
                     )
                     .await?;
                     replacement_reason = "route-switched";
-                    if image_generation_route.as_ref() == Some(&failed_route) {
-                        image_generation_route = self
-                            .internal_executor_route(request)
+                    if image_generation_tools
+                        .iter()
+                        .any(|tool| tool.route == failed_route)
+                    {
+                        image_generation_tools = self
+                            .internal_executor_routes(request)
                             .await
                             .map_err(|next_error| {
                                 route_exhausted_error(next_error, &failed_route, &error.to_string())
@@ -630,31 +646,26 @@ impl TaskOrchestrator {
         Ok((binding, route))
     }
 
-    async fn internal_executor_route(
+    async fn internal_executor_routes(
         &self,
         request: &ExecuteTaskRequest,
-    ) -> Result<Option<RouteDecision>, OrchestrationError> {
-        let (Some(agent_code), Some(capability)) = (
-            request.internal_executor_code.as_deref(),
-            request.internal_executor_capability,
-        ) else {
-            if request.internal_executor_code.is_some()
-                || request.internal_executor_capability.is_some()
-            {
-                return Err(ExecutionError::InvalidRequest(
-                    "internal executor code and capability must be configured together".to_string(),
-                )
-                .into());
-            }
-            return Ok(None);
-        };
-        let scope = format!(
-            "conversation:{}:internal:{}",
-            request.conversation_id, agent_code
-        );
-        Ok(Some(
-            self.select_route(capability, &scope, agent_code).await?.0,
-        ))
+    ) -> Result<Vec<ImageGenerationToolRoute>, OrchestrationError> {
+        let mut routes = Vec::with_capacity(request.internal_executors.len());
+        for executor in &request.internal_executors {
+            let scope = format!(
+                "conversation:{}:internal:{}",
+                request.conversation_id, executor.agent_code
+            );
+            let route = self
+                .select_route(executor.capability, &scope, &executor.agent_code)
+                .await?
+                .0;
+            routes.push(ImageGenerationToolRoute {
+                tool_name: executor.agent_code.clone(),
+                route,
+            });
+        }
+        Ok(routes)
     }
 
     async fn select_route(

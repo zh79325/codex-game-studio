@@ -5,6 +5,7 @@ use codex_game_domain::AiProvider;
 use codex_game_domain::LimitPolicy;
 use codex_game_domain::ProviderModel;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
@@ -14,6 +15,7 @@ struct FakeExecution {
     starts: AtomicUsize,
     turns: AtomicUsize,
     interrupts: AtomicUsize,
+    max_output_tokens: Mutex<Vec<Option<u64>>>,
 }
 
 impl CodexExecutionPort for FakeExecution {
@@ -32,7 +34,11 @@ impl CodexExecutionPort for FakeExecution {
         self.starts.load(Ordering::SeqCst) > 0
     }
 
-    async fn start_turn(&self, _request: StartTurnRequest) -> Result<StartedTurn, ExecutionError> {
+    async fn start_turn(&self, request: StartTurnRequest) -> Result<StartedTurn, ExecutionError> {
+        self.max_output_tokens
+            .lock()
+            .expect("max output token lock")
+            .push(request.max_output_tokens);
         let number = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(StartedTurn {
             turn_id: format!("turn-{number}"),
@@ -83,8 +89,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             action_protocol: "strict action".to_string(),
         },
         capability: Capability::TextStructuredOutput,
-        internal_executor_code: None,
-        internal_executor_capability: None,
+        internal_executors: Vec::new(),
     }
 }
 
@@ -143,6 +148,7 @@ async fn seed_agent_routes(
                 capabilities: vec![match capability {
                     Capability::TextStructuredOutput => AiCapability::TextStructuredOutput,
                     Capability::ImageTextToImage => AiCapability::ImageTextToImage,
+                    Capability::ImageImageToImage => AiCapability::ImageImageToImage,
                     other => panic!("unsupported test capability: {other:?}"),
                 }],
                 driver: "openai".to_string(),
@@ -213,9 +219,32 @@ impl CodexExecutionPort for InternalRouteFailoverExecution {
         request: StartThreadRequest,
     ) -> Result<StartedThread, ExecutionError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            request
+                .image_generation_tools
+                .iter()
+                .map(|tool| tool.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["image_t2i", "image_i2i"]
+        );
         let image_route = request
-            .image_generation_route
-            .expect("image generation route");
+            .image_generation_tools
+            .iter()
+            .find(|tool| tool.tool_name == "image_t2i")
+            .expect("text-to-image route")
+            .route
+            .clone();
+        assert_eq!(
+            request
+                .image_generation_tools
+                .iter()
+                .find(|tool| tool.tool_name == "image_i2i")
+                .expect("image-to-image route")
+                .route
+                .account_id
+                .as_str(),
+            "image-edit-model"
+        );
         assert_eq!(request.route.account_id, "main-model");
         if image_route.account_id == "image-model-a" {
             return Err(ExecutionError::RouteUnavailable {
@@ -250,6 +279,30 @@ impl CodexExecutionPort for InternalRouteFailoverExecution {
     ) -> Result<(), ExecutionError> {
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn initial_turn_uses_the_agent_max_output_tokens() {
+    let directory = tempdir().expect("tempdir");
+    let project_root = directory.path().join("project");
+    let store = ProjectStore::open(&project_root).await.expect("store");
+    let execution = FakeExecution::default();
+    let mut task_request = request(project_root.to_str().expect("root"), "message-review");
+    task_request.agent_code = "vision_reviewer".to_string();
+
+    in_memory_orchestrator()
+        .execute(&execution, &store, task_request)
+        .await
+        .expect("review execution");
+
+    assert_eq!(
+        execution
+            .max_output_tokens
+            .lock()
+            .expect("max output token lock")
+            .as_slice(),
+        &[Some(64_000)]
+    );
 }
 
 #[tokio::test]
@@ -398,13 +451,31 @@ async fn image_provider_failure_switches_only_the_internal_route() {
         ],
     )
     .await;
+    seed_agent_routes(
+        &studio_root,
+        "image_i2i",
+        &[(
+            "image-edit-model",
+            "image-edit-provider",
+            Capability::ImageImageToImage,
+        )],
+    )
+    .await;
     let orchestrator = TaskOrchestrator::new(Vec::new(), Some(studio_root.clone()));
     let execution = InternalRouteFailoverExecution {
         starts: AtomicUsize::new(0),
     };
     let mut task_request = request(project_root.to_str().expect("root"), "message-image");
-    task_request.internal_executor_code = Some("image_t2i".to_string());
-    task_request.internal_executor_capability = Some(Capability::ImageTextToImage);
+    task_request.internal_executors = vec![
+        InternalExecutor {
+            agent_code: "image_t2i".to_string(),
+            capability: Capability::ImageTextToImage,
+        },
+        InternalExecutor {
+            agent_code: "image_i2i".to_string(),
+            capability: Capability::ImageImageToImage,
+        },
+    ];
 
     orchestrator
         .execute(&execution, &store, task_request)
@@ -566,6 +637,7 @@ async fn rebuilds_an_unavailable_active_thread() {
         starts: AtomicUsize::new(0),
         turns: AtomicUsize::new(1),
         interrupts: AtomicUsize::new(0),
+        max_output_tokens: Mutex::new(Vec::new()),
     };
     let rebuilt = in_memory_orchestrator()
         .execute(

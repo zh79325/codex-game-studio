@@ -162,6 +162,7 @@ export const charactersApi = {
       character: Character;
       generations: Generation[];
       workflowProgress: CharacterWorkflowProgress;
+      specMarkdown: string | null;
     }>(
       "game/character/read",
       {

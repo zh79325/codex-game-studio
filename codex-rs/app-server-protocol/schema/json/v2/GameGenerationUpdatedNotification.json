@@ -26,6 +26,22 @@
         "projectId": {
           "type": "string"
         },
+        "reviewFeedback": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewStatus": {
+          "type": "string"
+        },
+        "reviewedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "source": {
           "type": "string"
         },
@@ -58,6 +74,7 @@
         "id",
         "isFinal",
         "projectId",
+        "reviewStatus",
         "source",
         "stage",
         "targetKind",

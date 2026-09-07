@@ -210,6 +210,8 @@ export type { GameAttemptUpdatedNotification } from "./GameAttemptUpdatedNotific
 export type { GameBackendStatus } from "./GameBackendStatus";
 export type { GameCharacter } from "./GameCharacter";
 export type { GameCharacterUpdatedNotification } from "./GameCharacterUpdatedNotification";
+export type { GameCharacterWorkflowProgress } from "./GameCharacterWorkflowProgress";
+export type { GameCharacterWorkflowStep } from "./GameCharacterWorkflowStep";
 export type { GameConversation } from "./GameConversation";
 export type { GameConversationActorNotification } from "./GameConversationActorNotification";
 export type { GameConversationDeltaNotification } from "./GameConversationDeltaNotification";
@@ -217,6 +219,7 @@ export type { GameConversationErrorNotification } from "./GameConversationErrorN
 export type { GameConversationFocusNotification } from "./GameConversationFocusNotification";
 export type { GameConversationMemory } from "./GameConversationMemory";
 export type { GameConversationTurnNotification } from "./GameConversationTurnNotification";
+export type { GameFeedbackImage } from "./GameFeedbackImage";
 export type { GameGeneration } from "./GameGeneration";
 export type { GameGenerationUpdatedNotification } from "./GameGenerationUpdatedNotification";
 export type { GameListedCharacter } from "./GameListedCharacter";

@@ -1677,6 +1677,21 @@
       ],
       "type": "object"
     },
+    "GameFeedbackImage": {
+      "properties": {
+        "dataBase64": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataBase64",
+        "mimeType"
+      ],
+      "type": "object"
+    },
     "GetAccountParams": {
       "properties": {
         "refreshToken": {

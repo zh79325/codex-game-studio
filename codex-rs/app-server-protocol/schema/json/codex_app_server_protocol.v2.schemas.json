@@ -9005,6 +9005,53 @@
       "title": "GameCharacterUpdatedNotification",
       "type": "object"
     },
+    "GameCharacterWorkflowProgress": {
+      "properties": {
+        "continuationKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "needsResume": {
+          "type": "boolean"
+        },
+        "statusLabel": {
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/GameCharacterWorkflowStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "needsResume",
+        "statusLabel",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "GameCharacterWorkflowStep": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "status"
+      ],
+      "type": "object"
+    },
     "GameConversation": {
       "properties": {
         "createdAt": {
@@ -9205,6 +9252,21 @@
       "title": "GameConversationTurnNotification",
       "type": "object"
     },
+    "GameFeedbackImage": {
+      "properties": {
+        "dataBase64": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataBase64",
+        "mimeType"
+      ],
+      "type": "object"
+    },
     "GameGeneration": {
       "properties": {
         "assetSpec": true,
@@ -9229,6 +9291,22 @@
         },
         "projectId": {
           "type": "string"
+        },
+        "reviewFeedback": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewStatus": {
+          "type": "string"
+        },
+        "reviewedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "source": {
           "type": "string"
@@ -9262,6 +9340,7 @@
         "id",
         "isFinal",
         "projectId",
+        "reviewStatus",
         "source",
         "stage",
         "targetKind",

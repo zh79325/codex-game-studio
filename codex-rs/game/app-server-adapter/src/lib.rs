@@ -863,6 +863,11 @@ impl GameAppServerAdapter {
             .service()
             .character_workflow_progress(&params.project_id, &params.character_id)
             .await?;
+        let spec_markdown = self
+            .runtime
+            .service()
+            .read_character_spec_markdown(&params.project_id, &params.character_id)
+            .await?;
         Ok(GameCharacterReadResponse {
             character: character_dto(character),
             generations: generations.into_iter().map(generation_dto).collect(),
@@ -880,6 +885,7 @@ impl GameAppServerAdapter {
                 needs_resume: workflow_progress.needs_resume,
                 continuation_key: workflow_progress.continuation_key,
             },
+            spec_markdown,
         })
     }
 

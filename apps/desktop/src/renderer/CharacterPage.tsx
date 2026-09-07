@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Card, Col, Row, Space, Steps, Tag, Typography } from "antd";
-import { useEffect, useRef } from "react";
+import { App, Card, Col, Image, Modal, Row, Space, Spin, Steps, Tag, Typography } from "antd";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
 import { useStudio } from "./AppShell";
 import ChatPanel from "./chat/ChatPanel";
+import MarkdownDocument from "./chat/MarkdownDocument";
 import { useConversation } from "./chat/useConversation";
 import type { ArtifactDraft, FeedbackImage, Generation } from "./types";
 
@@ -23,6 +24,7 @@ export default function CharacterPage() {
   const { projectId = "", characterId = "" } = useParams();
   const { canWrite, setActiveProject } = useStudio();
   const resumedContinuationKeys = useRef(new Set<string>());
+  const [specPreviewOpen, setSpecPreviewOpen] = useState(false);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -126,6 +128,12 @@ export default function CharacterPage() {
 
   const character = detail.data?.character;
   const generations = detail.data?.generations ?? [];
+  const publishedRender = generations.find(
+    (item) => item.stage === "render" && item.isFinal,
+  );
+  const publishedViews = generations.find(
+    (item) => item.stage === "views" && item.isFinal,
+  );
   const pendingRenderGenerations = generations.filter(
     (item) => item.stage === "render" && item.reviewStatus === "pending",
   );
@@ -293,25 +301,44 @@ export default function CharacterPage() {
               }
             >
               <StatusRow label="角色" value={character?.name} />
-              <StatusRow label="分组" value={character?.group ?? "未分组"} />
-              <StatusRow label="目录" value={character?.dirName} />
-              <StatusRow label="设定" value={character?.specPath} />
-              <StatusRow
-                label="效果图"
-                value={character?.renderPath ? "已发布" : undefined}
-              />
-              <StatusRow
-                label="四视图"
-                value={
-                  character && Object.keys(character.viewPaths).length > 0
-                    ? "已发布"
-                    : undefined
-                }
-              />
+              <StatusRow label="设定">
+                {detail.data?.specMarkdown ? (
+                  <Typography.Link onClick={() => setSpecPreviewOpen(true)}>
+                    查看设定文档
+                  </Typography.Link>
+                ) : null}
+              </StatusRow>
+              <StatusRow label="效果图">
+                {publishedRender ? (
+                  <PublishedGenerationThumbnail
+                    generation={publishedRender}
+                    alt="角色效果图"
+                  />
+                ) : null}
+              </StatusRow>
+              <StatusRow label="四视图">
+                {publishedViews ? (
+                  <PublishedGenerationThumbnail
+                    generation={publishedViews}
+                    alt="角色四视图"
+                  />
+                ) : null}
+              </StatusRow>
               <Typography.Text type="secondary">
                 Agent 审校结论仅供参考，只有这里的人工操作会推进状态。
               </Typography.Text>
             </Card>
+            <Modal
+              open={specPreviewOpen}
+              title={`${character?.name ?? "角色"}设定`}
+              footer={null}
+              width={760}
+              onCancel={() => setSpecPreviewOpen(false)}
+            >
+              {detail.data?.specMarkdown && (
+                <MarkdownDocument content={detail.data.specMarkdown} />
+              )}
+            </Modal>
           </Space>
         </Col>
       </Row>
@@ -319,13 +346,53 @@ export default function CharacterPage() {
   );
 }
 
-function StatusRow({ label, value }: { label: string; value?: string | null }) {
+function StatusRow({
+  label,
+  value,
+  children,
+}: {
+  label: string;
+  value?: string | null;
+  children?: ReactNode;
+}) {
+  const content = children ?? value;
   return (
-    <p>
+    <div className="character-status-row">
       <Typography.Text strong>{label}：</Typography.Text>
-      <Typography.Text type={value ? undefined : "secondary"}>
-        {value || "未确认"}
-      </Typography.Text>
-    </p>
+      {content ? (
+        content
+      ) : (
+        <Typography.Text type="secondary">未确认</Typography.Text>
+      )}
+    </div>
+  );
+}
+
+function PublishedGenerationThumbnail({
+  generation,
+  alt,
+}: {
+  generation: Generation;
+  alt: string;
+}) {
+  const media = useQuery({
+    queryKey: ["generation-media", generation.projectId, generation.id],
+    queryFn: () => charactersApi.readGenerationMedia(generation.projectId, generation.id),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  if (media.isLoading) return <Spin size="small" />;
+  if (!media.data || media.error) {
+    return <Typography.Text type="secondary">图片加载失败</Typography.Text>;
+  }
+  const dataUrl = `data:${media.data.mimeType};base64,${media.data.dataBase64}`;
+  return (
+    <Image
+      className="character-asset-thumbnail"
+      src={dataUrl}
+      alt={alt}
+      width={112}
+      height={112}
+      preview={{ mask: "查看大图" }}
+    />
   );
 }

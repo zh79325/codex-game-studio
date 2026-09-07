@@ -3061,6 +3061,40 @@ impl GameService {
             .map_err(Into::into)
     }
 
+    pub async fn read_character_spec_markdown(
+        &self,
+        project_id: &str,
+        character_id: &str,
+    ) -> Result<Option<String>, GameServiceError> {
+        let project = self.read_project(project_id)?;
+        let character = self.read_character(project_id, character_id).await?;
+        let Some(spec_path) = character.spec_path.as_deref() else {
+            return Ok(None);
+        };
+        let path = safe_project_path(&project.root, spec_path)?;
+        let character_root = Path::new(&project.root).join(&character.dir_name);
+        let canonical_character_root = fs::canonicalize(character_root)?;
+        let canonical_path = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !canonical_path.starts_with(canonical_character_root) {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色设定路径必须位于当前角色目录内".to_string(),
+            ));
+        }
+        let bytes = fs::read(canonical_path)?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(GameServiceError::InvalidCharacterOperation(
+                "角色设定文档超过 1 MiB".to_string(),
+            ));
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error).into())
+    }
+
     pub async fn read_generation_media(
         &self,
         project_id: &str,
@@ -3958,6 +3992,11 @@ fn apply_generation_stage_transition(
             .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
             character.updated_at = updated_at;
         }
+        ("views", CharacterState::S5ViewsConfirmed) => {
+            character.state = CharacterState::S4ViewsGenerated;
+            character.gate_views_confirmed_at = None;
+            character.updated_at = updated_at;
+        }
         _ => {
             return Err(GameServiceError::InvalidCharacterOperation(format!(
                 "当前角色状态不允许登记 {stage} 产物"
@@ -4486,6 +4525,33 @@ mod tests {
 
         assert_eq!(manifest.stage, "render");
         assert_eq!(manifest.accepted_render_generation_id, None);
+    }
+
+    #[test]
+    fn views_revision_after_final_confirmation_reopens_confirmation_gate() {
+        let mut character = test_character(CharacterState::S5ViewsConfirmed);
+        character.render_path = Some("images/render-final.png".to_string());
+        character
+            .view_paths
+            .insert("quad".to_string(), "images/views-final.png".to_string());
+        character.gate_render_confirmed_at = Some(2);
+        character.gate_views_confirmed_at = Some(3);
+
+        apply_generation_stage_transition(&mut character, "views", 4)
+            .expect("confirmed views may be regenerated");
+
+        assert_eq!(character.state, CharacterState::S4ViewsGenerated);
+        assert_eq!(
+            character.render_path.as_deref(),
+            Some("images/render-final.png")
+        );
+        assert_eq!(
+            character.view_paths.get("quad").map(String::as_str),
+            Some("images/views-final.png")
+        );
+        assert_eq!(character.gate_render_confirmed_at, Some(2));
+        assert_eq!(character.gate_views_confirmed_at, None);
+        assert_eq!(character.updated_at, 4);
     }
 
     #[test]

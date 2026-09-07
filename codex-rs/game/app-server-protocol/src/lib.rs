@@ -365,7 +365,8 @@ game_dto!(GameCharacterWorkflowProgress {
 game_dto!(GameCharacterReadResponse {
     character: GameCharacter,
     generations: Vec<GameGeneration>,
-    workflow_progress: GameCharacterWorkflowProgress
+    workflow_progress: GameCharacterWorkflowProgress,
+    spec_markdown: Option<String>
 });
 game_dto!(GameCharacterConfirmSpecParams {
     project_id: String,

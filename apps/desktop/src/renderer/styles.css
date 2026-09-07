@@ -169,6 +169,26 @@ textarea {
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.16);
 }
 
+.character-status-row {
+  display: flex;
+  min-height: 32px;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.character-status-row > .ant-typography:first-child {
+  flex: none;
+}
+
+.character-asset-thumbnail {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  object-fit: contain;
+}
+
 .full-height-card {
   height: 100%;
 }

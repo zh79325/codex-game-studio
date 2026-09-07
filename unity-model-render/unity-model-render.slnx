@@ -1,0 +1,5 @@
+﻿<Solution>
+  <Project Path="Tripo3D.UnityBridge.Editor.csproj" />
+  <Project Path="Assembly-CSharp-Editor.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
+</Solution>

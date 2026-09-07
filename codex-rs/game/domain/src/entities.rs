@@ -230,6 +230,7 @@ pub struct ReviewSubject {
 pub struct VisualFocusContext {
     pub stage: String,
     pub accepted_render_path: Option<String>,
+    pub pose_template_path: Option<String>,
     pub revision_candidate_path: Option<String>,
 }
 
@@ -318,6 +319,10 @@ impl ContextPackage {
                 focus.stage.len() <= MAX_CONTEXT_SUMMARY_BYTES
                     && focus
                         .accepted_render_path
+                        .as_ref()
+                        .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+                    && focus
+                        .pose_template_path
                         .as_ref()
                         .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
                     && focus

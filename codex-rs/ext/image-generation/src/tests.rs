@@ -22,6 +22,7 @@ use super::GeneratedImageOutput;
 use super::ImageGenerationTurnGate;
 use super::ImageRequest;
 use super::ImagegenArgs;
+use super::apply_required_reference_paths;
 use super::image_executor_tool_spec;
 use super::imagegen_tool_spec;
 use super::request_for_call_args;
@@ -125,6 +126,24 @@ fn stage_executors_enforce_their_reference_contract() {
         num_last_images_to_include: Some(1),
     };
     assert!(validate_executor_args(Some("image_i2i"), &i2i_with_one_reference).is_ok());
+}
+
+#[test]
+fn required_references_are_added_once_to_explicit_paths() {
+    let existing = AbsolutePathBuf::from_absolute_path_checked("/tmp/render.png")
+        .expect("test path should be absolute");
+    let template = AbsolutePathBuf::from_absolute_path_checked("/tmp/t-pose-template.png")
+        .expect("test path should be absolute");
+    let mut args = ImagegenArgs {
+        prompt: "views".to_string(),
+        referenced_image_paths: Some(vec![existing.clone()]),
+        num_last_images_to_include: None,
+    };
+
+    apply_required_reference_paths(&mut args, &[existing.clone(), template.clone()])
+        .expect("required references should fit");
+
+    assert_eq!(args.referenced_image_paths, Some(vec![existing, template]));
 }
 
 #[tokio::test]

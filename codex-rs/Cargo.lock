@@ -3469,6 +3469,7 @@ dependencies = [
  "codex-game-domain",
  "codex-game-store",
  "image",
+ "pretty_assertions",
  "schemars 0.8.22",
  "serde",
  "serde_json",

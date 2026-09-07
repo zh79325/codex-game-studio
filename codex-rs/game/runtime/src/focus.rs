@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 const MAX_FEEDBACK_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FEEDBACK_IMAGE_PIXELS: u64 = 40_000_000;
+const T_POSE_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../../.codex-game/t-pose-template.png");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +37,7 @@ pub(crate) struct FocusPaths {
     pub render_media: PathBuf,
     pub views_media: PathBuf,
     pub reference_media: PathBuf,
+    pub pose_template: PathBuf,
     pub video_media: PathBuf,
     pub manifest: PathBuf,
 }
@@ -50,6 +52,7 @@ pub(crate) fn paths(project: &Project, character: &Character) -> FocusPaths {
         render_media: root.join("media/render"),
         views_media: root.join("media/views"),
         reference_media: root.join("media/references"),
+        pose_template: root.join("media/references/t-pose-template.png"),
         video_media: root.join("media/video"),
         manifest: root.join("manifest.json"),
         root,
@@ -93,6 +96,20 @@ pub(crate) fn ensure(
     };
     write_manifest(&paths.manifest, &manifest)?;
     Ok(manifest)
+}
+
+pub(crate) fn ensure_pose_template(project: &Project, character: &Character) -> io::Result<String> {
+    let focus = paths(project, character);
+    let existing_matches =
+        fs::read(&focus.pose_template).is_ok_and(|bytes| bytes.as_slice() == T_POSE_TEMPLATE_BYTES);
+    if !existing_matches {
+        write_bytes(&focus.pose_template, T_POSE_TEMPLATE_BYTES)?;
+    }
+    focus
+        .pose_template
+        .strip_prefix(&project.root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
 pub(crate) fn read_manifest(path: &Path) -> io::Result<FocusManifest> {
@@ -291,8 +308,7 @@ pub(crate) fn verify_baselines(
     if file_hash(&art_bible)? != manifest.art_bible_base_hash
         || file_hash(&character_spec)? != manifest.character_spec_base_hash
     {
-        return Err(io::Error::new(
-            ErrorKind::Other,
+        return Err(io::Error::other(
             "formal visual settings changed after focus workspace creation",
         ));
     }
@@ -388,6 +404,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(focus_paths.art_bible).expect("read focus"),
             "edited focus art bible"
+        );
+    }
+
+    #[test]
+    fn pose_template_is_materialized_and_repairs_stale_copy() {
+        let (_temp, project, character) = fixture();
+        ensure(&project, &character, 1).expect("initialize focus");
+
+        let relative = ensure_pose_template(&project, &character).expect("copy pose template");
+        let template = Path::new(&project.root).join(&relative);
+        assert_eq!(
+            fs::read(&template).expect("read template"),
+            T_POSE_TEMPLATE_BYTES
+        );
+
+        fs::write(&template, b"stale").expect("corrupt copied template");
+        ensure_pose_template(&project, &character).expect("repair pose template");
+        assert_eq!(
+            fs::read(template).expect("read repaired template"),
+            T_POSE_TEMPLATE_BYTES
         );
     }
 

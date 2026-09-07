@@ -267,12 +267,19 @@ impl CodexExecutionPort for AppServerCodexExecutionPort {
                             message,
                         }
                     })?;
+                let required_reference_paths = tool
+                    .required_reference_paths
+                    .into_iter()
+                    .map(AbsolutePathBuf::from_absolute_path_checked)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| ExecutionError::InvalidRequest(error.to_string()))?;
                 tools.push(ImageGenerationToolRouteOverride {
                     provider: resolved.provider,
                     model: resolved.model,
                     api_dialect,
                     save_root: Some(cwd.join("media").join(media_stage)),
                     tool_name: tool.tool_name,
+                    required_reference_paths,
                 });
             }
             thread_extension_init.insert(ImageGenerationRouteOverride { tools });

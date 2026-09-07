@@ -739,9 +739,38 @@ impl TaskOrchestrator {
                 .select_route(executor.capability, &scope, &executor.agent_code)
                 .await?
                 .0;
+            let required_reference_paths =
+                if request.stage == "views" && executor.agent_code == "image_i2i" {
+                    request
+                        .context
+                        .visual_focus
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|focus| {
+                            [
+                                focus.accepted_render_path.as_deref(),
+                                focus.pose_template_path.as_deref(),
+                            ]
+                        })
+                        .flatten()
+                        .map(|path| {
+                            let path = PathBuf::from(path);
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                PathBuf::from(&request.project_root).join(path)
+                            }
+                            .to_string_lossy()
+                            .into_owned()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             routes.push(ImageGenerationToolRoute {
                 tool_name: executor.agent_code.clone(),
                 route,
+                required_reference_paths,
             });
         }
         Ok(routes)

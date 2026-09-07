@@ -116,6 +116,7 @@ pub(crate) struct ImageGenerationTool {
     thread_id: String,
     model: String,
     tool_name: Option<String>,
+    required_reference_paths: Vec<AbsolutePathBuf>,
     turn_gate: Arc<ImageGenerationTurnGate>,
 }
 
@@ -127,6 +128,7 @@ impl ImageGenerationTool {
         thread_id: String,
         model: String,
         tool_name: Option<String>,
+        required_reference_paths: Vec<AbsolutePathBuf>,
         turn_gate: Arc<ImageGenerationTurnGate>,
     ) -> Self {
         Self {
@@ -135,6 +137,7 @@ impl ImageGenerationTool {
             thread_id,
             model,
             tool_name,
+            required_reference_paths,
             turn_gate,
         }
     }
@@ -205,7 +208,8 @@ impl ImageGenerationTool {
         &self,
         call: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
-        let args = parse_args(&call)?;
+        let mut args = parse_args(&call)?;
+        apply_required_reference_paths(&mut args, &self.required_reference_paths)?;
         validate_executor_args(self.tool_name.as_deref(), &args)?;
         let request = request_for_call_args_with_model(
             &args,
@@ -660,6 +664,33 @@ async fn image_url(
 fn parse_args(call: &ToolCall<'_>) -> Result<ImagegenArgs, FunctionCallError> {
     serde_json::from_str(call.function_arguments()?)
         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+}
+
+fn apply_required_reference_paths(
+    args: &mut ImagegenArgs,
+    required_reference_paths: &[AbsolutePathBuf],
+) -> Result<(), FunctionCallError> {
+    if required_reference_paths.is_empty() {
+        return Ok(());
+    }
+    if args.num_last_images_to_include.is_some() {
+        return Err(FunctionCallError::RespondToModel(
+            "this image task has required reference files; use `referenced_image_paths` instead of `num_last_images_to_include`"
+                .to_string(),
+        ));
+    }
+    let paths = args.referenced_image_paths.get_or_insert_default();
+    for required_path in required_reference_paths {
+        if !paths.contains(required_path) {
+            paths.push(required_path.clone());
+        }
+    }
+    if paths.len() > MAX_EDIT_IMAGES {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "required and requested reference images exceed the {MAX_EDIT_IMAGES}-image limit"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_executor_args(

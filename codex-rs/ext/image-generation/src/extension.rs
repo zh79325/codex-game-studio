@@ -42,6 +42,7 @@ pub struct ImageGenerationToolRouteOverride {
     pub api_dialect: ImageApiDialect,
     pub save_root: Option<AbsolutePathBuf>,
     pub tool_name: String,
+    pub required_reference_paths: Vec<AbsolutePathBuf>,
 }
 
 #[derive(Clone)]
@@ -56,6 +57,7 @@ struct ImageGenerationToolConfig {
     api_dialect: ImageApiDialect,
     save_root: Option<AbsolutePathBuf>,
     tool_name: Option<String>,
+    required_reference_paths: Vec<AbsolutePathBuf>,
 }
 
 impl ImageGenerationExtensionConfig {
@@ -76,6 +78,7 @@ impl ImageGenerationExtensionConfig {
                         api_dialect: tool.api_dialect,
                         save_root: tool.save_root.clone(),
                         tool_name: Some(tool.tool_name.clone()),
+                        required_reference_paths: tool.required_reference_paths.clone(),
                     })
                     .collect(),
             };
@@ -91,6 +94,7 @@ impl ImageGenerationExtensionConfig {
                     api_dialect: ImageApiDialect::OpenAi,
                     save_root: resolve_save_root(config),
                     tool_name: None,
+                    required_reference_paths: Vec::new(),
                 })
                 .into_iter()
                 .collect(),
@@ -174,6 +178,7 @@ impl ToolContributor for ImageGenerationExtension {
                     thread_store.level_id().to_string(),
                     tool.model.clone(),
                     tool.tool_name.clone(),
+                    tool.required_reference_paths.clone(),
                     turn_gate.clone(),
                 )) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
             })

@@ -2,6 +2,7 @@ use crate::action_contract_profile;
 use crate::character_files::read_project_characters;
 use crate::character_files::write_character_file;
 use crate::focus;
+use crate::view_split::split_quad_to_png_files;
 use codex_game_domain::AgentAction;
 use codex_game_domain::AgentActionKind;
 use codex_game_domain::AgentActionPayload;
@@ -2057,10 +2058,14 @@ impl GameService {
                 )
             })?;
             let manifest = focus::ensure(&prepared.project, character, now())?;
+            let pose_template_path = (prepared.stage == "views")
+                .then(|| focus::ensure_pose_template(&prepared.project, character))
+                .transpose()?;
             Some(visual_focus_context(
                 &prepared.stage,
                 &manifest,
                 &character_generations,
+                pose_template_path,
             ))
         } else {
             None
@@ -3354,6 +3359,19 @@ impl GameService {
             .join(format!("images/views-final.{views_extension}"));
         let render_target = Path::new(&project.root).join(&render_relative);
         let views_target = Path::new(&project.root).join(&views_relative);
+        let split_view_relatives = ["front", "right", "back", "left"]
+            .into_iter()
+            .map(|view| {
+                (
+                    view.to_string(),
+                    PathBuf::from(&character.dir_name).join(format!("images/views-{view}.png")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let split_view_targets = split_view_relatives
+            .iter()
+            .map(|(view, path)| (view.clone(), Path::new(&project.root).join(path)))
+            .collect::<BTreeMap<_, _>>();
         let art_bible_target = Path::new(&project.root).join("art-bible.md");
         let character_spec_target = character
             .spec_path
@@ -3367,15 +3385,18 @@ impl GameService {
         let meta_path = Path::new(&project.root)
             .join(&character.dir_name)
             .join(".model.json");
-        let archived_views = views_relative.to_string_lossy().into_owned();
         character.state =
             codex_game_domain::advance_character(character.state, CharacterState::S5ViewsConfirmed)
                 .map_err(|error| GameServiceError::InvalidCharacterOperation(error.to_string()))?;
         character.render_path = Some(render_relative.to_string_lossy().into_owned());
-        character.view_paths = ["front", "right", "back", "left"]
-            .into_iter()
-            .map(|view| (view.to_string(), archived_views.clone()))
-            .collect::<BTreeMap<_, _>>();
+        character.view_paths = split_view_relatives
+            .iter()
+            .map(|(view, path)| (view.clone(), path.to_string_lossy().into_owned()))
+            .chain(std::iter::once((
+                "quad".to_string(),
+                views_relative.to_string_lossy().into_owned(),
+            )))
+            .collect();
         let timestamp = now();
         character.gate_views_confirmed_at = Some(timestamp);
         character.updated_at = timestamp;
@@ -3390,7 +3411,7 @@ impl GameService {
             source_artifact_ids: Vec::new(),
             created_at: timestamp,
         };
-        let backups = vec![
+        let mut backups = vec![
             (art_bible_target.clone(), fs::read(&art_bible_target).ok()),
             (
                 character_spec_target.clone(),
@@ -3400,11 +3421,17 @@ impl GameService {
             (views_target.clone(), fs::read(&views_target).ok()),
             (meta_path.clone(), fs::read(&meta_path).ok()),
         ];
+        backups.extend(
+            split_view_targets
+                .values()
+                .map(|path| (path.clone(), fs::read(path).ok())),
+        );
         let write_result = (|| -> Result<(), GameServiceError> {
             write_art_bible(&art_bible_target, &art_bible)?;
             write_art_bible(&character_spec_target, &character_spec)?;
             fs::copy(&render_source, &render_target)?;
             fs::copy(&views_source, &views_target)?;
+            split_quad_to_png_files(&views_source, &split_view_targets)?;
             write_character_file(&project, &character)?;
             Ok(())
         })();
@@ -3866,6 +3893,7 @@ fn visual_focus_context(
     stage: &str,
     manifest: &focus::FocusManifest,
     generations: &[Generation],
+    pose_template_path: Option<String>,
 ) -> VisualFocusContext {
     let accepted_render_path = manifest
         .accepted_render_generation_id
@@ -3888,6 +3916,7 @@ fn visual_focus_context(
     VisualFocusContext {
         stage: stage.to_string(),
         accepted_render_path,
+        pose_template_path,
         revision_candidate_path,
     }
 }
@@ -4110,7 +4139,7 @@ fn visual_character_context(spec: &str, character: &Character, stage: &str) -> S
             "效果图必须使用自然动态姿势或战斗准备动作，禁止 T-pose/A-pose；武器必须被合理握持、背负或连接，肢体受力和武器方向一致；允许环境背景与氛围光。"
         }
         "views" => {
-            "四视图必须使用 T-pose 或 A-pose，纯色不透明背景；禁止武器、手持物、背负装备、环境场景和动作特效。"
+            "四视图必须严格复刻 poseTemplatePath 模板：单张 2048×2048 正交 2×2 四宫格，左上正面，右上 90° 侧面且鼻尖朝画面左边，左下背面，右下相反的 90° 侧面且鼻尖朝画面右边；禁止 30°/45°/三分之二侧视、左右侧面同向或镜像复制。四格必须使用同一标准 T-pose、双臂水平侧平举，并保持相同比例、尺寸、垂直位置和地面线。必须同时引用 acceptedRenderPath 与 poseTemplatePath。背景必须是角色配色中未使用、与主色/辅色/肤色/毛发色/发光色具有最大色相和明度差异的高饱和单一不透明纯色，并在 prompt 中写明准确 HEX；禁止角色主色的深浅变体或邻近色，禁止渐变、暗角、地面、投影和环境光斑，确保适合色键抠图。禁止武器、手持物、背负装备、环境场景和动作特效。"
         }
         _ => "仅应用当前阶段明确允许的视觉规则。",
     };
@@ -4299,8 +4328,11 @@ mod tests {
         assert!(!render.contains("\"scope\":\"views\""));
 
         let views = visual_character_context(spec, &character, "views");
-        assert!(views.contains("T-pose 或 A-pose"));
-        assert!(views.contains("纯色不透明背景"));
+        assert!(views.contains("标准 T-pose"));
+        assert!(views.contains("鼻尖朝画面左边"));
+        assert!(views.contains("鼻尖朝画面右边"));
+        assert!(views.contains("最大色相和明度差异"));
+        assert!(views.contains("禁止渐变"));
         assert!(views.contains("禁止武器"));
         assert!(views.contains("建模姿势"));
         assert!(!views.contains("\"scope\":\"render\""));
@@ -4415,11 +4447,23 @@ mod tests {
         ];
 
         assert_eq!(
-            visual_focus_context("views", &manifest, &generations),
+            visual_focus_context(
+                "views",
+                &manifest,
+                &generations,
+                Some(
+                    "characters/character-1/tmp/focus/media/references/t-pose-template.png"
+                        .to_string()
+                ),
+            ),
             VisualFocusContext {
                 stage: "views".to_string(),
                 accepted_render_path: Some(
                     "characters/character-1/tmp/focus/media/render/accepted.png".to_string()
+                ),
+                pose_template_path: Some(
+                    "characters/character-1/tmp/focus/media/references/t-pose-template.png"
+                        .to_string()
                 ),
                 revision_candidate_path: Some(
                     "characters/character-1/tmp/focus/media/views/revision.png".to_string()

@@ -9,6 +9,7 @@ use thiserror::Error;
 pub struct ImageGenerationToolRoute {
     pub tool_name: String,
     pub route: RouteDecision,
+    pub required_reference_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

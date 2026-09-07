@@ -10,6 +10,7 @@ import type {
 
 const GAME_PROTOCOL_VERSION = 1;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
+const REQUEST_RECOVERY_TIMEOUT_MS = 30_000;
 
 export class BackendSupervisor extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
@@ -21,6 +22,7 @@ export class BackendSupervisor extends EventEmitter {
   >();
   private initialized = false;
   private state: BackendState = { type: "starting" };
+  private heartbeatInFlight?: Promise<BackendState>;
   private stopping = false;
 
   constructor(
@@ -44,11 +46,19 @@ export class BackendSupervisor extends EventEmitter {
   }
 
   async request<T>(method: string, params?: unknown): Promise<T> {
+    if (
+      !this.child ||
+      !this.initialized ||
+      this.state.type === "starting" ||
+      this.state.type === "recovering"
+    ) {
+      await this.waitUntilReady(REQUEST_RECOVERY_TIMEOUT_MS);
+    }
     if (!this.child || !this.initialized) {
       throw new Error("后端尚未完成初始化");
     }
     if (this.state.type === "starting" || this.state.type === "recovering") {
-      throw new Error("后端尚未完成恢复");
+      throw new Error("等待后端恢复超时，请稍后重试");
     }
     if (this.state.type === "incompatible" || this.state.type === "stopped") {
       throw new Error(this.state.message);
@@ -64,32 +74,45 @@ export class BackendSupervisor extends EventEmitter {
   }
 
   async heartbeat(): Promise<BackendState> {
-    if (!this.child || !this.initialized) return this.state;
-    try {
-      const ping = await this.send<GamePingResponse>(
-        "game/ping",
-        {},
-        HEARTBEAT_TIMEOUT_MS,
-      );
-      if (ping.protocolVersion !== GAME_PROTOCOL_VERSION) {
-        this.emitState({
-          type: "incompatible",
-          message: `协议版本不匹配：客户端 ${GAME_PROTOCOL_VERSION}，后端 ${ping.protocolVersion}`,
-        });
-      } else if (ping.status === "ready" || ping.status === "readOnly") {
-        this.emitState({
-          type: ping.status,
-          backendVersion: ping.backendVersion,
-        });
-      } else {
-        this.emitState({ type: "recovering" });
+    if (this.heartbeatInFlight) return this.heartbeatInFlight;
+    const child = this.child;
+    if (!child || !this.initialized) return this.state;
+    const heartbeat = (async () => {
+      try {
+        const ping = await this.send<GamePingResponse>(
+          "game/ping",
+          {},
+          HEARTBEAT_TIMEOUT_MS,
+        );
+        if (this.child !== child || !this.initialized) return this.state;
+        if (ping.protocolVersion !== GAME_PROTOCOL_VERSION) {
+          this.emitState({
+            type: "incompatible",
+            message: `协议版本不匹配：客户端 ${GAME_PROTOCOL_VERSION}，后端 ${ping.protocolVersion}`,
+          });
+        } else if (ping.status === "ready" || ping.status === "readOnly") {
+          this.emitState({
+            type: ping.status,
+            backendVersion: ping.backendVersion,
+          });
+        } else {
+          this.emitState({ type: "recovering" });
+        }
+      } catch {
+        if (this.child === child && this.initialized) {
+          this.emitState({ type: "recovering" });
+        }
       }
-    } catch {
-      if (this.child && this.initialized) {
-        this.emitState({ type: "recovering" });
+      return this.state;
+    })();
+    this.heartbeatInFlight = heartbeat;
+    try {
+      return await heartbeat;
+    } finally {
+      if (this.heartbeatInFlight === heartbeat) {
+        this.heartbeatInFlight = undefined;
       }
     }
-    return this.state;
   }
 
   private restart(): void {
@@ -161,16 +184,19 @@ export class BackendSupervisor extends EventEmitter {
     }
   }
 
-  private async waitUntilReady(): Promise<void> {
-    while (this.child && this.initialized) {
+  private async waitUntilReady(timeoutMs?: number): Promise<void> {
+    const deadline = timeoutMs ? Date.now() + timeoutMs : undefined;
+    while (!this.stopping) {
       const state = await this.heartbeat();
       if (
         state.type === "ready" ||
         state.type === "readOnly" ||
-        state.type === "incompatible"
+        state.type === "incompatible" ||
+        state.type === "stopped"
       ) {
         return;
       }
+      if (deadline && Date.now() >= deadline) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }

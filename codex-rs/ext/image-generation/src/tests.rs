@@ -129,21 +129,26 @@ fn stage_executors_enforce_their_reference_contract() {
 }
 
 #[test]
-fn required_references_are_added_once_to_explicit_paths() {
-    let existing = AbsolutePathBuf::from_absolute_path_checked("/tmp/render.png")
+fn required_references_are_prioritized_and_added_once() {
+    let render = AbsolutePathBuf::from_absolute_path_checked("/tmp/render.png")
         .expect("test path should be absolute");
     let template = AbsolutePathBuf::from_absolute_path_checked("/tmp/t-pose-template.png")
         .expect("test path should be absolute");
+    let candidate = AbsolutePathBuf::from_absolute_path_checked("/tmp/candidate.png")
+        .expect("test path should be absolute");
     let mut args = ImagegenArgs {
         prompt: "views".to_string(),
-        referenced_image_paths: Some(vec![existing.clone()]),
+        referenced_image_paths: Some(vec![candidate.clone(), render.clone()]),
         num_last_images_to_include: None,
     };
 
-    apply_required_reference_paths(&mut args, &[existing.clone(), template.clone()])
+    apply_required_reference_paths(&mut args, &[template.clone(), render.clone()])
         .expect("required references should fit");
 
-    assert_eq!(args.referenced_image_paths, Some(vec![existing, template]));
+    assert_eq!(
+        args.referenced_image_paths,
+        Some(vec![template, render, candidate])
+    );
 }
 
 #[tokio::test]

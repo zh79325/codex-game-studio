@@ -824,7 +824,7 @@ impl ProjectStore {
                     continue;
                 }
             }
-            sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ?, is_final = 0 WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = ? AND review_status IN ('pending', 'revisionRequested', 'accepted')")
+            sqlx::query("UPDATE generations SET review_status = 'superseded', reviewed_at = ? WHERE project_id = ? AND target_kind = ? AND target_ref = ? AND stage = ? AND review_status IN ('pending', 'revisionRequested')")
                 .bind(created_at)
                 .bind(&generation.project_id)
                 .bind(&generation.target_kind)

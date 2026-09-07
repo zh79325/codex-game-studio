@@ -123,6 +123,26 @@ pub(crate) fn write_manifest(path: &Path, manifest: &FocusManifest) -> io::Resul
     write_art_bible(path, &format!("{content}\n"))
 }
 
+pub(crate) fn refresh_baselines(
+    project: &Project,
+    character: &Character,
+    manifest: &mut FocusManifest,
+) -> io::Result<()> {
+    let formal_art_bible = Path::new(&project.root).join("art-bible.md");
+    let formal_character_spec = character
+        .spec_path
+        .as_deref()
+        .map(|path| Path::new(&project.root).join(path))
+        .unwrap_or_else(|| {
+            Path::new(&project.root)
+                .join(&character.dir_name)
+                .join("docs/角色定稿.md")
+        });
+    manifest.art_bible_base_hash = file_hash(&formal_art_bible)?;
+    manifest.character_spec_base_hash = file_hash(&formal_character_spec)?;
+    Ok(())
+}
+
 pub(crate) fn validate_media_path(
     project: &Project,
     character: &Character,
@@ -404,6 +424,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(focus_paths.art_bible).expect("read focus"),
             "edited focus art bible"
+        );
+    }
+
+    #[test]
+    fn refresh_baselines_rebases_without_overwriting_focus_edits() {
+        let (_temp, project, character) = fixture();
+        let mut manifest = ensure(&project, &character, 1).expect("initialize focus");
+        let focus_paths = paths(&project, &character);
+        fs::write(&focus_paths.art_bible, "unpublished focus edit").expect("edit focus");
+        fs::write(
+            Path::new(&project.root).join("art-bible.md"),
+            "published update",
+        )
+        .expect("edit formal art bible");
+
+        refresh_baselines(&project, &character, &mut manifest).expect("refresh baselines");
+
+        assert!(verify_baselines(&project, &character, &manifest).is_ok());
+        assert_eq!(
+            fs::read_to_string(focus_paths.art_bible).expect("read focus"),
+            "unpublished focus edit"
         );
     }
 

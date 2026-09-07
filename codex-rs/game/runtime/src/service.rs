@@ -1661,6 +1661,20 @@ impl GameService {
                 "Agent {agent_code} 不允许处理 {stage} 阶段"
             )));
         }
+        if target_kind == ConversationTargetKind::Character && agent_code == "visual_designer" {
+            let character_id = target_ref.as_deref().ok_or_else(|| {
+                GameServiceError::InvalidCharacterOperation("角色会话缺少 targetRef".to_string())
+            })?;
+            let character = self
+                .read_character(project.id.as_str(), character_id)
+                .await?;
+            if character.state == CharacterState::S5ViewsConfirmed {
+                let focus_paths = focus::paths(&project, &character);
+                let mut manifest = focus::ensure(&project, &character, now())?;
+                focus::refresh_baselines(&project, &character, &mut manifest)?;
+                focus::write_manifest(&focus_paths.manifest, &manifest)?;
+            }
+        }
         let timestamp = now();
         let (conversation, user_message, assistant_message) = {
             let mut projects = self
@@ -3189,7 +3203,12 @@ impl GameService {
                 "该媒体结果已不是最新待审核项".to_string(),
             ));
         }
-        focus::ensure(&project, &character, now())?;
+        let focus_paths = focus::paths(&project, &character);
+        let mut manifest = focus::ensure(&project, &character, now())?;
+        if generation.stage == "views" && !character.view_paths.is_empty() {
+            focus::refresh_baselines(&project, &character, &mut manifest)?;
+            focus::write_manifest(&focus_paths.manifest, &manifest)?;
+        }
         let attachment = feedback_image
             .map(|(mime_type, bytes)| {
                 focus::save_feedback_image(&project, &character, mime_type, bytes)
@@ -3354,7 +3373,7 @@ impl GameService {
                 GameServiceError::InvalidCharacterOperation(format!("四视图文件路径无效：{error}"))
             })?;
         let focus_paths = focus::paths(&project, &character);
-        let manifest = focus::ensure(&project, &character, now())?;
+        let mut manifest = focus::ensure(&project, &character, now())?;
         focus::verify_baselines(&project, &character, &manifest).map_err(|error| {
             GameServiceError::InvalidCharacterOperation(format!("发布基线冲突：{error}"))
         })?;
@@ -3448,6 +3467,10 @@ impl GameService {
         let mut backups = vec![
             (art_bible_target.clone(), fs::read(&art_bible_target).ok()),
             (
+                focus_paths.manifest.clone(),
+                fs::read(&focus_paths.manifest).ok(),
+            ),
+            (
                 character_spec_target.clone(),
                 fs::read(&character_spec_target).ok(),
             ),
@@ -3463,6 +3486,8 @@ impl GameService {
         let write_result = (|| -> Result<(), GameServiceError> {
             write_art_bible(&art_bible_target, &art_bible)?;
             write_art_bible(&character_spec_target, &character_spec)?;
+            focus::refresh_baselines(&project, &character, &mut manifest)?;
+            focus::write_manifest(&focus_paths.manifest, &manifest)?;
             fs::copy(&render_source, &render_target)?;
             fs::copy(&views_source, &views_target)?;
             split_quad_to_png_files(&views_source, &split_view_targets)?;
@@ -3940,12 +3965,14 @@ fn visual_focus_context(
             })
         })
         .map(|generation| generation.file_path.clone());
-    let revision_candidate_path = generations
-        .iter()
-        .find(|generation| {
-            generation.stage == stage
-                && generation.review_status == GenerationReviewStatus::RevisionRequested
+    let revision_candidate_path = (stage != "views")
+        .then(|| {
+            generations.iter().find(|generation| {
+                generation.stage == stage
+                    && generation.review_status == GenerationReviewStatus::RevisionRequested
+            })
         })
+        .flatten()
         .map(|generation| generation.file_path.clone());
     VisualFocusContext {
         stage: stage.to_string(),
@@ -4178,7 +4205,7 @@ fn visual_character_context(spec: &str, character: &Character, stage: &str) -> S
             "效果图必须使用自然动态姿势或战斗准备动作，禁止 T-pose/A-pose；武器必须被合理握持、背负或连接，肢体受力和武器方向一致；允许环境背景与氛围光。"
         }
         "views" => {
-            "四视图必须严格复刻 poseTemplatePath 模板：单张 2048×2048 正交 2×2 四宫格，左上正面，右上 90° 侧面且鼻尖朝画面左边，左下背面，右下相反的 90° 侧面且鼻尖朝画面右边；禁止 30°/45°/三分之二侧视、左右侧面同向或镜像复制。四格必须使用同一标准 T-pose、双臂水平侧平举，并保持相同比例、尺寸、垂直位置和地面线。必须同时引用 acceptedRenderPath 与 poseTemplatePath。背景必须是角色配色中未使用、与主色/辅色/肤色/毛发色/发光色具有最大色相和明度差异的高饱和单一不透明纯色，并在 prompt 中写明准确 HEX；禁止角色主色的深浅变体或邻近色，禁止渐变、暗角、地面、投影和环境光斑，确保适合色键抠图。禁止武器、手持物、背负装备、环境场景和动作特效。"
+            "四视图必须严格复刻 poseTemplatePath 模板：单张 2048×2048 正交 2×2 四宫格，左上正面；右上为角色右侧面，脸和鼻尖明确朝画面左边；左下背面；右下为角色左侧面，脸和鼻尖明确朝画面右边。右上与右下必须像模板一样面对相反方向，一左一右；禁止 30°/45°/三分之二侧视、左右侧面同向或把同一侧视复制到两格。四格必须使用同一标准 T-pose、双臂水平侧平举，并保持相同比例、尺寸、垂直位置和地面线。必须按 poseTemplatePath 优先、acceptedRenderPath 其次的顺序引用，禁止引用上一张四视图候选。背景必须是角色配色中未使用、与主色/辅色/肤色/毛发色/发光色具有最大色相和明度差异的高饱和单一不透明纯色，并在 prompt 中写明准确 HEX；禁止角色主色的深浅变体或邻近色，禁止渐变、暗角、地面、投影和环境光斑，确保适合色键抠图。禁止武器、手持物、背负装备、环境场景和动作特效。"
         }
         _ => "仅应用当前阶段明确允许的视觉规则。",
     };
@@ -4462,7 +4489,7 @@ mod tests {
     }
 
     #[test]
-    fn views_focus_context_exposes_confirmed_render_and_revision_candidate() {
+    fn views_focus_context_exposes_template_and_render_without_failed_candidate() {
         let manifest = focus::FocusManifest {
             art_bible_base_hash: None,
             character_spec_base_hash: None,
@@ -4504,9 +4531,7 @@ mod tests {
                     "characters/character-1/tmp/focus/media/references/t-pose-template.png"
                         .to_string()
                 ),
-                revision_candidate_path: Some(
-                    "characters/character-1/tmp/focus/media/views/revision.png".to_string()
-                ),
+                revision_candidate_path: None,
             }
         );
     }

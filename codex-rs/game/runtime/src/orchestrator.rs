@@ -748,8 +748,8 @@ impl TaskOrchestrator {
                         .into_iter()
                         .flat_map(|focus| {
                             [
-                                focus.accepted_render_path.as_deref(),
                                 focus.pose_template_path.as_deref(),
+                                focus.accepted_render_path.as_deref(),
                             ]
                         })
                         .flatten()

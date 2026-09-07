@@ -679,10 +679,11 @@ fn apply_required_reference_paths(
                 .to_string(),
         ));
     }
-    let paths = args.referenced_image_paths.get_or_insert_default();
-    for required_path in required_reference_paths {
-        if !paths.contains(required_path) {
-            paths.push(required_path.clone());
+    let requested_paths = args.referenced_image_paths.take().unwrap_or_default();
+    let mut paths = Vec::with_capacity(required_reference_paths.len() + requested_paths.len());
+    for path in required_reference_paths.iter().chain(&requested_paths) {
+        if !paths.contains(path) {
+            paths.push(path.clone());
         }
     }
     if paths.len() > MAX_EDIT_IMAGES {
@@ -690,6 +691,7 @@ fn apply_required_reference_paths(
             "required and requested reference images exceed the {MAX_EDIT_IMAGES}-image limit"
         )));
     }
+    args.referenced_image_paths = Some(paths);
     Ok(())
 }
 

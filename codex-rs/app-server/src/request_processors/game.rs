@@ -394,6 +394,35 @@ impl GameRequestProcessor {
             .map_err(game_error)
     }
 
+    pub(crate) fn model3d_provider_list(
+        &self,
+        params: GameModel3dProviderListParams,
+    ) -> std::result::Result<GameModel3dProviderListResponse, JSONRPCErrorError> {
+        self.adapter
+            .model3d_provider_list(params)
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn character_model3d_start(
+        &self,
+        params: GameCharacterModel3dStartParams,
+    ) -> std::result::Result<GameCharacterModel3dStartResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_model3d_start(params)
+            .await
+            .map_err(game_error)
+    }
+
+    pub(crate) async fn character_model3d_read(
+        &self,
+        params: GameCharacterModel3dReadParams,
+    ) -> std::result::Result<GameCharacterModel3dReadResponse, JSONRPCErrorError> {
+        self.adapter
+            .character_model3d_read(params)
+            .await
+            .map_err(game_error)
+    }
+
     pub(crate) async fn character_resume(
         &self,
         connection_id: ConnectionId,

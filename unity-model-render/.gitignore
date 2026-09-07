@@ -11,6 +11,18 @@
 /[Bb]uild/
 /[Bb]uilds/
 
+# 模型预览开发过程中的验收与中间资产
+/Assets/ModelPreview/Captures/
+/Assets/ModelPreview/Captures.meta
+/Assets/ModelPreview/Editor/
+/Assets/ModelPreview/Editor.meta
+/Assets/ModelPreview/Models/
+/Assets/ModelPreview/Models.meta
+/Assets/StreamingAssets/ModelPreview/SunWukongPreview.glb
+/Assets/StreamingAssets/ModelPreview/SunWukongPreview.glb.meta
+/Assets/StreamingAssets/ModelPreview/SunWukongRuntime.glb
+/Assets/StreamingAssets/ModelPreview/SunWukongRuntime.glb.meta
+
 # Unity 自动生成的 IDE 工程文件
 /*.csproj
 /*.sln

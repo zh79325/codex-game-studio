@@ -3414,6 +3414,7 @@ dependencies = [
  "codex-game-app-server-protocol",
  "codex-game-domain",
  "codex-game-import",
+ "codex-game-model3d",
  "codex-game-runtime",
  "codex-game-store",
  "futures",
@@ -3463,10 +3464,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-game-model3d"
+version = "0.0.0"
+dependencies = [
+ "codex-game-domain",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tripo3d-sdk",
+]
+
+[[package]]
 name = "codex-game-runtime"
 version = "0.0.0"
 dependencies = [
  "codex-game-domain",
+ "codex-game-model3d",
  "codex-game-store",
  "image",
  "pretty_assertions",
@@ -12391,6 +12407,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
@@ -15565,6 +15582,21 @@ checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
 dependencies = [
  "serde",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "tripo3d-sdk"
+version = "0.1.0"
+source = "git+https://github.com/VAST-AI-Research/tripo-rust-sdk?rev=f992f6a7cf7a28c10781f9fa28e4630c7802291c#f992f6a7cf7a28c10781f9fa28e4630c7802291c"
+dependencies = [
+ "bytes",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
 ]
 
 [[package]]

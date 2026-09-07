@@ -1,5 +1,6 @@
 mod ai_config;
 mod database;
+mod model3d;
 mod project_files;
 mod studio;
 

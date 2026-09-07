@@ -26,6 +26,7 @@ members = [
     "game/app-server-protocol",
     "game/domain",
     "game/import",
+    "game/model3d",
     "game/runtime",
     "game/store",
     "install-context",
@@ -234,6 +235,7 @@ codex-game-app-server-adapter = { path = "game/app-server-adapter" }
 codex-game-app-server-protocol = { path = "game/app-server-protocol" }
 codex-game-domain = { path = "game/domain" }
 codex-game-import = { path = "game/import" }
+codex-game-model3d = { path = "game/model3d" }
 codex-game-runtime = { path = "game/runtime" }
 codex-game-store = { path = "game/store" }
 codex-guardian-context = { path = "guardian-context" }
@@ -491,6 +493,7 @@ tempfile = "3.23.0"
 test-log = "0.2.19"
 textwrap = "0.16.2"
 thiserror = "2.0.17"
+tripo3d-sdk = { git = "https://github.com/VAST-AI-Research/tripo-rust-sdk", rev = "f992f6a7cf7a28c10781f9fa28e4630c7802291c" }
 tikv-jemallocator = "=0.7.0"
 time = "0.3.47"
 tiny_http = "0.12"

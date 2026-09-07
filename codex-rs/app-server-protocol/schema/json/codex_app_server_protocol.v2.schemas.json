@@ -9436,6 +9436,124 @@
       ],
       "type": "object"
     },
+    "GameModel3dAsset": {
+      "properties": {
+        "animationClips": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rigKind": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "animationClips",
+        "bytes",
+        "path",
+        "rigKind",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "GameModel3dJob": {
+      "properties": {
+        "asset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GameModel3dAsset"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "characterId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "providerCode": {
+          "type": "string"
+        },
+        "rigKind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "characterId",
+        "createdAt",
+        "id",
+        "projectId",
+        "providerCode",
+        "stage",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "GameModel3dProvider": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string"
+        },
+        "hasKey": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "driver",
+        "hasKey",
+        "name"
+      ],
+      "type": "object"
+    },
     "GameProject": {
       "properties": {
         "code": {

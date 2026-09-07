@@ -10,6 +10,8 @@ import type {
   ConversationSnapshot,
   Generation,
   ListedCharacter,
+  Model3dJob,
+  Model3dProvider,
   Project,
   ProviderPreset,
 } from "./types";
@@ -170,6 +172,30 @@ export const charactersApi = {
         characterId,
       },
     ),
+  listModel3dProviders: async () =>
+    (
+      await rpc<{ providers: Model3dProvider[] }>(
+        "game/model3d/provider/list",
+      )
+    ).providers,
+  readModel3d: async (projectId: string, characterId: string) =>
+    (
+      await rpc<{ job: Model3dJob | null }>(
+        "game/character/model3d/read",
+        { projectId, characterId },
+      )
+    ).job,
+  startModel3d: async (
+    projectId: string,
+    characterId: string,
+    providerCode: string,
+  ) =>
+    (
+      await rpc<{ job: Model3dJob }>(
+        "game/character/model3d/start",
+        { projectId, characterId, providerCode },
+      )
+    ).job,
   resume: (
     projectId: string,
     characterId: string,

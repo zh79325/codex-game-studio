@@ -17,6 +17,7 @@ base64 = { workspace = true }
 codex-game-app-server-protocol = { workspace = true }
 codex-game-domain = { workspace = true }
 codex-game-import = { workspace = true }
+codex-game-model3d = { workspace = true }
 codex-game-runtime = { workspace = true }
 codex-game-store = { workspace = true }
 futures = { workspace = true }

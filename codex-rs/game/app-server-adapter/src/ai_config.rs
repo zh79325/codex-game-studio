@@ -68,7 +68,10 @@ pub struct AiExecutionRoute {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AiSecrets {
+    #[serde(default)]
     provider_keys: BTreeMap<String, String>,
+    #[serde(default, rename = "3dModelKeys")]
+    model3d_keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,6 +89,34 @@ struct ProviderPresetFile {
 }
 
 impl GameAppServerAdapter {
+    pub fn model3d_provider_list(
+        &self,
+        _params: GameModel3dProviderListParams,
+    ) -> Result<GameModel3dProviderListResponse, String> {
+        let has_key = self
+            .read_secrets()?
+            .model3d_keys
+            .get("tripo3d-zzh")
+            .is_some_and(|key| !key.trim().is_empty());
+        Ok(GameModel3dProviderListResponse {
+            providers: vec![GameModel3dProvider {
+                code: "tripo3d-zzh".to_string(),
+                name: "Tripo 3D".to_string(),
+                driver: "tripo_v3".to_string(),
+                has_key,
+            }],
+        })
+    }
+
+    pub(crate) fn tripo_model3d_api_key(&self) -> Result<String, String> {
+        self.read_secrets()?
+            .model3d_keys
+            .get("tripo3d-zzh")
+            .cloned()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| "未配置 Tripo 3D API Key".to_string())
+    }
+
     pub async fn resolve_ai_execution_route(
         &self,
         route: &RouteDecision,
@@ -1431,5 +1462,36 @@ command = "node"
         "#;
 
         assert!(toml::from_str::<ProviderPresetFile>(document).is_err());
+    }
+
+    #[test]
+    fn model3d_provider_list_reads_3d_model_keys_from_secrets() {
+        let directory = tempdir().expect("tempdir");
+        let local = directory.path().join(".codex-game/local");
+        let codex_home = local.join("codex-home");
+        fs::create_dir_all(&codex_home).expect("create codex home");
+        fs::write(
+            local.join("ai-secrets.json"),
+            r#"{"providerKeys":{},"3dModelKeys":{"tripo3d-zzh":"tsk_secret"}}"#,
+        )
+        .expect("write secrets");
+
+        let adapter = GameAppServerAdapter::new(codex_home);
+        assert_eq!(
+            adapter
+                .model3d_provider_list(GameModel3dProviderListParams {})
+                .expect("list 3D providers")
+                .providers,
+            vec![GameModel3dProvider {
+                code: "tripo3d-zzh".to_string(),
+                name: "Tripo 3D".to_string(),
+                driver: "tripo_v3".to_string(),
+                has_key: true,
+            }]
+        );
+        assert_eq!(
+            adapter.tripo_model3d_api_key().expect("read Tripo key"),
+            "tsk_secret"
+        );
     }
 }

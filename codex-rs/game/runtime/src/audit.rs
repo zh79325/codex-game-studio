@@ -295,7 +295,7 @@ fn append_failure_body(body: &mut String, context: &TurnAuditContext, failure: &
     ));
 }
 
-fn conversation_audit_enabled(project_root: &Path) -> bool {
+pub(crate) fn conversation_audit_enabled(project_root: &Path) -> bool {
     let Ok(contents) = fs::read_to_string(project_root.join("project.json")) else {
         return false;
     };
@@ -331,14 +331,14 @@ fn audit_path(context: &TurnAuditContext) -> PathBuf {
         ))
 }
 
-fn append(path: &Path, content: &str) -> io::Result<()> {
+pub(crate) fn append(path: &Path, content: &str) -> io::Result<()> {
     let mut file = OpenOptions::new().append(true).open(path)?;
     file.write_all(content.as_bytes())?;
     file.flush()?;
     file.sync_all()
 }
 
-fn code_block(content: &str, language: &str) -> String {
+pub(crate) fn code_block(content: &str, language: &str) -> String {
     let longest = content
         .split(|character| character != '`')
         .map(str::len)
@@ -348,7 +348,7 @@ fn code_block(content: &str, language: &str) -> String {
     format!("{fence}{language}\n{content}\n{fence}\n")
 }
 
-fn truncate_chars(content: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(content: &str, max_chars: usize) -> String {
     let mut chars = content.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() {
@@ -396,7 +396,7 @@ fn redact_data_urls(content: &str) -> String {
     output
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

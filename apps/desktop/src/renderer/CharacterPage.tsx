@@ -1,5 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Card, Col, Image, Modal, Row, Space, Spin, Steps, Tag, Typography } from "antd";
+import {
+  App,
+  Button,
+  Card,
+  Col,
+  Image,
+  Modal,
+  Popconfirm,
+  Progress,
+  Row,
+  Select,
+  Space,
+  Spin,
+  Steps,
+  Tag,
+  Typography,
+} from "antd";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { aiApi, charactersApi, workspaceApi } from "./api";
@@ -18,6 +34,17 @@ const characterStateLabels: Record<string, string> = {
   S5_views_confirmed: "角色视觉设计完成",
 };
 
+const model3dStages: Record<string, { label: string; percent: number }> = {
+  uploadingViews: { label: "上传四视图", percent: 10 },
+  generatingModel: { label: "生成低面模型", percent: 30 },
+  checkingRig: { label: "检查可绑骨性", percent: 45 },
+  rigging: { label: "绑定 Mixamo 骨架", percent: 60 },
+  retargeting: { label: "烘焙预设动画", percent: 78 },
+  downloading: { label: "下载 GLB", percent: 90 },
+  validating: { label: "校验 GLB", percent: 96 },
+  completed: { label: "生成完成", percent: 100 },
+};
+
 export default function CharacterPage() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
@@ -25,6 +52,7 @@ export default function CharacterPage() {
   const { canWrite, setActiveProject } = useStudio();
   const resumedContinuationKeys = useRef(new Set<string>());
   const [specPreviewOpen, setSpecPreviewOpen] = useState(false);
+  const [model3dProviderCode, setModel3dProviderCode] = useState<string>();
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -40,6 +68,19 @@ export default function CharacterPage() {
     queryKey: ["ai-agents"],
     queryFn: aiApi.listAgents,
   });
+  const model3dProviders = useQuery({
+    queryKey: ["model3d-providers"],
+    queryFn: charactersApi.listModel3dProviders,
+  });
+  const model3d = useQuery({
+    queryKey: ["character-model3d", projectId, characterId],
+    queryFn: () => charactersApi.readModel3d(projectId, characterId),
+    enabled: Boolean(projectId && characterId),
+    refetchInterval: (query) =>
+      ["pending", "running"].includes(query.state.data?.status ?? "")
+        ? 1500
+        : false,
+  });
   const conversation = useConversation(
     {
       projectId,
@@ -53,6 +94,12 @@ export default function CharacterPage() {
   useEffect(() => {
     if (project.data) setActiveProject(project.data);
   }, [project.data, setActiveProject]);
+
+  useEffect(() => {
+    if (model3dProviderCode) return;
+    const provider = model3dProviders.data?.find((item) => item.hasKey);
+    if (provider) setModel3dProviderCode(provider.code);
+  }, [model3dProviderCode, model3dProviders.data]);
 
   useEffect(() => {
     if (!conversation.snapshot) return;
@@ -92,6 +139,9 @@ export default function CharacterPage() {
         queryKey: ["character", projectId, characterId],
       }),
       queryClient.invalidateQueries({ queryKey: ["characters", projectId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["character-model3d", projectId, characterId],
+      }),
       conversation.refresh(),
     ]);
   };
@@ -126,6 +176,25 @@ export default function CharacterPage() {
     },
   });
 
+  const startModel3d = useMutation({
+    mutationFn: () => {
+      if (!model3dProviderCode) throw new Error("没有已配置密钥的 3D 模型 Provider");
+      return charactersApi.startModel3d(
+        projectId,
+        characterId,
+        model3dProviderCode,
+      );
+    },
+    onSuccess: (job) => {
+      queryClient.setQueryData(
+        ["character-model3d", projectId, characterId],
+        job,
+      );
+      message.success("3D 游戏模型任务已启动");
+    },
+    onError: (error: Error) => message.error(error.message),
+  });
+
   const character = detail.data?.character;
   const generations = detail.data?.generations ?? [];
   const publishedRender = generations.find(
@@ -158,6 +227,12 @@ export default function CharacterPage() {
     : isViewsConfirmation
       ? pendingViewGenerations
       : [];
+  const model3dJob = model3d.data;
+  const model3dStage = model3dJob
+    ? model3dStages[model3dJob.stage]
+    : undefined;
+  const model3dRunning =
+    model3dJob?.status === "pending" || model3dJob?.status === "running";
 
   useEffect(() => {
     const workflowProgress = detail.data?.workflowProgress;
@@ -327,6 +402,99 @@ export default function CharacterPage() {
               <Typography.Text type="secondary">
                 Agent 审校结论仅供参考，只有这里的人工操作会推进状态。
               </Typography.Text>
+            </Card>
+            <Card
+              title="3D 游戏模型"
+              className="content-card"
+              extra={
+                <Space>
+                  {(model3dProviders.data?.length ?? 0) > 1 && (
+                    <Select
+                      value={model3dProviderCode}
+                      options={model3dProviders.data?.map((provider) => ({
+                        value: provider.code,
+                        label: provider.name,
+                        disabled: !provider.hasKey,
+                      }))}
+                      onChange={setModel3dProviderCode}
+                    />
+                  )}
+                  <Popconfirm
+                    title="上次请求结果不确定"
+                    description="上次提交可能已在远端计费。已完成的步骤会跳过，确认重试？"
+                    okText="确认重试"
+                    cancelText="取消"
+                    disabled={model3dJob?.status !== "needsAttention"}
+                    onConfirm={() => startModel3d.mutate()}
+                  >
+                    <Button
+                      type="primary"
+                      disabled={
+                        !canWrite ||
+                        !model3dProviderCode ||
+                        character?.state !== "S5_views_confirmed" ||
+                        model3dRunning ||
+                        model3dJob?.status === "succeeded"
+                      }
+                      loading={startModel3d.isPending}
+                      onClick={() => {
+                        if (model3dJob?.status !== "needsAttention") {
+                          startModel3d.mutate();
+                        }
+                      }}
+                    >
+                      {model3dJob?.status === "failed" ||
+                      model3dJob?.status === "needsAttention"
+                        ? "重新生成"
+                        : "生成 3D 模型"}
+                    </Button>
+                  </Popconfirm>
+                </Space>
+              }
+            >
+              {model3d.isLoading ? (
+                <Spin size="small" />
+              ) : model3dJob ? (
+                <Space orientation="vertical" className="workspace-main">
+                  <Tag
+                    color={
+                      model3dJob.status === "succeeded"
+                        ? "success"
+                        : model3dJob.status === "failed" ||
+                            model3dJob.status === "needsAttention"
+                          ? "error"
+                          : "processing"
+                    }
+                  >
+                    {model3dStage?.label ?? model3dJob.status}
+                  </Tag>
+                  {model3dRunning && (
+                    <Progress percent={model3dStage?.percent ?? 0} />
+                  )}
+                  {model3dJob.asset && (
+                    <>
+                      <StatusRow label="GLB" value={model3dJob.asset.path} />
+                      <StatusRow
+                        label="动画"
+                        value={model3dJob.asset.animationClips.join("、")}
+                      />
+                      <StatusRow
+                        label="大小"
+                        value={`${(model3dJob.asset.bytes / 1024 / 1024).toFixed(1)} MiB`}
+                      />
+                    </>
+                  )}
+                  {model3dJob.error && (
+                    <Typography.Text type="danger">
+                      {model3dJob.error}
+                    </Typography.Text>
+                  )}
+                </Space>
+              ) : (
+                <Typography.Text type="secondary">
+                  确认四视图后，可手动生成 P1 低面、Mixamo 骨架及预设动画 GLB。
+                </Typography.Text>
+              )}
             </Card>
             <Modal
               open={specPreviewOpen}

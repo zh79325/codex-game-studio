@@ -143,6 +143,41 @@ export type ListedCharacter = Character & {
   modelFileExists: boolean;
 };
 
+export type Model3dProvider = {
+  code: string;
+  name: string;
+  driver: string;
+  hasKey: boolean;
+};
+
+export type Model3dJob = {
+  id: string;
+  projectId: string;
+  characterId: string;
+  providerCode: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "needsAttention";
+  stage:
+    | "uploadingViews"
+    | "generatingModel"
+    | "checkingRig"
+    | "rigging"
+    | "retargeting"
+    | "downloading"
+    | "validating"
+    | "completed";
+  rigKind: string | null;
+  asset: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    rigKind: string;
+    animationClips: string[];
+  } | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CharacterWorkflowProgress = {
   statusLabel: string;
   steps: Array<{

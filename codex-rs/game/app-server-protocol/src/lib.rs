@@ -368,6 +368,49 @@ game_dto!(GameCharacterReadResponse {
     workflow_progress: GameCharacterWorkflowProgress,
     spec_markdown: Option<String>
 });
+game_dto!(GameModel3dAsset {
+    path: String,
+    sha256: String,
+    bytes: u64,
+    rig_kind: String,
+    animation_clips: Vec<String>
+});
+game_dto!(GameModel3dJob {
+    id: String,
+    project_id: String,
+    character_id: String,
+    provider_code: String,
+    status: String,
+    stage: String,
+    rig_kind: Option<String>,
+    asset: Option<GameModel3dAsset>,
+    error: Option<String>,
+    created_at: i64,
+    updated_at: i64
+});
+game_dto!(GameModel3dProvider {
+    code: String,
+    name: String,
+    driver: String,
+    has_key: bool
+});
+empty_params!(GameModel3dProviderListParams);
+game_dto!(GameModel3dProviderListResponse {
+    providers: Vec<GameModel3dProvider>
+});
+game_dto!(GameCharacterModel3dStartParams {
+    project_id: String,
+    character_id: String,
+    provider_code: Option<String>
+});
+game_dto!(GameCharacterModel3dStartResponse {
+    job: GameModel3dJob
+});
+game_dto!(GameCharacterModel3dReadParams {
+    project_id: String,
+    character_id: String
+});
+game_dto!(GameCharacterModel3dReadResponse { job: Option<GameModel3dJob> });
 game_dto!(GameCharacterConfirmSpecParams {
     project_id: String,
     character_id: String,

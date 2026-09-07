@@ -16,10 +16,15 @@ use codex_game_domain::ConversationTargetKind;
 use codex_game_domain::FeedbackImageAttachment;
 use codex_game_domain::Generation;
 use codex_game_domain::MessageStatus;
+use codex_game_domain::Model3dJob;
+use codex_game_domain::Model3dJobStatus;
+use codex_game_domain::Model3dStage;
 use codex_game_domain::Project;
 use codex_game_domain::ProjectState;
 use codex_game_domain::TaskAttemptStatus;
 use codex_game_domain::internal_executors_for_stage;
+use codex_game_model3d::Model3dProviderAdapter;
+use codex_game_model3d::TripoModel3dProvider;
 use codex_game_runtime::Capability;
 use codex_game_runtime::CodexExecutionPort;
 use codex_game_runtime::ExecuteTaskRequest;
@@ -889,6 +894,44 @@ impl GameAppServerAdapter {
         })
     }
 
+    pub async fn character_model3d_start(
+        &self,
+        params: GameCharacterModel3dStartParams,
+    ) -> Result<GameCharacterModel3dStartResponse, String> {
+        let provider_code = params.provider_code.as_deref().unwrap_or("tripo3d-zzh");
+        if provider_code != "tripo3d-zzh" {
+            return Err(format!("不支持的 3D 模型 Provider：{provider_code}"));
+        }
+        let api_key = self.tripo_model3d_api_key()?;
+        let provider = TripoModel3dProvider::new(api_key).map_err(|error| error.to_string())?;
+        let job = self
+            .runtime
+            .service()
+            .start_character_model3d(
+                &params.project_id,
+                &params.character_id,
+                Model3dProviderAdapter::Tripo(provider),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(GameCharacterModel3dStartResponse {
+            job: model3d_job_dto(job),
+        })
+    }
+
+    pub async fn character_model3d_read(
+        &self,
+        params: GameCharacterModel3dReadParams,
+    ) -> Result<GameCharacterModel3dReadResponse, GameServiceError> {
+        self.runtime
+            .service()
+            .read_character_model3d_job(&params.project_id, &params.character_id)
+            .await
+            .map(|job| GameCharacterModel3dReadResponse {
+                job: job.map(model3d_job_dto),
+            })
+    }
+
     async fn character_response_with_next_agent<E: CodexExecutionPort>(
         &self,
         execution: &E,
@@ -1460,6 +1503,47 @@ fn character_dto(character: Character) -> GameCharacter {
         gate_views_confirmed_at: character.gate_views_confirmed_at,
         created_at: character.created_at,
         updated_at: character.updated_at,
+    }
+}
+
+fn model3d_job_dto(job: Model3dJob) -> GameModel3dJob {
+    GameModel3dJob {
+        id: job.id,
+        project_id: job.project_id,
+        character_id: job.character_id,
+        provider_code: job.provider_code,
+        status: match job.status {
+            Model3dJobStatus::Pending => "pending",
+            Model3dJobStatus::Running => "running",
+            Model3dJobStatus::Succeeded => "succeeded",
+            Model3dJobStatus::Failed => "failed",
+            Model3dJobStatus::NeedsAttention => "needsAttention",
+        }
+        .to_string(),
+        stage: match job.stage {
+            Model3dStage::UploadingViews => "uploadingViews",
+            Model3dStage::GeneratingModel => "generatingModel",
+            Model3dStage::CheckingRig => "checkingRig",
+            Model3dStage::Rigging => "rigging",
+            Model3dStage::Retargeting => "retargeting",
+            Model3dStage::Downloading => "downloading",
+            Model3dStage::Validating => "validating",
+            Model3dStage::Completed => "completed",
+        }
+        .to_string(),
+        rig_kind: job
+            .rig_kind
+            .map(|rig_kind| rig_kind.as_provider_value().to_string()),
+        asset: job.asset.map(|asset| GameModel3dAsset {
+            path: asset.path,
+            sha256: asset.sha256,
+            bytes: asset.bytes,
+            rig_kind: asset.rig_kind.as_provider_value().to_string(),
+            animation_clips: asset.animation_clips,
+        }),
+        error: job.error,
+        created_at: job.created_at,
+        updated_at: job.updated_at,
     }
 }
 

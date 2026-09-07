@@ -1164,6 +1164,20 @@ impl MessageProcessor {
                 .character_read(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::GameModel3dProviderList { params, .. } => self
+                .game_processor
+                .model3d_provider_list(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterModel3dStart { params, .. } => self
+                .game_processor
+                .character_model3d_start(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::GameCharacterModel3dRead { params, .. } => self
+                .game_processor
+                .character_model3d_read(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::GameCharacterConfirmSpec { params, .. } => self
                 .game_processor
                 .character_confirm_spec(connection_id, params)

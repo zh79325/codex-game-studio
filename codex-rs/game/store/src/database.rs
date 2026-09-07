@@ -239,6 +239,25 @@ CREATE TABLE IF NOT EXISTS generations (
 );
 CREATE INDEX IF NOT EXISTS generations_by_target
 ON generations(project_id, target_kind, target_ref, stage, created_at);
+CREATE TABLE IF NOT EXISTS character_model3d_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    character_id TEXT NOT NULL,
+    provider_code TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    pipeline_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    inferred_rig_kind TEXT NOT NULL,
+    rig_kind TEXT,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    asset_json TEXT,
+    error_message TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model3d_jobs_by_character
+ON character_model3d_jobs(project_id, character_id, created_at);
 CREATE TABLE IF NOT EXISTS task_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,

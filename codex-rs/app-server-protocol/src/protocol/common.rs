@@ -657,6 +657,24 @@ client_request_definitions! {
         serialization: global_shared_read("game"),
         response: v2::GameCharacterReadResponse,
     },
+    #[experimental("game/model3d/provider/list")]
+    GameModel3dProviderList => "game/model3d/provider/list" {
+        params: v2::GameModel3dProviderListParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameModel3dProviderListResponse,
+    },
+    #[experimental("game/character/model3d/start")]
+    GameCharacterModel3dStart => "game/character/model3d/start" {
+        params: v2::GameCharacterModel3dStartParams,
+        serialization: global("game"),
+        response: v2::GameCharacterModel3dStartResponse,
+    },
+    #[experimental("game/character/model3d/read")]
+    GameCharacterModel3dRead => "game/character/model3d/read" {
+        params: v2::GameCharacterModel3dReadParams,
+        serialization: global_shared_read("game"),
+        response: v2::GameCharacterModel3dReadResponse,
+    },
     #[experimental("game/character/confirmSpec")]
     GameCharacterConfirmSpec => "game/character/confirmSpec" {
         params: v2::GameCharacterConfirmSpecParams,

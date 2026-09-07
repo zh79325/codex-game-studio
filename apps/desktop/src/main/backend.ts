@@ -289,6 +289,8 @@ const READ_ONLY_METHODS = new Set([
   "game/conversation/read",
   "game/character/list",
   "game/character/read",
+  "game/character/model3d/read",
+  "game/model3d/provider/list",
   "game/generation/list",
   "game/task/list",
   "game/artBible/list",

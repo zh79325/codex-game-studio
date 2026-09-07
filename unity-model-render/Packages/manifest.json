@@ -3,6 +3,7 @@
     "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main",
     "com.tripo3d.unitybridge": "file:/Users/eleme/Desktop/Tripo3d_Unity_Bridge",
     "com.unity.ai.navigation": "2.0.14",
+    "com.unity.animation.rigging": "1.4.1",
     "com.unity.cinemachine": "3.1.7",
     "com.unity.cloud.gltfast": "6.20.0",
     "com.unity.collab-proxy": "2.13.6",

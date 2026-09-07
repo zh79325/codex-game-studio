@@ -5,6 +5,8 @@ mod audit;
 mod character_files;
 mod execution;
 mod focus;
+mod model3d;
+mod model3d_audit;
 mod orchestrator;
 mod routing;
 mod service;

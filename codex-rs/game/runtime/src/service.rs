@@ -227,6 +227,8 @@ pub enum GameServiceError {
     #[error("invalid character operation: {0}")]
     InvalidCharacterOperation(String),
     #[error(transparent)]
+    Model3d(#[from] codex_game_model3d::Model3dError),
+    #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -376,6 +378,9 @@ impl GameService {
         let recovered = store.access() == ProjectAccess::ReadOnly;
         if store.access() == ProjectAccess::ReadWrite {
             store.recover_incomplete_attempts().await?;
+            store
+                .recover_running_model3d_jobs(project.id.as_str(), now())
+                .await?;
         }
         let conversations = store.load_conversations(project.id.as_str()).await?;
         let art_bibles = store.load_art_bible_versions(project.id.as_str()).await?;
@@ -3600,7 +3605,7 @@ impl GameService {
             .collect()
     }
 
-    fn project_store(
+    pub(crate) fn project_store(
         &self,
         project_id: &str,
         writable: bool,

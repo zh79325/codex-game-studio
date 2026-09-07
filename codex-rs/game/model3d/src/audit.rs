@@ -19,9 +19,14 @@ impl Model3dAuditOutcome {
 /// provider SDK and `response` is either the decoded success body or the
 /// structured provider error, so a paid call can be reconstructed from the audit
 /// trail alone.
+///
+/// `headers` describes the headers the SDK attaches to this transport. Secret
+/// values are masked before they reach this struct, so an audit record is always
+/// safe to write to disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model3dAuditCall {
     pub method: String,
+    pub headers: Value,
     pub request: Value,
     pub response: Value,
     pub outcome: Model3dAuditOutcome,

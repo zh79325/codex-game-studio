@@ -10,6 +10,8 @@ use codex_game_domain::RigKind;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,23 +26,36 @@ use tripo3d_sdk::params::RetargetAnimationParams;
 use tripo3d_sdk::params::RigCheckParams;
 use tripo3d_sdk::params::RigModelParams;
 
+const USER_AGENT: &str = "codex-game-studio/model3d";
+
+/// The headers the SDK attaches to one request, with secrets already masked.
+struct TripoRequest {
+    headers: Value,
+    body: Value,
+}
+
 pub struct TripoModel3dProvider {
     client: TripoClient,
     audit: Option<Arc<dyn Model3dAuditSink>>,
+    /// Masked identity of the API key. The plaintext key is deliberately not
+    /// retained, so it cannot reach an audit record.
+    authorization_hint: String,
 }
 
 impl TripoModel3dProvider {
     pub fn new(api_key: String) -> Result<Self> {
+        let authorization_hint = mask_bearer(&api_key);
         let client = TripoClient::new(ClientOptions {
             api_key: Some(api_key),
             timeout: Some(std::time::Duration::from_secs(90)),
-            user_agent: Some("codex-game-studio/model3d".to_string()),
+            user_agent: Some(USER_AGENT.to_string()),
             ..Default::default()
         })
         .map_err(|error| provider_failure(error).0)?;
         Ok(Self {
             client,
             audit: None,
+            authorization_hint,
         })
     }
 
@@ -49,12 +64,48 @@ impl TripoModel3dProvider {
         self
     }
 
+    /// Headers for a JSON task request: bearer auth plus a JSON body.
+    fn json_request(&self, body: Value) -> TripoRequest {
+        TripoRequest {
+            headers: json!({
+                "Authorization": self.authorization_hint,
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            }),
+            body,
+        }
+    }
+
+    /// Headers for the multipart upload. The boundary is generated per request by
+    /// the HTTP layer, so it is described rather than reproduced.
+    fn multipart_request(&self, body: Value) -> TripoRequest {
+        TripoRequest {
+            headers: json!({
+                "Authorization": self.authorization_hint,
+                "Content-Type": "multipart/form-data; boundary=<generated per request>",
+                "User-Agent": USER_AGENT,
+            }),
+            body,
+        }
+    }
+
+    /// Headers for fetching a finished artifact. The SDK sends no bearer token
+    /// here because the model URL is already pre-signed.
+    fn download_request(&self, body: Value) -> TripoRequest {
+        TripoRequest {
+            headers: json!({
+                "User-Agent": USER_AGENT,
+            }),
+            body,
+        }
+    }
+
     /// Runs one provider call and records its exact request payload alongside the
     /// decoded response or the structured provider error.
     async fn audited<T>(
         &self,
         method: &str,
-        request: Value,
+        request: TripoRequest,
         call: impl Future<Output = std::result::Result<T, tripo3d_sdk::Error>>,
         response_of: impl FnOnce(&T) -> Value,
     ) -> Result<T> {
@@ -88,7 +139,7 @@ impl TripoModel3dProvider {
     fn record(
         &self,
         method: &str,
-        request: Value,
+        request: TripoRequest,
         response: Value,
         outcome: Model3dAuditOutcome,
         started: Instant,
@@ -98,7 +149,8 @@ impl TripoModel3dProvider {
         };
         sink.record(&Model3dAuditCall {
             method: method.to_string(),
-            request,
+            headers: request.headers,
+            request: request.body,
             response,
             outcome,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -115,11 +167,11 @@ impl Model3dProvider for TripoModel3dProvider {
             .unwrap_or("view.png");
         self.audited(
             "upload_file",
-            json!({
+            self.multipart_request(json!({
                 "filename": filename,
                 "mimeType": "image/png",
                 "bytes": bytes.len(),
-            }),
+            })),
             self.client.upload_file(bytes, filename, Some("image/png")),
             |uploaded| json!({ "fileToken": uploaded.file_token }),
         )
@@ -136,7 +188,7 @@ impl Model3dProvider for TripoModel3dProvider {
         params.texture = Some(true);
         self.audited(
             "multiview_to_model",
-            payload(&params),
+            self.json_request(payload(&params)),
             self.client.multiview_to_model(params.clone()),
             task_id_response,
         )
@@ -147,7 +199,7 @@ impl Model3dProvider for TripoModel3dProvider {
         let params = RigCheckParams::new(model_task_id);
         self.audited(
             "rig_check",
-            payload(&params),
+            self.json_request(payload(&params)),
             self.client.rig_check(params.clone()),
             task_id_response,
         )
@@ -162,7 +214,7 @@ impl Model3dProvider for TripoModel3dProvider {
         };
         self.audited(
             "rig_model",
-            payload(&params),
+            self.json_request(payload(&params)),
             self.client.rig_model(params.clone()),
             task_id_response,
         )
@@ -177,7 +229,7 @@ impl Model3dProvider for TripoModel3dProvider {
         };
         self.audited(
             "retarget_animation",
-            payload(&params),
+            self.json_request(payload(&params)),
             self.client.retarget_animation(params.clone()),
             task_id_response,
         )
@@ -192,10 +244,10 @@ impl Model3dProvider for TripoModel3dProvider {
         let task = self
             .audited(
                 "wait_for_task",
-                json!({
+                self.json_request(json!({
                     "taskId": task_id,
                     "timeoutMs": wait_timeout().as_millis(),
-                }),
+                })),
                 self.client.wait_for_task(task_id, options),
                 |task| serde_json::to_value(task).unwrap_or(Value::Null),
             )
@@ -213,14 +265,14 @@ impl Model3dProvider for TripoModel3dProvider {
         let task = self
             .audited(
                 "get_task",
-                json!({ "taskId": task_id }),
+                self.json_request(json!({ "taskId": task_id })),
                 self.client.get_task(task_id),
                 |task| serde_json::to_value(task).unwrap_or(Value::Null),
             )
             .await?;
         self.audited(
             "download_model",
-            json!({ "taskId": task_id }),
+            self.download_request(json!({ "taskId": task_id })),
             self.client.download_model(&task),
             |downloaded| {
                 json!({
@@ -237,6 +289,30 @@ impl Model3dProvider for TripoModel3dProvider {
 
 fn payload<T: Serialize>(params: &T) -> Value {
     serde_json::to_value(params).unwrap_or(Value::Null)
+}
+
+/// Renders the bearer header without exposing the key. Keeps the last four
+/// characters and a truncated digest so the audit trail identifies *which*
+/// credential was used without recording a usable one.
+fn mask_bearer(api_key: &str) -> String {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return "Bearer <missing>".to_string();
+    }
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let digest = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
+    format!(
+        "Bearer ••••{tail} (chars={}, sha256={})",
+        trimmed.chars().count(),
+        &digest[..16]
+    )
 }
 
 fn task_id_response(task_id: &String) -> Value {
@@ -305,3 +381,11 @@ fn provider_failure(error: tripo3d_sdk::Error) -> (Model3dError, Value) {
     };
     (converted, response)
 }
+
+#[cfg(test)]
+#[path = "tripo_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "tripo_real_tests.rs"]
+mod real_tests;

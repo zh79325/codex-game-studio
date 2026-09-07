@@ -51,11 +51,12 @@ impl Model3dAuditSink for Model3dAuditFile {
             return;
         };
         let body = format!(
-            "\n## {}\n\n- Time：{}\n- Outcome：{}\n- Duration：{} ms\n\n### Request\n\n{}\n### Response\n\n{}",
+            "\n## {}\n\n- Time：{}\n- Outcome：{}\n- Duration：{} ms\n\n### Request\n\n#### Headers\n\n{}\n#### Body\n\n{}\n### Response\n\n{}",
             call.method,
             now(),
             call.outcome.as_str(),
             call.duration_ms,
+            json_block(&call.headers),
             json_block(&call.request),
             json_block(&call.response),
         );

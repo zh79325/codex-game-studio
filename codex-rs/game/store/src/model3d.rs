@@ -235,4 +235,3 @@ fn parse_rig_kind(value: &str) -> RigKind {
 #[cfg(test)]
 #[path = "model3d_tests.rs"]
 mod tests;
-

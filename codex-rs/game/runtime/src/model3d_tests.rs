@@ -207,6 +207,10 @@ fn audit_file_records_requests_and_responses_next_to_conversations() {
     let audit = Model3dAuditFile::create(project_root, &character_dir, &job);
     audit.record(&codex_game_model3d::Model3dAuditCall {
         method: "multiview_to_model".to_string(),
+        headers: json!({
+            "Authorization": "Bearer ••••cdef (chars=40, sha256=0123456789abcdef)",
+            "Content-Type": "application/json",
+        }),
         request: json!({ "model": "P1", "face_limit": 5000 }),
         response: json!({ "kind": "api", "code": 2010 }),
         outcome: codex_game_model3d::Model3dAuditOutcome::Failure,
@@ -220,6 +224,9 @@ fn audit_file_records_requests_and_responses_next_to_conversations() {
     assert!(document.contains("# 3D 模型生成审计"));
     assert!(document.contains("## multiview_to_model"));
     assert!(document.contains("- Outcome：failure"));
+    assert!(document.contains("#### Headers"));
+    assert!(document.contains("Bearer ••••cdef"));
+    assert!(document.contains("\"Content-Type\": \"application/json\""));
     assert!(document.contains("\"face_limit\": 5000"));
     assert!(document.contains("\"code\": 2010"));
 }

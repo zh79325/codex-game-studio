@@ -112,3 +112,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
         .ok_or_else(|| Model3dError::InvalidGlb("truncated GLB header".to_string()))?;
     Ok(u32::from_le_bytes(value))
 }
+
+#[cfg(test)]
+#[path = "glb_import_tests.rs"]
+mod import_tests;

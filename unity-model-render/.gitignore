@@ -46,6 +46,7 @@
 
 # Unity/崩溃与性能分析临时文件
 /sysinfo.txt
+/mono_crash.*.json
 /crashlytics-build.properties
 /[Aa]ssets/[Ss]treamingAssets/aa.meta
 /[Aa]ssets/[Ss]treamingAssets/aa/*

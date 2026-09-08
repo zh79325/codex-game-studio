@@ -8,204 +8,217 @@ namespace ModelPreview.Runtime.Humanoid
     {
         Idle,
         Walk,
-        Run
+        Run,
+        Punch,
+        Kick,
+        HeavyWeaponSwing
     }
 
     [DisallowMultipleComponent]
     public sealed class RuntimeHumanoidAnimationPlayer : MonoBehaviour
     {
-        private static readonly IReadOnlyDictionary<HumanoidAnimationRole, string[]> RolePatterns =
-            new Dictionary<HumanoidAnimationRole, string[]>
+        private const string DefaultControllerResource = "ModelPreview/HumanoidActionLibrary";
+
+        private static readonly IReadOnlyDictionary<HumanoidAnimationRole, string> StateNames =
+            new Dictionary<HumanoidAnimationRole, string>
             {
-                { HumanoidAnimationRole.Idle, new[] { "idle", "standing_relax", "stand" } },
-                { HumanoidAnimationRole.Walk, new[] { "walk" } },
-                { HumanoidAnimationRole.Run, new[] { "run" } }
+                { HumanoidAnimationRole.Idle, "Idle" },
+                { HumanoidAnimationRole.Walk, "Walk" },
+                { HumanoidAnimationRole.Run, "Run" },
+                { HumanoidAnimationRole.Punch, "Punch" },
+                { HumanoidAnimationRole.Kick, "Kick" },
+                { HumanoidAnimationRole.HeavyWeaponSwing, "HeavyWeaponSwing" }
             };
 
-        [SerializeField, Min(0f)] private float transitionDuration = 0.15f;
+        [SerializeField] private RuntimeAnimatorController actionController;
+        [SerializeField] private string controllerResourcePath = DefaultControllerResource;
+        [SerializeField, Min(0f)] private float transitionDuration = 0.12f;
 
         private readonly Dictionary<HumanoidAnimationRole, AnimationClip> _clips =
             new Dictionary<HumanoidAnimationRole, AnimationClip>();
+        private readonly HashSet<HumanoidAnimationRole> _availableRoles =
+            new HashSet<HumanoidAnimationRole>();
 
-        private Animation _animation;
         private Animator _animator;
         private bool _configured;
 
         public event Action<HumanoidAnimationRole, AnimationClip> AnimationChanged;
 
-        public bool IsConfigured => _configured && _animation != null;
+        public bool IsConfigured => _configured
+            && _animator != null
+            && _animator.enabled
+            && _animator.avatar != null
+            && _animator.avatar.isValid
+            && _animator.avatar.isHuman;
         public HumanoidAnimationRole CurrentRole { get; private set; }
-        public string CurrentClipName => IsConfigured && _clips.TryGetValue(CurrentRole, out var clip)
+        public string CurrentClipName => _clips.TryGetValue(CurrentRole, out var clip)
             ? clip.name
             : string.Empty;
+        public IReadOnlyCollection<HumanoidAnimationRole> AvailableRoles => _availableRoles;
 
-        public bool Configure(Animator animator, IReadOnlyList<AnimationClip> sourceClips)
+        public bool Configure(Animator animator)
         {
             ResetPlayer();
             _clips.Clear();
+            _availableRoles.Clear();
 
-            if (animator == null || animator.avatar == null || !animator.avatar.isValid || !animator.avatar.isHuman)
+            if (animator == null
+                || animator.avatar == null
+                || !animator.avatar.isValid
+                || !animator.avatar.isHuman)
             {
                 Debug.LogError("A valid Human Animator is required before animation playback.", this);
                 return false;
             }
 
-            if (sourceClips == null || sourceClips.Count == 0)
+            var controller = actionController;
+            if (controller == null && !string.IsNullOrWhiteSpace(controllerResourcePath))
             {
-                Debug.LogError("The loaded model contains no animation clips.", this);
+                controller = Resources.Load<RuntimeAnimatorController>(controllerResourcePath.Trim());
+            }
+            if (controller == null)
+            {
+                Debug.LogError(
+                    "The shared Humanoid action controller is missing. Run "
+                    + "Tools/Model Preview/Build Humanoid Action Library.",
+                    this);
                 return false;
             }
 
-            foreach (HumanoidAnimationRole role in Enum.GetValues(typeof(HumanoidAnimationRole)))
+            // glTFast historically instantiated embedded glTF clips through the
+            // Legacy Animation component. Disable any such component defensively;
+            // mixing it with Animator causes two systems to overwrite the same
+            // skeleton and produces severely twisted poses.
+            foreach (var legacyAnimation in animator.GetComponentsInChildren<Animation>(true))
             {
-                var clip = FindClip(sourceClips, RolePatterns[role]);
-                if (clip != null)
-                {
-                    _clips[role] = clip;
-                }
-            }
-
-            if (_clips.Count == 0)
-            {
-                Debug.LogError("No Idle, Walk, or Run clip could be identified.", this);
-                return false;
+                legacyAnimation.Stop();
+                legacyAnimation.playAutomatically = false;
+                legacyAnimation.enabled = false;
             }
 
             _animator = animator;
+            _animator.runtimeAnimatorController = controller;
             _animator.applyRootMotion = false;
-            _animation = animator.GetComponent<Animation>();
-            if (_animation == null)
-            {
-                _animation = animator.GetComponentInChildren<Animation>(true);
-            }
-            if (_animation == null)
-            {
-                _animation = animator.gameObject.AddComponent<Animation>();
-            }
+            _animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+            _animator.enabled = true;
+            _animator.Rebind();
+            _animator.Update(0f);
 
-            _animation.enabled = true;
-            foreach (var entry in _clips)
+            var clipsByName = new Dictionary<string, AnimationClip>(StringComparer.OrdinalIgnoreCase);
+            foreach (var clip in controller.animationClips)
             {
-                var clip = entry.Value;
-                clip.legacy = true;
-                if (_animation.GetClip(clip.name) == null)
+                if (clip != null)
                 {
-                    _animation.AddClip(clip, clip.name);
-                }
-
-                var state = _animation[clip.name];
-                if (state != null)
-                {
-                    state.wrapMode = WrapMode.Loop;
-                    state.speed = 1f;
-                    state.layer = 0;
+                    clipsByName[clip.name] = clip;
                 }
             }
 
-            _animator.enabled = false;
+            foreach (var entry in StateNames)
+            {
+                var stateHash = Animator.StringToHash("Base Layer." + entry.Value);
+                if (!_animator.HasState(0, stateHash))
+                {
+                    continue;
+                }
+
+                _availableRoles.Add(entry.Key);
+                if (clipsByName.TryGetValue(entry.Value, out var clip))
+                {
+                    _clips[entry.Key] = clip;
+                }
+            }
+
+            if (_availableRoles.Count == 0)
+            {
+                Debug.LogError("The shared controller contains no supported Humanoid states.", this);
+                ResetPlayer();
+                return false;
+            }
+
             _configured = true;
-
-            var initialRole = _clips.ContainsKey(HumanoidAnimationRole.Idle)
+            return Play(_availableRoles.Contains(HumanoidAnimationRole.Idle)
                 ? HumanoidAnimationRole.Idle
-                : FirstAvailableRole();
-            return Play(initialRole);
+                : FirstAvailableRole());
         }
 
         public bool IsAvailable(HumanoidAnimationRole role)
         {
-            return IsConfigured && _clips.ContainsKey(role);
+            return IsConfigured && _availableRoles.Contains(role);
         }
 
         public bool Play(HumanoidAnimationRole role)
         {
-            if (!IsConfigured || !_clips.TryGetValue(role, out var clip))
+            if (!IsConfigured || !_availableRoles.Contains(role))
             {
                 return false;
             }
 
-            var state = _animation[clip.name];
-            if (state == null)
+            var stateName = StateNames[role];
+            if (transitionDuration > 0f)
             {
-                return false;
-            }
-
-            state.wrapMode = WrapMode.Loop;
-            state.time = 0f;
-            if (transitionDuration > 0f && _animation.isPlaying)
-            {
-                _animation.CrossFade(clip.name, transitionDuration, PlayMode.StopAll);
+                _animator.CrossFadeInFixedTime(stateName, transitionDuration, 0, 0f);
             }
             else
             {
-                _animation.Play(clip.name, PlayMode.StopAll);
+                _animator.Play(stateName, 0, 0f);
             }
+            _animator.Update(0f);
 
             CurrentRole = role;
+            _clips.TryGetValue(role, out var clip);
             AnimationChanged?.Invoke(role, clip);
             return true;
         }
 
-        public bool PlayIdle()
-        {
-            return Play(HumanoidAnimationRole.Idle);
-        }
+        public bool PlayIdle() => Play(HumanoidAnimationRole.Idle);
+        public bool PlayWalk() => Play(HumanoidAnimationRole.Walk);
+        public bool PlayRun() => Play(HumanoidAnimationRole.Run);
+        public bool PlayPunch() => Play(HumanoidAnimationRole.Punch);
+        public bool PlayKick() => Play(HumanoidAnimationRole.Kick);
+        public bool PlayHeavyWeaponSwing() => Play(HumanoidAnimationRole.HeavyWeaponSwing);
 
-        public bool PlayWalk()
+        private void Update()
         {
-            return Play(HumanoidAnimationRole.Walk);
-        }
-
-        public bool PlayRun()
-        {
-            return Play(HumanoidAnimationRole.Run);
-        }
-
-        private static AnimationClip FindClip(
-            IReadOnlyList<AnimationClip> clips,
-            IReadOnlyList<string> patterns)
-        {
-            foreach (var pattern in patterns)
+            if (!IsConfigured || _animator.IsInTransition(0))
             {
-                for (var index = 0; index < clips.Count; index++)
-                {
-                    var clip = clips[index];
-                    if (clip != null
-                        && clip.name.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        return clip;
-                    }
-                }
+                return;
             }
 
-            return null;
+            var state = _animator.GetCurrentAnimatorStateInfo(0);
+            foreach (var entry in StateNames)
+            {
+                if (entry.Key == CurrentRole || !state.IsName(entry.Value))
+                {
+                    continue;
+                }
+
+                CurrentRole = entry.Key;
+                _clips.TryGetValue(entry.Key, out var clip);
+                AnimationChanged?.Invoke(entry.Key, clip);
+                return;
+            }
         }
 
         private HumanoidAnimationRole FirstAvailableRole()
         {
             foreach (HumanoidAnimationRole role in Enum.GetValues(typeof(HumanoidAnimationRole)))
             {
-                if (_clips.ContainsKey(role))
+                if (_availableRoles.Contains(role))
                 {
                     return role;
                 }
             }
-
             return HumanoidAnimationRole.Idle;
         }
 
         private void ResetPlayer()
         {
             _configured = false;
-            if (_animation != null)
-            {
-                _animation.Stop();
-            }
             if (_animator != null)
             {
                 _animator.enabled = true;
+                _animator.runtimeAnimatorController = null;
             }
-
-            _animation = null;
             _animator = null;
         }
 
@@ -215,4 +228,3 @@ namespace ModelPreview.Runtime.Humanoid
         }
     }
 }
-

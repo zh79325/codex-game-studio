@@ -23,7 +23,7 @@ namespace ModelPreview.Runtime.Humanoid
 
         [Header("Preview")]
         [SerializeField] private Camera previewCamera;
-        [SerializeField] private Vector3 cameraDirection = Vector3.back;
+        [SerializeField] private Vector3 cameraDirection = Vector3.forward;
         [SerializeField, Min(1.5f)] private float cameraDistanceMultiplier = 3.2f;
         [SerializeField] private bool createGround = true;
         [SerializeField] private bool createRuntimeUi = true;
@@ -39,9 +39,8 @@ namespace ModelPreview.Runtime.Humanoid
         private RuntimeHumanoidAnimationPlayer _animationPlayer;
         private CancellationTokenSource _lifetimeCancellation;
         private Text _statusText;
-        private Button _idleButton;
-        private Button _walkButton;
-        private Button _runButton;
+        private readonly System.Collections.Generic.Dictionary<HumanoidAnimationRole, Button> _actionButtons =
+            new System.Collections.Generic.Dictionary<HumanoidAnimationRole, Button>();
         private Material _groundMaterial;
         private Material _originalSkyboxMaterial;
         private Material _runtimeSkyboxMaterial;
@@ -116,9 +115,9 @@ namespace ModelPreview.Runtime.Humanoid
                 return false;
             }
 
-            if (!_animationPlayer.Configure(avatarResult.Animator, loadResult.Handle.AnimationClips))
+            if (!_animationPlayer.Configure(avatarResult.Animator))
             {
-                SetStatus("No supported Idle, Walk, or Run animation was found.");
+                SetStatus("The shared Humanoid action library is unavailable.");
                 return false;
             }
 
@@ -152,6 +151,21 @@ var camera = ConfigureCamera(loadResult.Handle.Root);
         public void PlayRun()
         {
             Play(HumanoidAnimationRole.Run);
+        }
+
+        public void PlayPunch()
+        {
+            Play(HumanoidAnimationRole.Punch);
+        }
+
+        public void PlayKick()
+        {
+            Play(HumanoidAnimationRole.Kick);
+        }
+
+        public void PlayHeavyWeaponSwing()
+        {
+            Play(HumanoidAnimationRole.HeavyWeaponSwing);
         }
 
 public void RotateView(float deltaYawDegrees)
@@ -276,7 +290,7 @@ public void OnEndDrag(PointerEventData eventData)
             panelRect.anchorMin = new Vector2(0.5f, 0f);
             panelRect.anchorMax = new Vector2(0.5f, 0f);
             panelRect.pivot = new Vector2(0.5f, 0f);
-            panelRect.sizeDelta = new Vector2(560f, 82f);
+            panelRect.sizeDelta = new Vector2(1040f, 82f);
             panelRect.anchoredPosition = new Vector2(0f, 24f);
             var panelImage = panelObject.GetComponent<Image>();
             panelImage.color = new Color(0.035f, 0.045f, 0.065f, 0.9f);
@@ -289,11 +303,23 @@ public void OnEndDrag(PointerEventData eventData)
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = true;
 
-            _idleButton = CreateButton(panelObject.transform, "Idle", HumanoidAnimationRole.Idle);
-            _walkButton = CreateButton(panelObject.transform, "Walk", HumanoidAnimationRole.Walk);
-            _runButton = CreateButton(panelObject.transform, "Run", HumanoidAnimationRole.Run);
+            _actionButtons.Clear();
+            AddActionButton(panelObject.transform, "待机", HumanoidAnimationRole.Idle);
+            AddActionButton(panelObject.transform, "行走", HumanoidAnimationRole.Walk);
+            AddActionButton(panelObject.transform, "奔跑", HumanoidAnimationRole.Run);
+            AddActionButton(panelObject.transform, "出拳", HumanoidAnimationRole.Punch);
+            AddActionButton(panelObject.transform, "踢击", HumanoidAnimationRole.Kick);
+            AddActionButton(panelObject.transform, "挥棍", HumanoidAnimationRole.HeavyWeaponSwing);
             SetStatus("Waiting to load model...");
             SetButtonsInteractable(false);
+        }
+
+        private void AddActionButton(
+            Transform parent,
+            string label,
+            HumanoidAnimationRole role)
+        {
+            _actionButtons[role] = CreateButton(parent, label, role);
         }
 
         private Button CreateButton(
@@ -339,41 +365,26 @@ public void OnEndDrag(PointerEventData eventData)
 
         private void RefreshButtons()
         {
-            if (_idleButton != null)
+            foreach (var entry in _actionButtons)
             {
-                _idleButton.interactable = _animationPlayer.IsAvailable(HumanoidAnimationRole.Idle);
-            }
-            if (_walkButton != null)
-            {
-                _walkButton.interactable = _animationPlayer.IsAvailable(HumanoidAnimationRole.Walk);
-            }
-            if (_runButton != null)
-            {
-                _runButton.interactable = _animationPlayer.IsAvailable(HumanoidAnimationRole.Run);
+                entry.Value.interactable = _animationPlayer.IsAvailable(entry.Key);
             }
         }
 
         private void SetButtonsInteractable(bool value)
         {
-            if (_idleButton != null)
+            foreach (var button in _actionButtons.Values)
             {
-                _idleButton.interactable = value;
-            }
-            if (_walkButton != null)
-            {
-                _walkButton.interactable = value;
-            }
-            if (_runButton != null)
-            {
-                _runButton.interactable = value;
+                button.interactable = value;
             }
         }
 
         private void HighlightActiveButton(HumanoidAnimationRole activeRole)
         {
-            SetButtonHighlight(_idleButton, activeRole == HumanoidAnimationRole.Idle);
-            SetButtonHighlight(_walkButton, activeRole == HumanoidAnimationRole.Walk);
-            SetButtonHighlight(_runButton, activeRole == HumanoidAnimationRole.Run);
+            foreach (var entry in _actionButtons)
+            {
+                SetButtonHighlight(entry.Value, entry.Key == activeRole);
+            }
         }
 
         private static void SetButtonHighlight(Button button, bool active)
@@ -475,7 +486,7 @@ private Camera ConfigureCamera(GameObject modelRoot)
 
             var direction = cameraDirection.sqrMagnitude > 0.001f
                 ? cameraDirection.normalized
-                : Vector3.back;
+                : Vector3.forward;
             var lookAt = bounds.center - Vector3.up * bounds.extents.y * 0.08f;
             var rotation = Quaternion.LookRotation(-direction, Vector3.up);
             var forward = rotation * Vector3.forward;
@@ -523,8 +534,7 @@ private static void ConfigureCameraRendering(Camera camera)
         {
             var cameraData = camera.GetUniversalAdditionalCameraData();
             cameraData.renderPostProcessing = true;
-            cameraData.antialiasing = AntialiasingMode.SubpixelMorphologicalAntiAliasing;
-            cameraData.antialiasingQuality = AntialiasingQuality.High;
+            cameraData.antialiasing = AntialiasingMode.None;
             cameraData.stopNaN = true;
             cameraData.dithering = true;
             cameraData.renderShadows = true;
@@ -560,22 +570,22 @@ private static void ConfigureCameraRendering(Camera camera)
             ConfigureDirectionalLight(
                 key,
                 keySource,
-                new Color(1f, 0.97f, 0.93f, 1f),
-                0.95f,
+                new Color(1f, 0.98f, 0.95f, 1f),
+                1.3f,
                 LightShadows.Soft,
                 0.85f);
             ConfigureDirectionalLight(
                 fill,
                 fillSource,
-                new Color(0.82f, 0.88f, 1f, 1f),
-                0.45f,
+                new Color(0.90f, 0.94f, 1f, 1f),
+                0.8f,
                 LightShadows.None,
                 0f);
             ConfigureDirectionalLight(
                 rim,
                 rimSource,
-                new Color(0.82f, 0.88f, 1f, 1f),
-                0.25f,
+                new Color(0.88f, 0.92f, 1f, 1f),
+                0.4f,
                 LightShadows.None,
                 0f);
 
@@ -594,11 +604,11 @@ private static void ConfigureCameraRendering(Camera camera)
             
 RenderSettings.sun = key;
             RenderSettings.ambientMode = AmbientMode.Trilight;
-            RenderSettings.ambientSkyColor = new Color(0.46f, 0.48f, 0.52f, 1f);
-            RenderSettings.ambientEquatorColor = new Color(0.30f, 0.31f, 0.34f, 1f);
-            RenderSettings.ambientGroundColor = new Color(0.15f, 0.16f, 0.18f, 1f);
-            RenderSettings.ambientIntensity = 0.9f;
-            RenderSettings.reflectionIntensity = 0.35f;
+            RenderSettings.ambientSkyColor = new Color(0.72f, 0.72f, 0.72f, 1f);
+            RenderSettings.ambientEquatorColor = new Color(0.52f, 0.52f, 0.52f, 1f);
+            RenderSettings.ambientGroundColor = new Color(0.30f, 0.30f, 0.30f, 1f);
+            RenderSettings.ambientIntensity = 1.05f;
+            RenderSettings.reflectionIntensity = 0.25f;
             RenderSettings.defaultReflectionResolution = 256;
             RenderSettings.fog = false;
             DynamicGI.UpdateEnvironment();
@@ -662,19 +672,19 @@ private void ConfigureRuntimeSkybox()
 
             if (_runtimeSkyboxMaterial.HasProperty("_SkyTint"))
             {
-                _runtimeSkyboxMaterial.SetColor("_SkyTint", new Color(0.48f, 0.50f, 0.55f, 1f));
+                _runtimeSkyboxMaterial.SetColor("_SkyTint", new Color(0.18f, 0.19f, 0.21f, 1f));
             }
             if (_runtimeSkyboxMaterial.HasProperty("_GroundColor"))
             {
-                _runtimeSkyboxMaterial.SetColor("_GroundColor", new Color(0.22f, 0.23f, 0.25f, 1f));
+                _runtimeSkyboxMaterial.SetColor("_GroundColor", new Color(0.09f, 0.10f, 0.12f, 1f));
             }
             if (_runtimeSkyboxMaterial.HasProperty("_Exposure"))
             {
-                _runtimeSkyboxMaterial.SetFloat("_Exposure", 0.8f);
+                _runtimeSkyboxMaterial.SetFloat("_Exposure", 0.35f);
             }
             if (_runtimeSkyboxMaterial.HasProperty("_AtmosphereThickness"))
             {
-                _runtimeSkyboxMaterial.SetFloat("_AtmosphereThickness", 0.7f);
+                _runtimeSkyboxMaterial.SetFloat("_AtmosphereThickness", 0.35f);
             }
             RenderSettings.skybox = _runtimeSkyboxMaterial;
         }

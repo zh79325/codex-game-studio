@@ -33,6 +33,8 @@ namespace ModelPreview.Runtime.Humanoid
                     diagnostics);
             }
 
+            AlignSkeletonForward(modelRoot.transform, boneMap, diagnostics);
+
             Avatar avatar = null;
             RuntimeHumanoidAvatarOwner owner = null;
 
@@ -102,6 +104,48 @@ namespace ModelPreview.Runtime.Humanoid
                     "Humanoid Avatar construction failed: " + exception.Message,
                     diagnostics);
             }
+        }
+
+        private static void AlignSkeletonForward(
+            Transform modelRoot,
+            IReadOnlyDictionary<HumanBodyBones, Transform> boneMap,
+            ICollection<string> diagnostics)
+        {
+            var hips = boneMap[HumanBodyBones.Hips];
+            var head = boneMap[HumanBodyBones.Head];
+            var leftUpperArm = boneMap[HumanBodyBones.LeftUpperArm];
+            var rightUpperArm = boneMap[HumanBodyBones.RightUpperArm];
+            var up = (head.position - hips.position).normalized;
+            var right = (rightUpperArm.position - leftUpperArm.position).normalized;
+            var forward = Vector3.ProjectOnPlane(Vector3.Cross(right, up), modelRoot.up);
+            if (forward.sqrMagnitude < 0.0001f)
+            {
+                diagnostics.Add("Skipped forward alignment because the anatomical axes are degenerate.");
+                return;
+            }
+
+            forward.Normalize();
+            var angle = Vector3.Angle(forward, modelRoot.forward);
+            if (angle < 0.1f)
+            {
+                diagnostics.Add("Skeleton forward already matches model +Z.");
+                return;
+            }
+
+            var skeletonRoot = hips;
+            while (skeletonRoot.parent != null && skeletonRoot.parent != modelRoot)
+            {
+                skeletonRoot = skeletonRoot.parent;
+            }
+            if (skeletonRoot.parent != modelRoot)
+            {
+                diagnostics.Add("Skipped forward alignment because the skeleton root is outside the model root.");
+                return;
+            }
+
+            skeletonRoot.rotation = Quaternion.FromToRotation(forward, modelRoot.forward)
+                * skeletonRoot.rotation;
+            diagnostics.Add("Aligned anatomical forward to model +Z by " + angle.ToString("F2") + " degrees.");
         }
 
         private static HumanDescription CreateHumanDescription(

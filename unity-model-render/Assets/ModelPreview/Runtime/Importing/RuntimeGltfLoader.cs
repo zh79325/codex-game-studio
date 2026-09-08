@@ -128,8 +128,20 @@ namespace ModelPreview.Runtime.Importing
                 pendingRoot.SetActive(false);
                 pendingRoot.transform.SetParent(request.Parent, false);
 
-                var instantiated = await pendingImport.InstantiateMainSceneAsync(
+                // The GLB may contain baked legacy clips. They are still retained
+                // on RuntimeModelHandle for inspection, but must not instantiate an
+                // Animation component: it would auto-play alongside the Humanoid
+                // Animator and both systems would write the same bones every frame.
+                var instantiationSettings = new InstantiationSettings
+                {
+                    Mask = ComponentType.All & ~ComponentType.Animation
+                };
+                var instantiator = new GameObjectInstantiator(
+                    pendingImport,
                     pendingRoot.transform,
+                    settings: instantiationSettings);
+                var instantiated = await pendingImport.InstantiateMainSceneAsync(
+                    instantiator,
                     token);
                 token.ThrowIfCancellationRequested();
                 ThrowIfStale(generation, token);

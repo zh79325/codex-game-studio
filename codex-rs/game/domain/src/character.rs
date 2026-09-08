@@ -81,7 +81,7 @@ pub fn advance_character(
 
 pub fn agents_for_stage(target_kind: &str, stage: &str) -> &'static [&'static str] {
     match (target_kind, stage) {
-        ("project", "project") => &["studio_director", "game_designer"],
+        ("project", "project") => &["studio_director", "art_bible_designer"],
         ("character", "spec") => &["studio_director", "spec_writer", "spec_reviewer"],
         ("character", "render" | "views") => &["studio_director", "visual_designer"],
         _ => &[],

@@ -27,7 +27,7 @@ api_path = "/api/coding/v3"
 limit_kind = "tokens"
 default_period = "day+11H"
 params = { context_window = 1000000 }
-remark = "Coding Plan 套餐内模型，适合 game_designer / spec_writer 长对焦"
+remark = "Coding Plan 套餐内模型，适合 art_bible_designer / spec_writer 长对焦"
 
 [[presets.models]]
 model_id = "doubao-seed-2.1-turbo"

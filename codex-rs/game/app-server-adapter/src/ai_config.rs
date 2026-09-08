@@ -10,9 +10,11 @@ use codex_game_domain::LimitPolicy;
 use codex_game_domain::ProviderModel;
 use codex_game_domain::ProviderPreset;
 use codex_game_domain::ProviderPresetModel;
+use codex_game_runtime::LEGACY_GAME_DESIGNER_AGENT;
 use codex_game_runtime::REALTIME_SPEECH_AGENT;
 use codex_game_runtime::RouteDecision;
 use codex_game_runtime::bundled_agent_definitions;
+use codex_game_runtime::legacy_agent_code;
 use codex_game_store::clear_ai_breaker;
 use codex_game_store::create_ai_provider_configuration;
 use codex_game_store::delete_ai_model;
@@ -406,7 +408,14 @@ impl GameAppServerAdapter {
         let agents = agent_definitions()?
             .into_iter()
             .map(|mut agent| {
-                agent.model_ids = bindings.get(&agent.agent_code).cloned().unwrap_or_default();
+                agent.model_ids = bindings
+                    .get(&agent.agent_code)
+                    .or_else(|| {
+                        legacy_agent_code(&agent.agent_code)
+                            .and_then(|legacy_code| bindings.get(legacy_code))
+                    })
+                    .cloned()
+                    .unwrap_or_default();
                 agent_dto(agent)
             })
             .collect();
@@ -417,10 +426,7 @@ impl GameAppServerAdapter {
         &self,
         params: GameAiAgentBindingWriteParams,
     ) -> Result<GameAiAgentBindingWriteResponse, String> {
-        if !agent_definitions()?
-            .iter()
-            .any(|agent| agent.agent_code == params.agent_code)
-        {
+        if !known_agent_codes()?.contains(&params.agent_code) {
             return Err(format!("unknown agent: {}", params.agent_code));
         }
         let pool = open_studio_store(&self.studio_storage)
@@ -699,10 +705,7 @@ fn validate_create_bindings(
     provider: &AiProvider,
     bindings: Vec<GameAiAgentBinding>,
 ) -> Result<HashMap<String, Vec<String>>, String> {
-    let known_agents = agent_definitions()?
-        .into_iter()
-        .map(|agent| agent.agent_code)
-        .collect::<HashSet<_>>();
+    let known_agents = known_agent_codes()?;
     let model_ids = provider
         .models
         .iter()
@@ -783,10 +786,7 @@ fn validate_presets(presets: &[ProviderPreset]) -> Result<(), String> {
 }
 
 fn validate_import_bundle(bundle: &ExportedAiConfig) -> Result<(), String> {
-    let known_agents = agent_definitions()?
-        .into_iter()
-        .map(|agent| agent.agent_code)
-        .collect::<HashSet<_>>();
+    let known_agents = known_agent_codes()?;
     let mut provider_codes = HashSet::new();
     let mut model_ids = HashSet::new();
     for provider in &bundle.providers {
@@ -1185,6 +1185,15 @@ fn mask_key(key: &str) -> String {
 
 fn agent_definitions() -> Result<Vec<AgentDefinition>, String> {
     bundled_agent_definitions()
+}
+
+fn known_agent_codes() -> Result<HashSet<String>, String> {
+    let mut codes = agent_definitions()?
+        .into_iter()
+        .map(|agent| agent.agent_code)
+        .collect::<HashSet<_>>();
+    codes.insert(LEGACY_GAME_DESIGNER_AGENT.to_string());
+    Ok(codes)
 }
 
 #[cfg(unix)]

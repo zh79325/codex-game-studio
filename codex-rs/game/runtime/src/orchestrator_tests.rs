@@ -69,9 +69,9 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
         audit_target: "project".to_string(),
         audit_target_dir: root.into(),
         stage: "project".to_string(),
-        agent_code: "game_designer".to_string(),
+        agent_code: "art_bible_designer".to_string(),
         idempotency_key: key.to_string(),
-        prompt: "design a game".to_string(),
+        prompt: "define the project art bible".to_string(),
         local_image_paths: Vec::new(),
         media_generation_consumed: false,
         context: ContextPackage {
@@ -93,6 +93,7 @@ fn request(root: &str, key: &str) -> ExecuteTaskRequest {
             recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
+            agent_role_descriptions: Vec::new(),
             action_protocol: "strict action".to_string(),
         },
         capability: Capability::TextStructuredOutput,
@@ -313,7 +314,7 @@ async fn initial_turn_uses_the_agent_max_output_tokens() {
 }
 
 #[tokio::test]
-async fn route_failover_is_persisted_before_starting_the_turn() {
+async fn renamed_agent_uses_legacy_model_binding() {
     let directory = tempdir().expect("tempdir");
     let project_root = directory.path().join("project");
     let studio_root = directory.path().join("studio");
@@ -321,6 +322,35 @@ async fn route_failover_is_persisted_before_starting_the_turn() {
     seed_agent_routes(
         &studio_root,
         "game_designer",
+        &[(
+            "legacy-model",
+            "legacy-provider",
+            Capability::TextStructuredOutput,
+        )],
+    )
+    .await;
+
+    let execution = TaskOrchestrator::new(Vec::new(), Some(studio_root))
+        .execute(
+            &FakeExecution::default(),
+            &store,
+            request(project_root.to_str().expect("root"), "legacy-binding"),
+        )
+        .await
+        .expect("legacy binding remains usable");
+
+    assert_eq!(execution.binding.agent_code, "art_bible_designer");
+}
+
+#[tokio::test]
+async fn route_failover_is_persisted_before_starting_the_turn() {
+    let directory = tempdir().expect("tempdir");
+    let project_root = directory.path().join("project");
+    let studio_root = directory.path().join("studio");
+    let store = ProjectStore::open(&project_root).await.expect("store");
+    seed_agent_routes(
+        &studio_root,
+        "art_bible_designer",
         &[
             ("account-a", "provider-a", Capability::TextStructuredOutput),
             ("account-b", "provider-b", Capability::TextStructuredOutput),
@@ -374,7 +404,7 @@ async fn exhausted_routes_include_the_last_failure_reason() {
     let store = ProjectStore::open(&project_root).await.expect("store");
     seed_agent_routes(
         &studio_root,
-        "game_designer",
+        "art_bible_designer",
         &[("account-a", "provider-a", Capability::TextStructuredOutput)],
     )
     .await;
@@ -392,7 +422,7 @@ async fn exhausted_routes_include_the_last_failure_reason() {
     assert!(matches!(
         error,
         OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(message))
-            if message.contains("game_designer")
+            if message.contains("art_bible_designer")
                 && message.contains("provider-a/remote-account-a")
                 && message.contains("rate limited")
     ));
@@ -421,7 +451,7 @@ async fn database_mode_does_not_fall_back_to_in_memory_candidates() {
     assert!(matches!(
         error,
         OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(message))
-            if message.contains("game_designer") && message.contains("TextStructuredOutput")
+            if message.contains("art_bible_designer") && message.contains("TextStructuredOutput")
     ));
 }
 
@@ -433,7 +463,7 @@ async fn image_provider_failure_switches_only_the_internal_route() {
     let store = ProjectStore::open(&project_root).await.expect("store");
     seed_agent_routes(
         &studio_root,
-        "game_designer",
+        "art_bible_designer",
         &[(
             "main-model",
             "main-provider",
@@ -597,7 +627,7 @@ async fn interrupt_cancels_the_current_attempt_and_task() {
         .interrupt(
             &execution,
             "conversation-1",
-            "game_designer",
+            "art_bible_designer",
             started.binding.codex_thread_id,
             turn_id.clone(),
         )
@@ -667,7 +697,7 @@ async fn rebuilds_an_unavailable_active_thread() {
     assert_eq!(restarted_execution.starts.load(Ordering::SeqCst), 1);
     assert_eq!(
         store
-            .active_thread("conversation-1", "game_designer")
+            .active_thread("conversation-1", "art_bible_designer")
             .await
             .expect("active binding")
             .expect("binding")

@@ -21,6 +21,7 @@ use crate::append_turn_audit_retry;
 use crate::append_turn_audit_start_error;
 use crate::bundled_agent_definition;
 use crate::bundled_agent_max_output_tokens;
+use crate::legacy_agent_code;
 use crate::write_turn_audit_request;
 use codex_game_domain::AiCapability;
 use codex_game_domain::ContextPackage;
@@ -789,8 +790,13 @@ impl TaskOrchestrator {
                 .map_err(OrchestrationError::Route);
         };
         let studio = open_studio_store(studio_storage).await?;
-        let candidates = load_ai_route_models(&studio, agent_code, now())
-            .await?
+        let mut stored_candidates = load_ai_route_models(&studio, agent_code, now()).await?;
+        if stored_candidates.is_empty()
+            && let Some(legacy_code) = legacy_agent_code(agent_code)
+        {
+            stored_candidates = load_ai_route_models(&studio, legacy_code, now()).await?;
+        }
+        let candidates = stored_candidates
             .into_iter()
             .map(|candidate| RouteCandidate {
                 account_id: candidate.id,

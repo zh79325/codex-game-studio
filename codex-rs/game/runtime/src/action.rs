@@ -179,7 +179,7 @@ fn validate_payload(
                     (current_agent, draft.artifact_slot),
                     ("spec_writer", ArtifactSlot::CharacterSpec)
                         | (
-                            "game_designer",
+                            "art_bible_designer",
                             ArtifactSlot::ProjectArtBible | ArtifactSlot::ProjectManifest
                         )
                 )
@@ -497,7 +497,7 @@ mod tests {
                     }]
                 }
             })),
-            "game_designer",
+            "art_bible_designer",
             "studio_director",
             &["studio_director".to_string()],
         )
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(
             parse_agent_turn(
                 &format!("{valid}\n{valid}"),
-                "game_designer",
+                "art_bible_designer",
                 "studio_director",
                 &[],
             ),
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(
             parse_agent_turn(
                 &format!("{valid}\n额外内容"),
-                "game_designer",
+                "art_bible_designer",
                 "studio_director",
                 &[],
             ),
@@ -541,7 +541,7 @@ mod tests {
             "extra": true
         }));
         assert!(matches!(
-            parse_agent_turn(&unknown, "game_designer", "studio_director", &[]),
+            parse_agent_turn(&unknown, "art_bible_designer", "studio_director", &[]),
             Err(ActionProtocolError::InvalidJson(_))
         ));
     }
@@ -575,7 +575,7 @@ mod tests {
             "payload": { "choices": [] }
         }));
         assert_eq!(
-            parse_agent_turn(&empty_choices, "game_designer", "studio_director", &[],),
+            parse_agent_turn(&empty_choices, "art_bible_designer", "studio_director", &[],),
             Err(ActionProtocolError::InvalidChoices)
         );
     }
@@ -621,7 +621,7 @@ mod tests {
         }));
         let parsed = parse_agent_turn(
             &generic_done,
-            "game_designer",
+            "art_bible_designer",
             "studio_director",
             &["studio_director".to_string()],
         )

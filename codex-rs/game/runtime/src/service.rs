@@ -1,4 +1,6 @@
 use crate::action_contract_profile;
+use crate::bundled_agent_role_descriptions;
+use crate::canonical_agent_code;
 use crate::character_files::read_project_characters;
 use crate::character_files::write_character_file;
 use crate::focus;
@@ -1612,6 +1614,8 @@ impl GameService {
         if content.trim().is_empty() {
             return Err(GameServiceError::InvalidAction("消息不能为空".to_string()));
         }
+        let recipient_agent_code =
+            recipient_agent_code.map(|agent_code| canonical_agent_code(&agent_code).to_string());
         let (project, store, target_kind, target_ref, current_focus, director, status) = {
             let projects = self
                 .projects
@@ -1660,6 +1664,7 @@ impl GameService {
             .clone()
             .or(current_focus)
             .unwrap_or(director);
+        let agent_code = canonical_agent_code(&agent_code).to_string();
         let allowed = codex_game_domain::agents_for_stage(target_kind.as_str(), &stage);
         if !allowed.contains(&agent_code.as_str()) {
             return Err(GameServiceError::InvalidAction(format!(
@@ -1869,6 +1874,7 @@ impl GameService {
         conversation_id: &str,
         target_agent: &str,
     ) -> Result<PreparedConversationTurn, GameServiceError> {
+        let target_agent = canonical_agent_code(target_agent);
         let snapshot = self.read_conversation(conversation_id).await?;
         let latest_message = snapshot
             .messages
@@ -1881,7 +1887,11 @@ impl GameService {
             .as_ref()
             .ok_or_else(|| GameServiceError::InvalidAction("没有可继续的 handoff".to_string()))?;
         if latest_action.action != AgentActionKind::Handoff
-            || latest_action.target_agent.as_deref() != Some(target_agent)
+            || latest_action
+                .target_agent
+                .as_deref()
+                .map(canonical_agent_code)
+                != Some(target_agent)
         {
             return Err(GameServiceError::InvalidAction(
                 "handoff 目标与上一条 Action 不一致".to_string(),
@@ -2235,6 +2245,18 @@ impl GameService {
             character.as_ref(),
             workflow_facts.as_ref(),
         );
+        let agent_role_descriptions = bundled_agent_role_descriptions(
+            codex_game_domain::agents_for_stage(
+                prepared.conversation.target_kind.as_str(),
+                &prepared.stage,
+            ),
+            codex_game_domain::internal_executors_for_stage(
+                prepared.conversation.target_kind.as_str(),
+                &prepared.stage,
+            ),
+            &allowed_handoffs,
+        )
+        .map_err(GameServiceError::InvalidAction)?;
         let conversation_history = snapshot
             .messages
             .iter()
@@ -2261,8 +2283,8 @@ impl GameService {
         Ok(ContextPackage {
             conversation_history,
             context_version: prepared.conversation.turn,
-            contract_version: 3,
-            agent_definition_version: "2".to_string(),
+            contract_version: 4,
+            agent_definition_version: "3".to_string(),
             // 回复包含用户可见正文，不能把 Action 子结构用作整条回复的 provider schema。
             output_schema: String::new(),
             action_schema: action_contract.schema,
@@ -2278,6 +2300,7 @@ impl GameService {
             recovery_context,
             memories,
             allowed_handoffs,
+            agent_role_descriptions,
             action_protocol: action_contract.instruction,
         })
     }

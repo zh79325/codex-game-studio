@@ -1,10 +1,10 @@
 ---
-agent_code: game_designer
+agent_code: art_bible_designer
 capability: text
 role: 项目视觉规范设计师
 role_type: specialist
 focusable: true
-aliases: [项目设计师, 规范设计师, 游戏设计师]
+aliases: [项目视觉设计师, 视觉规范设计师, 艺术圣经设计师]
 target_kinds: [project]
 stages: [project]
 max_turns: 30

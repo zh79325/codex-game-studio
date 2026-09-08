@@ -1,3 +1,4 @@
+use crate::AgentRoleType;
 use crate::ArtBibleVersionId;
 use crate::ArtifactId;
 use crate::ConversationCodexThreadId;
@@ -257,6 +258,17 @@ pub struct RecoveryContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentRoleDescription {
+    pub agent_code: String,
+    pub role: String,
+    pub role_type: AgentRoleType,
+    pub description: String,
+    pub handoff_allowed: bool,
+    pub internal_executor: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextPackage {
     pub conversation_history: Vec<String>,
     pub context_version: u64,
@@ -289,6 +301,8 @@ pub struct ContextPackage {
     pub memories: Vec<String>,
     #[serde(default)]
     pub allowed_handoffs: Vec<String>,
+    #[serde(default)]
+    pub agent_role_descriptions: Vec<AgentRoleDescription>,
     #[serde(default)]
     pub action_protocol: String,
 }
@@ -350,6 +364,12 @@ impl ContextPackage {
                             && event.message.len() <= MAX_CONTEXT_SUMMARY_BYTES
                     })
             })
+            && self.agent_role_descriptions.len() <= MAX_CONTEXT_SUMMARIES
+            && self.agent_role_descriptions.iter().all(|description| {
+                description.agent_code.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && description.role.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && description.description.len() <= MAX_CONTEXT_SUMMARY_BYTES
+            })
             && self.action_protocol.len() <= MAX_CONTEXT_SUMMARY_BYTES
             && self.action_schema.len() <= 64 * 1024
             && self.action_examples.len() <= 16 * 1024
@@ -384,6 +404,7 @@ mod tests {
             recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
+            agent_role_descriptions: Vec::new(),
             action_protocol: String::new(),
         }
     }

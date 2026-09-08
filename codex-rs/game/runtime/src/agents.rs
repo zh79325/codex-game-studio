@@ -1,10 +1,12 @@
 use codex_game_domain::AgentCapability;
 use codex_game_domain::AgentDefinition;
+use codex_game_domain::AgentRoleDescription;
 use codex_game_domain::AgentRoleType;
 use serde::Deserialize;
 
 pub const STUDIO_DIRECTOR_AGENT: &str = "studio_director";
-pub const GAME_DESIGNER_AGENT: &str = "game_designer";
+pub const ART_BIBLE_DESIGNER_AGENT: &str = "art_bible_designer";
+pub const LEGACY_GAME_DESIGNER_AGENT: &str = "game_designer";
 pub const SPEC_WRITER_AGENT: &str = "spec_writer";
 pub const SPEC_REVIEWER_AGENT: &str = "spec_reviewer";
 pub const VISUAL_DESIGNER_AGENT: &str = "visual_designer";
@@ -18,7 +20,7 @@ pub const REALTIME_SPEECH_AGENT: &str = "realtime_speech";
 
 pub const AGENT_CODES: [&str; 12] = [
     STUDIO_DIRECTOR_AGENT,
-    GAME_DESIGNER_AGENT,
+    ART_BIBLE_DESIGNER_AGENT,
     SPEC_WRITER_AGENT,
     SPEC_REVIEWER_AGENT,
     VISUAL_DESIGNER_AGENT,
@@ -64,8 +66,8 @@ pub const BUNDLED_AGENTS: [BundledAgentDefinition; 12] = [
         markdown: include_str!("../agents/studio_director.md"),
     },
     BundledAgentDefinition {
-        code: GAME_DESIGNER_AGENT,
-        markdown: include_str!("../agents/game_designer.md"),
+        code: ART_BIBLE_DESIGNER_AGENT,
+        markdown: include_str!("../agents/art_bible_designer.md"),
     },
     BundledAgentDefinition {
         code: SPEC_WRITER_AGENT,
@@ -109,17 +111,23 @@ pub const BUNDLED_AGENTS: [BundledAgentDefinition; 12] = [
     },
 ];
 
+fn split_agent_markdown(
+    definition: &BundledAgentDefinition,
+) -> Result<(&'static str, &'static str), String> {
+    let source = definition
+        .markdown
+        .strip_prefix("---\n")
+        .ok_or_else(|| format!("{} 缺少 YAML frontmatter", definition.code))?;
+    source
+        .split_once("\n---\n")
+        .ok_or_else(|| format!("{} 的 YAML frontmatter 未闭合", definition.code))
+}
+
 pub fn bundled_agent_definitions() -> Result<Vec<AgentDefinition>, String> {
     BUNDLED_AGENTS
         .iter()
         .map(|definition| {
-            let source = definition
-                .markdown
-                .strip_prefix("---\n")
-                .ok_or_else(|| format!("{} 缺少 YAML frontmatter", definition.code))?;
-            let (frontmatter, body) = source
-                .split_once("\n---\n")
-                .ok_or_else(|| format!("{} 的 YAML frontmatter 未闭合", definition.code))?;
+            let (frontmatter, body) = split_agent_markdown(definition)?;
             let metadata: AgentFrontmatter = serde_yaml::from_str(frontmatter)
                 .map_err(|error| format!("{} 的 frontmatter 不合法：{error}", definition.code))?;
             if metadata.agent_code != definition.code {
@@ -158,11 +166,66 @@ pub fn bundled_agent_definitions() -> Result<Vec<AgentDefinition>, String> {
         .collect()
 }
 
+pub fn bundled_agent_role_descriptions(
+    workflow_agents: &[&str],
+    internal_executors: &[&str],
+    allowed_handoffs: &[String],
+) -> Result<Vec<AgentRoleDescription>, String> {
+    let definitions = bundled_agent_definitions()?;
+    workflow_agents
+        .iter()
+        .chain(internal_executors.iter())
+        .map(|agent_code| {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.agent_code == *agent_code)
+                .ok_or_else(|| format!("找不到 Agent 定义：{agent_code}"))?;
+            let bundled = BUNDLED_AGENTS
+                .iter()
+                .find(|bundled| bundled.code == *agent_code)
+                .ok_or_else(|| format!("找不到 Agent 提示词：{agent_code}"))?;
+            let (_, body) = split_agent_markdown(bundled)?;
+            let description = body
+                .trim_start()
+                .split("\n\n")
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            Ok(AgentRoleDescription {
+                agent_code: (*agent_code).to_string(),
+                role: definition.role.clone(),
+                role_type: definition.role_type.clone(),
+                description,
+                handoff_allowed: allowed_handoffs
+                    .iter()
+                    .any(|allowed| allowed == *agent_code),
+                internal_executor: internal_executors.contains(agent_code),
+            })
+        })
+        .collect()
+}
+
+pub fn canonical_agent_code(agent_code: &str) -> &str {
+    match agent_code {
+        LEGACY_GAME_DESIGNER_AGENT => ART_BIBLE_DESIGNER_AGENT,
+        _ => agent_code,
+    }
+}
+
+pub fn legacy_agent_code(agent_code: &str) -> Option<&'static str> {
+    match agent_code {
+        ART_BIBLE_DESIGNER_AGENT => Some(LEGACY_GAME_DESIGNER_AGENT),
+        _ => None,
+    }
+}
+
 pub fn validate_bundled_agents() -> Result<(), String> {
     bundled_agent_definitions().map(|_| ())
 }
 
 pub fn bundled_agent_definition(agent_code: &str) -> Option<&'static str> {
+    let agent_code = canonical_agent_code(agent_code);
     BUNDLED_AGENTS
         .iter()
         .find(|definition| definition.code == agent_code)
@@ -170,6 +233,7 @@ pub fn bundled_agent_definition(agent_code: &str) -> Option<&'static str> {
 }
 
 pub fn bundled_agent_max_output_tokens(agent_code: &str) -> Option<u64> {
+    let agent_code = canonical_agent_code(agent_code);
     bundled_agent_definitions()
         .ok()?
         .into_iter()
@@ -185,5 +249,53 @@ mod tests {
     #[test]
     fn bundled_agents_are_valid() {
         validate_bundled_agents().expect("bundled agents must validate at build time");
+    }
+
+    #[test]
+    fn art_bible_designer_has_unambiguous_identity() {
+        let definition = bundled_agent_definitions()
+            .expect("bundled agents")
+            .into_iter()
+            .find(|definition| definition.agent_code == ART_BIBLE_DESIGNER_AGENT)
+            .expect("art bible designer");
+
+        assert_eq!(definition.role, "项目视觉规范设计师");
+        assert!(!definition.aliases.iter().any(|alias| alias == "游戏设计师"));
+        assert_eq!(
+            canonical_agent_code(LEGACY_GAME_DESIGNER_AGENT),
+            ART_BIBLE_DESIGNER_AGENT
+        );
+    }
+
+    #[test]
+    fn role_descriptions_cover_workflow_agents_and_internal_executors() {
+        let descriptions = bundled_agent_role_descriptions(
+            &[STUDIO_DIRECTOR_AGENT, VISUAL_DESIGNER_AGENT],
+            &[IMAGE_T2I_AGENT, IMAGE_I2I_AGENT],
+            &[VISUAL_DESIGNER_AGENT.to_string()],
+        )
+        .expect("role descriptions");
+
+        assert_eq!(
+            descriptions
+                .iter()
+                .map(|description| description.agent_code.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                STUDIO_DIRECTOR_AGENT,
+                VISUAL_DESIGNER_AGENT,
+                IMAGE_T2I_AGENT,
+                IMAGE_I2I_AGENT,
+            ]
+        );
+        assert!(descriptions.iter().all(|description| {
+            !description.role.is_empty() && !description.description.is_empty()
+        }));
+        assert!(descriptions[1].handoff_allowed);
+        assert!(
+            descriptions[2..]
+                .iter()
+                .all(|description| description.internal_executor)
+        );
     }
 }

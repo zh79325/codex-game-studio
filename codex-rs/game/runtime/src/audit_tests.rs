@@ -217,6 +217,7 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             recovery_context: None,
             memories: Vec::new(),
             allowed_handoffs: Vec::new(),
+            agent_role_descriptions: Vec::new(),
             action_protocol: "json".to_string(),
         },
         max_output_tokens: None,

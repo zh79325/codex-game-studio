@@ -393,7 +393,7 @@ fn instruction(
         _ => "只使用 schema 中定义的字段；不需要的 payload 字段必须省略。",
     };
     format!(
-        "当前 Agent：{agent_code}；当前阶段：{stage}；允许 handoff 目标：{targets}。\n每次回复末尾必须且只能有一个 Action 块，Action 块后不得再输出内容。顶层必须且只能包含 action、target_agent、reason、payload。{payload_rule}运行时仍会执行严格字段、组合和业务校验。"
+        "当前 Agent：{agent_code}；当前阶段：{stage}；允许 handoff 目标：{targets}。\n请先阅读 game_context.agentRoleDescriptions，按其中的角色说明与职责边界协作；只有 handoffAllowed 为 true 的 Agent 才能作为 handoff 目标，internalExecutor 仅供系统内部执行。\n每次回复末尾必须且只能有一个 Action 块，Action 块后不得再输出内容。顶层必须且只能包含 action、target_agent、reason、payload。{payload_rule}运行时仍会执行严格字段、组合和业务校验。"
     )
 }
 

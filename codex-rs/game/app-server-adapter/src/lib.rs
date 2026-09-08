@@ -1827,14 +1827,19 @@ mod tests {
     async fn interrupted_specialist_returns_recovery_context_to_director() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let director_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
-        let handoff = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
+        let handoff = action(
+            "handoff",
+            Some("art_bible_designer"),
+            "交给设计师处理",
+            "{}",
+        );
         adapter
             .observe_turn_completed(&execution, &director_turn, Some(&handoff), None)
             .await
             .expect("director handoff")
             .expect("projection");
         let specialist = adapter
-            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .continue_handoff(&execution, &conversation_id, "art_bible_designer")
             .await
             .expect("continue handoff")
             .expect("specialist task");
@@ -1866,7 +1871,7 @@ mod tests {
             .recovery_context
             .as_ref()
             .expect("recovery context");
-        assert_eq!(recovery.agent_code, "game_designer");
+        assert_eq!(recovery.agent_code, "art_bible_designer");
         assert_eq!(
             recovery.partial_response.as_deref(),
             Some("已完成构图分析，尚未写入草稿")
@@ -1915,14 +1920,19 @@ mod tests {
             .expect("projection");
 
         let second_turn = submit(&adapter, &execution, &conversation_id, "选择卡通").await;
-        let handoff = action("handoff", Some("game_designer"), "交给美术设计师细化", "{}");
+        let handoff = action(
+            "handoff",
+            Some("art_bible_designer"),
+            "交给美术设计师细化",
+            "{}",
+        );
         adapter
             .observe_turn_completed(&execution, &second_turn, Some(&handoff), None)
             .await
             .expect("handoff completion")
             .expect("projection");
         let third = adapter
-            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .continue_handoff(&execution, &conversation_id, "art_bible_designer")
             .await
             .expect("continue handoff")
             .expect("handoff task");
@@ -1979,14 +1989,19 @@ mod tests {
     async fn dedicated_drafts_cannot_use_generic_commit_or_resume_director() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
-        let to_designer = action("handoff", Some("game_designer"), "交给设计师处理", "{}");
+        let to_designer = action(
+            "handoff",
+            Some("art_bible_designer"),
+            "交给设计师处理",
+            "{}",
+        );
         adapter
             .observe_turn_completed(&execution, &first_turn, Some(&to_designer), None)
             .await
             .expect("director handoff")
             .expect("projection");
         let designer = adapter
-            .continue_handoff(&execution, &conversation_id, "game_designer")
+            .continue_handoff(&execution, &conversation_id, "art_bible_designer")
             .await
             .expect("continue to designer")
             .expect("designer task");
@@ -2038,7 +2053,7 @@ mod tests {
         assert_eq!(snapshot.conversation.status, "active");
         assert_eq!(
             snapshot.conversation.focus_agent_code.as_deref(),
-            Some("game_designer")
+            Some("art_bible_designer")
         );
     }
 

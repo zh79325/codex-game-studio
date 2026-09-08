@@ -820,13 +820,23 @@ impl TaskOrchestrator {
                 },
             )?;
         }
+        let has_compatible_model = candidates
+            .iter()
+            .any(|candidate| candidate.capabilities.contains(&capability));
         let (decision, event) = self
             .routes
             .select_candidates(capability, scope, &candidates)
             .map_err(|error| match error {
                 RouteError::CapabilityUnavailable => {
+                    let reason = if candidates.is_empty() {
+                        "没有配置模型绑定"
+                    } else if has_compatible_model {
+                        "兼容模型当前均不可用，可能已达到额度、处于熔断冷却或已停用"
+                    } else {
+                        "已配置的模型绑定均不支持所需能力"
+                    };
                     OrchestrationError::Execution(ExecutionError::CapabilityUnavailable(format!(
-                        "agent `{agent_code}` 没有可用的 `{capability:?}` 模型绑定"
+                        "agent `{agent_code}` 的 `{capability:?}` {reason}"
                     )))
                 }
                 other => OrchestrationError::Route(other),

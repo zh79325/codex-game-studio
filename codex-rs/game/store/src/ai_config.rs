@@ -327,8 +327,9 @@ pub async fn reserve_ai_usage(
             if max_value > 0 {
                 let window_start = period_start(now, &period_expr)?;
                 let used: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(u.amount), 0) FROM ai_usage u JOIN ai_limits l ON l.model_id = u.model_id AND l.limit_kind = u.limit_kind WHERE l.limit_kind = ? AND l.group_name = ? AND l.period_expr = ? AND u.created_at >= ?",
+                    "SELECT COALESCE(SUM(u.amount), 0) FROM ai_usage u JOIN ai_limits l ON l.model_id = u.model_id AND l.limit_kind = u.limit_kind JOIN ai_models m ON m.id = u.model_id WHERE m.provider_code = (SELECT provider_code FROM ai_models WHERE id = ?) AND l.limit_kind = ? AND l.group_name = ? AND l.period_expr = ? AND u.created_at >= ?",
                 )
+                .bind(model_id)
                 .bind(kind_name)
                 .bind(&group_name)
                 .bind(&period_expr)
@@ -775,7 +776,7 @@ pub async fn read_ai_usage(pool: &SqlitePool) -> Result<Vec<ModelUsage>, StoreEr
             let mut budgets = Vec::new();
             for limit in &model.limits {
                 let window_start = period_start(current_timestamp(), &limit.period_expr)?;
-                let used = grouped_usage_total(pool, limit, window_start).await?;
+                let used = grouped_usage_total(pool, &model.id, limit, window_start).await?;
                 budgets.push(UsageBudget {
                     limit_kind: limit.limit_kind.clone(),
                     used,
@@ -927,7 +928,13 @@ async fn model_has_capacity(
 ) -> Result<bool, StoreError> {
     for limit in list_limits(pool, model_id).await? {
         if limit.max_value > 0
-            && grouped_usage_total(pool, &limit, period_start(now, &limit.period_expr)?).await?
+            && grouped_usage_total(
+                pool,
+                model_id,
+                &limit,
+                period_start(now, &limit.period_expr)?,
+            )
+            .await?
                 >= limit.max_value
         {
             return Ok(false);
@@ -938,12 +945,14 @@ async fn model_has_capacity(
 
 async fn grouped_usage_total(
     pool: &SqlitePool,
+    model_id: &str,
     limit: &LimitPolicy,
     window_start: i64,
 ) -> Result<u64, StoreError> {
     let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(u.amount), 0) FROM ai_usage u JOIN ai_limits l ON l.model_id = u.model_id AND l.limit_kind = u.limit_kind WHERE l.limit_kind = ? AND l.group_name = ? AND l.period_expr = ? AND u.created_at >= ?",
+        "SELECT COALESCE(SUM(u.amount), 0) FROM ai_usage u JOIN ai_limits l ON l.model_id = u.model_id AND l.limit_kind = u.limit_kind JOIN ai_models m ON m.id = u.model_id WHERE m.provider_code = (SELECT provider_code FROM ai_models WHERE id = ?) AND l.limit_kind = ? AND l.group_name = ? AND l.period_expr = ? AND u.created_at >= ?",
     )
+    .bind(model_id)
     .bind(limit_kind_name(&limit.limit_kind))
     .bind(&limit.group_name)
     .bind(&limit.period_expr)
@@ -1341,6 +1350,38 @@ mod tests {
             reserve_ai_usage(&pool, "model-b", "request-b", &[(LimitKind::Calls, 1)], 100)
                 .await
                 .expect("reserve shared call")
+        );
+        assert!(matches!(
+            reserve_ai_usage(&pool, "model-a", "request-c", &[(LimitKind::Calls, 1)], 100).await,
+            Err(StoreError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_limits_are_isolated_between_providers() {
+        let pool = test_pool().await;
+        upsert_ai_provider(&pool, &provider("provider-a", Vec::new()))
+            .await
+            .expect("seed first provider");
+        upsert_ai_provider(&pool, &provider("provider-b", Vec::new()))
+            .await
+            .expect("seed second provider");
+        upsert_ai_model(&pool, &model("model-a", "provider-a", 1, "default"))
+            .await
+            .expect("seed first model");
+        upsert_ai_model(&pool, &model("model-b", "provider-b", 1, "default"))
+            .await
+            .expect("seed second model");
+
+        assert!(
+            reserve_ai_usage(&pool, "model-a", "request-a", &[(LimitKind::Calls, 1)], 100)
+                .await
+                .expect("reserve first provider")
+        );
+        assert!(
+            reserve_ai_usage(&pool, "model-b", "request-b", &[(LimitKind::Calls, 1)], 100)
+                .await
+                .expect("reserve independent provider")
         );
         assert!(matches!(
             reserve_ai_usage(&pool, "model-a", "request-c", &[(LimitKind::Calls, 1)], 100).await,

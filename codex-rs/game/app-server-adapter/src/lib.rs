@@ -2141,13 +2141,16 @@ mod tests {
             .find("<game_agent_definition>")
             .expect("definition");
         let contract = model_input
-            .find("<action_contract version=\"3\">")
+            .find("<action_contract version=\"4\">")
             .expect("action contract");
         let task = model_input.find("定义美术基调").expect("task prompt");
         let context = model_input.find("<game_context").expect("game context");
         assert!(definition < contract && contract < task && task < context);
         assert!(model_input.contains("JSON Schema："));
         assert!(model_input.contains("本轮合法完整示例："));
+        assert!(model_input.contains("\"agentRoleDescriptions\""));
+        assert!(model_input.contains("\"agentCode\":\"art_bible_designer\""));
+        assert!(model_input.contains("这套工具做的是素材设计与生产，不做游戏策划"));
         let retry = adapter
             .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), None)
             .await

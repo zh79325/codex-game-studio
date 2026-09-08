@@ -494,7 +494,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 67f39b2ad046a4d638609ec77f94c976, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ModelPreview.Runtime.Humanoid.RuntimeHumanoidPreviewController
-  modelFilePath: "/Users/eleme/Desktop/ai-game/xiyou-city-battle/characters/\u73A9\u5BB6/\u5B59\u609F\u7A7A/model/tripo_convert_61d4a02d-1832-4a54-a992-1a7b4a184863.glb"
+  modelFilePath: /Users/eleme/Desktop/ai-game/codex-game-studio/unity-model-render/Assets/ModelPreview/Models/SunWukongUser.glb
   avatarProfile: {fileID: 0}
   loadOnStart: 1
   previewCamera: {fileID: 0}
@@ -518,6 +518,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: da4573057878c49e0a70cd4a7a3bfe3d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ModelPreview.Runtime.Humanoid.RuntimeHumanoidAnimationPlayer
+  actionController: {fileID: 0}
+  controllerResourcePath: ModelPreview/HumanoidActionLibrary
   transitionDuration: 0.15
 --- !u!114 &1111626064
 MonoBehaviour:

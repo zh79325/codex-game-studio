@@ -24,6 +24,7 @@ use codex_game_domain::ConversationMemory;
 use codex_game_domain::ConversationMessage;
 use codex_game_domain::ConversationStatus;
 use codex_game_domain::ConversationTargetKind;
+use codex_game_domain::CurrentTaskContext;
 use codex_game_domain::Generation;
 use codex_game_domain::GenerationReviewStatus;
 use codex_game_domain::MAX_HANDOFFS;
@@ -32,6 +33,7 @@ use codex_game_domain::Project;
 use codex_game_domain::ProjectId;
 use codex_game_domain::ProjectMemory;
 use codex_game_domain::ProjectState;
+use codex_game_domain::ProjectWorkflowContext;
 use codex_game_domain::RecoveryContext;
 use codex_game_domain::RecoveryEventSummary;
 use codex_game_domain::ReviewSubject;
@@ -819,6 +821,32 @@ impl GameService {
                     ));
                 }
             };
+            if let Err(error) = validate_project_workflow_action(
+                &context.context,
+                &context.agent_code,
+                &director_agent,
+                &parsed.action,
+            ) {
+                self.record_turn_event(
+                    codex_turn_id,
+                    &crate::TurnAuditEvent {
+                        event: "protocol_parse_failed".to_string(),
+                        status: "failed".to_string(),
+                        message: error.clone(),
+                        payload: serde_json::json!({}),
+                    },
+                )
+                .await?;
+                return Ok(TurnOutputCompletion::ActionProtocolViolation(
+                    ActionProtocolViolation {
+                        codex_turn_id: codex_turn_id.to_string(),
+                        assistant_message_id,
+                        message: format!("Action 协议校验失败：{error}"),
+                        context,
+                        store,
+                    },
+                ));
+            }
             self.record_turn_event(
                 codex_turn_id,
                 &crate::TurnAuditEvent {
@@ -1616,7 +1644,16 @@ impl GameService {
         }
         let recipient_agent_code =
             recipient_agent_code.map(|agent_code| canonical_agent_code(&agent_code).to_string());
-        let (project, store, target_kind, target_ref, current_focus, director, status) = {
+        let (
+            project,
+            store,
+            target_kind,
+            target_ref,
+            current_focus,
+            director,
+            status,
+            has_pending_art_bible,
+        ) = {
             let projects = self
                 .projects
                 .lock()
@@ -1628,7 +1665,8 @@ impl GameService {
                     GameServiceError::ConversationNotFound(conversation_id.to_string())
                 })?;
             require_writable(session)?;
-            let conversation = &session.conversations[conversation_id].conversation;
+            let snapshot = &session.conversations[conversation_id];
+            let conversation = &snapshot.conversation;
             (
                 session.project.clone(),
                 Arc::clone(&session.store),
@@ -1637,6 +1675,7 @@ impl GameService {
                 conversation.focus_agent_code.clone(),
                 conversation.director_agent_code.clone(),
                 conversation.status,
+                has_pending_art_bible_draft(&snapshot.drafts),
             )
         };
         if status == ConversationStatus::Running {
@@ -1670,6 +1709,21 @@ impl GameService {
             return Err(GameServiceError::InvalidAction(format!(
                 "Agent {agent_code} 不允许处理 {stage} 阶段"
             )));
+        }
+        if target_kind == ConversationTargetKind::Project && agent_code == "art_bible_designer" {
+            match project.state {
+                ProjectState::Drafting if has_pending_art_bible => {
+                    return Err(GameServiceError::ProjectGate(
+                        "Art Bible 草稿正在等待用户确认，不能重复生成".to_string(),
+                    ));
+                }
+                ProjectState::Ready => {
+                    return Err(GameServiceError::ProjectGate(
+                        "项目已经完成立项，不能继续执行立项专业任务".to_string(),
+                    ));
+                }
+                ProjectState::Drafting | ProjectState::StyleSettled => {}
+            }
         }
         if target_kind == ConversationTargetKind::Character && agent_code == "visual_designer" {
             let character_id = target_ref.as_deref().ok_or_else(|| {
@@ -1958,6 +2012,23 @@ impl GameService {
                 "Agent {target_agent} 不允许处理 {stage} 阶段"
             )));
         }
+        if snapshot.conversation.target_kind == ConversationTargetKind::Project
+            && target_agent == "art_bible_designer"
+        {
+            match project.state {
+                ProjectState::Drafting if has_pending_art_bible_draft(&snapshot.drafts) => {
+                    return Err(GameServiceError::ProjectGate(
+                        "Art Bible 草稿正在等待用户确认，不能重复派发".to_string(),
+                    ));
+                }
+                ProjectState::Ready => {
+                    return Err(GameServiceError::ProjectGate(
+                        "项目已经完成立项，不能继续派发立项任务".to_string(),
+                    ));
+                }
+                ProjectState::Drafting | ProjectState::StyleSettled => {}
+            }
+        }
         let timestamp = now();
         let mut conversation = snapshot.conversation.clone();
         conversation.focus_agent_code = Some(target_agent.to_string());
@@ -2142,6 +2213,17 @@ impl GameService {
                             decision: verdict.decision.clone(),
                         }),
                 });
+        let (project_workflow_context, current_task) =
+            if prepared.conversation.target_kind == ConversationTargetKind::Project {
+                let workflow = project_workflow_context(
+                    prepared.project.state,
+                    has_pending_art_bible_draft(&snapshot.drafts),
+                );
+                let task = project_current_task(&workflow);
+                (Some(workflow), Some(task))
+            } else {
+                (None, None)
+            };
         let review_subject = (prepared.agent_code == "spec_reviewer")
             .then(|| workflow_facts.as_ref()?.pending_spec.as_ref())
             .flatten()
@@ -2238,10 +2320,10 @@ impl GameService {
             .count();
         let allowed_handoffs = allowed_handoffs_for(
             prepared.conversation.target_kind.as_str(),
-            &prepared.stage,
             &prepared.agent_code,
             &prepared.conversation.director_agent_code,
             handoff_count,
+            project_workflow_context.as_ref(),
             character.as_ref(),
             workflow_facts.as_ref(),
         );
@@ -2274,17 +2356,27 @@ impl GameService {
             .into_iter()
             .map(|memory| format!("{}:{}", memory.kind, memory.content))
             .collect();
-        let action_contract = action_contract_profile(
+        let mut action_contract = action_contract_profile(
             &prepared.agent_code,
             &prepared.stage,
             &prepared.conversation.director_agent_code,
             &allowed_handoffs,
+            current_task.as_ref().map(|task| task.task_type.as_str()),
         );
+        if let Some(task) = current_task.as_ref() {
+            action_contract.instruction.push_str(&format!(
+                "\n本轮确定性任务：{}；负责人：{}；完成条件：{}。必须遵守 currentTask，禁止自行切换到其他项目步骤。",
+                task.task_type, task.owner_agent, task.completion_condition
+            ));
+        }
+        if prepared.agent_code == prepared.conversation.director_agent_code {
+            art_bible = None;
+        }
         Ok(ContextPackage {
             conversation_history,
             context_version: prepared.conversation.turn,
-            contract_version: 4,
-            agent_definition_version: "3".to_string(),
+            contract_version: 5,
+            agent_definition_version: "4".to_string(),
             // 回复包含用户可见正文，不能把 Action 子结构用作整条回复的 provider schema。
             output_schema: String::new(),
             action_schema: action_contract.schema,
@@ -2295,6 +2387,8 @@ impl GameService {
             art_bible,
             character_context,
             workflow_context,
+            project_workflow_context,
+            current_task,
             review_subject,
             visual_focus,
             recovery_context,
@@ -2373,6 +2467,11 @@ impl GameService {
                     )
                 })?;
             require_writable(session)?;
+            if session.project.state != ProjectState::Drafting {
+                return Err(GameServiceError::ProjectGate(
+                    "Art Bible 已经确认，不能重复提交".to_string(),
+                ));
+            }
             (
                 session.project.clone(),
                 Arc::clone(&session.store),
@@ -4150,12 +4249,168 @@ fn append_line_once(path: &Path, line: &str) -> Result<(), io::Error> {
     fs::write(path, content)
 }
 
+fn validate_project_workflow_action(
+    context: &ContextPackage,
+    current_agent: &str,
+    director_agent: &str,
+    action: &AgentAction,
+) -> Result<(), String> {
+    if context.target_kind != "project" {
+        return Ok(());
+    }
+    let task = context
+        .current_task
+        .as_ref()
+        .ok_or_else(|| "项目会话缺少 currentTask".to_string())?;
+    if action.action == AgentActionKind::Blocked {
+        return Ok(());
+    }
+    let is_director = current_agent == director_agent;
+    let hands_off_to_designer = action.action == AgentActionKind::Handoff
+        && action.target_agent.as_deref() == Some("art_bible_designer");
+    match task.task_type.as_str() {
+        "draftProjectArtBible" if is_director && hands_off_to_designer => Ok(()),
+        "draftProjectArtBible"
+            if current_agent == "art_bible_designer"
+                && (action.action == AgentActionKind::Blocked
+                    || (action.action == AgentActionKind::AskUser
+                        && action.payload.naming.is_none()
+                        && (action
+                            .payload
+                            .choices
+                            .as_ref()
+                            .is_some_and(|items| !items.is_empty())
+                            || action
+                                .payload
+                                .drafts
+                                .as_ref()
+                                .is_some_and(|items| !items.is_empty())))) =>
+        {
+            Ok(())
+        }
+        "confirmArtBible"
+            if is_director
+                && matches!(
+                    action.action,
+                    AgentActionKind::Done | AgentActionKind::Blocked
+                ) =>
+        {
+            Ok(())
+        }
+        "collectProjectNaming" if is_director && hands_off_to_designer => Ok(()),
+        "collectProjectNaming"
+            if current_agent == "art_bible_designer"
+                && action.action == AgentActionKind::AskUser
+                && action.payload.naming.is_none()
+                && action.payload.drafts.is_none()
+                && action
+                    .payload
+                    .choices
+                    .as_deref()
+                    .is_some_and(is_valid_project_naming_choices) =>
+        {
+            Ok(())
+        }
+        "completed" if is_director && action.action == AgentActionKind::Done => Ok(()),
+        task_type => Err(format!(
+            "当前项目任务 {task_type} 不允许 Agent {current_agent} 输出 {:?}",
+            action.action
+        )),
+    }
+}
+
+fn is_valid_project_naming_choices(choices: &[codex_game_domain::ChoiceGroup]) -> bool {
+    let name = choices.iter().find(|choice| choice.item == "项目名称");
+    let code = choices.iter().find(|choice| choice.item == "项目代号");
+    let (Some(name), Some(code)) = (name, code) else {
+        return false;
+    };
+    choices.len() == 2
+        && !name.multiple
+        && !code.multiple
+        && (2..=3).contains(&name.options.len())
+        && name.options.len() == code.options.len()
+        && name.options.iter().all(|value| !value.trim().is_empty())
+        && code.options.iter().all(|value| is_valid_code(value))
+}
+
+fn has_pending_art_bible_draft(drafts: &[ArtifactDraftRecord]) -> bool {
+    drafts
+        .iter()
+        .any(|draft| draft.target_path == "art-bible.md" && draft.status == "pending")
+}
+
+fn project_workflow_context(
+    project_state: ProjectState,
+    has_pending_art_bible: bool,
+) -> ProjectWorkflowContext {
+    let (art_bible_status, naming_status, next_required_action) = match project_state {
+        ProjectState::Drafting if has_pending_art_bible => {
+            ("pendingConfirmation", "notStarted", "confirmArtBible")
+        }
+        ProjectState::Drafting => ("drafting", "notStarted", "draftProjectArtBible"),
+        ProjectState::StyleSettled => ("confirmed", "pending", "collectProjectNaming"),
+        ProjectState::Ready => ("confirmed", "completed", "completed"),
+    };
+    ProjectWorkflowContext {
+        project_state,
+        art_bible_status: art_bible_status.to_string(),
+        naming_status: naming_status.to_string(),
+        next_required_action: next_required_action.to_string(),
+    }
+}
+
+fn project_current_task(workflow: &ProjectWorkflowContext) -> CurrentTaskContext {
+    match workflow.next_required_action.as_str() {
+        "draftProjectArtBible" => CurrentTaskContext {
+            owner_agent: "art_bible_designer".to_string(),
+            task_type: "draftProjectArtBible".to_string(),
+            deliverables: vec![
+                "完整项目 Art Bible 草稿".to_string(),
+                "project_manifest 结构化建议".to_string(),
+            ],
+            completion_condition: "提交待用户确认的 project_art_bible 草稿".to_string(),
+            forbidden_actions: vec![
+                "不得讨论玩法设计".to_string(),
+                "不得提前生成项目名称或代号".to_string(),
+            ],
+        },
+        "confirmArtBible" => CurrentTaskContext {
+            owner_agent: "user".to_string(),
+            task_type: "confirmArtBible".to_string(),
+            deliverables: vec!["用户确认或补充 Art Bible".to_string()],
+            completion_condition: "用户通过人工门禁确认 Art Bible".to_string(),
+            forbidden_actions: vec!["不得重复生成 Art Bible".to_string()],
+        },
+        "collectProjectNaming" => CurrentTaskContext {
+            owner_agent: "art_bible_designer".to_string(),
+            task_type: "collectProjectNaming".to_string(),
+            deliverables: vec!["项目名称与项目代号两组等长、按顺序配对的单选 choices".to_string()],
+            completion_condition: "使用 ask_user + payload.choices 提交两至三组命名建议"
+                .to_string(),
+            forbidden_actions: vec![
+                "不得重新讨论或生成 Art Bible".to_string(),
+                "不得输出玩法、角色或素材规划".to_string(),
+                "studio_director 不得自行生成命名候选".to_string(),
+            ],
+        },
+        "completed" => CurrentTaskContext {
+            owner_agent: "system".to_string(),
+            task_type: "completed".to_string(),
+            deliverables: Vec::new(),
+            completion_condition: "项目已进入 ready".to_string(),
+            forbidden_actions: vec!["不得继续派发立项任务".to_string()],
+        },
+        _ => unreachable!("project workflow actions are statically defined"),
+    }
+}
+
 fn allowed_handoffs_for(
     target_kind: &str,
-    stage: &str,
     current_agent: &str,
     director_agent: &str,
     handoff_count: usize,
+    project_workflow: Option<&ProjectWorkflowContext>,
     character: Option<&Character>,
     workflow: Option<&CharacterWorkflowFacts>,
 ) -> Vec<String> {
@@ -4171,12 +4426,19 @@ fn allowed_handoffs_for(
     if current_agent != director_agent {
         return vec![director_agent.to_string()];
     }
+    if target_kind == "project" {
+        return project_workflow
+            .filter(|workflow| {
+                matches!(
+                    workflow.next_required_action.as_str(),
+                    "draftProjectArtBible" | "collectProjectNaming"
+                )
+            })
+            .map(|_| vec!["art_bible_designer".to_string()])
+            .unwrap_or_default();
+    }
     if target_kind != "character" {
-        return codex_game_domain::agents_for_stage(target_kind, stage)
-            .iter()
-            .filter(|agent| **agent != director_agent)
-            .map(|agent| (*agent).to_string())
-            .collect();
+        return Vec::new();
     }
     let (Some(character), Some(workflow)) = (character, workflow) else {
         return Vec::new();
@@ -4377,6 +4639,34 @@ mod tests {
         }
     }
 
+    fn test_project_context(state: ProjectState, has_pending_art_bible: bool) -> ContextPackage {
+        let workflow = project_workflow_context(state, has_pending_art_bible);
+        ContextPackage {
+            conversation_history: Vec::new(),
+            context_version: 1,
+            contract_version: 5,
+            agent_definition_version: "4".to_string(),
+            output_schema: String::new(),
+            action_schema: String::new(),
+            action_examples: String::new(),
+            target_kind: "project".to_string(),
+            target_ref: None,
+            stage: "project".to_string(),
+            art_bible: None,
+            character_context: None,
+            workflow_context: None,
+            project_workflow_context: Some(workflow.clone()),
+            current_task: Some(project_current_task(&workflow)),
+            review_subject: None,
+            visual_focus: None,
+            recovery_context: None,
+            memories: Vec::new(),
+            allowed_handoffs: Vec::new(),
+            agent_role_descriptions: Vec::new(),
+            action_protocol: String::new(),
+        }
+    }
+
     fn test_generation(
         id: &str,
         stage: &str,
@@ -4401,6 +4691,127 @@ mod tests {
             asset_spec: serde_json::json!({}),
             created_at: 1,
         }
+    }
+
+    #[test]
+    fn project_workflow_maps_state_and_pending_gate_to_one_next_action() {
+        let cases = [
+            (ProjectState::Drafting, false, "draftProjectArtBible"),
+            (ProjectState::Drafting, true, "confirmArtBible"),
+            (ProjectState::StyleSettled, false, "collectProjectNaming"),
+            (ProjectState::Ready, false, "completed"),
+        ];
+        for (state, pending, expected) in cases {
+            let workflow = project_workflow_context(state, pending);
+            assert_eq!(workflow.next_required_action, expected);
+            assert_eq!(project_current_task(&workflow).task_type, expected);
+        }
+    }
+
+    #[test]
+    fn project_handoffs_only_exist_for_agent_owned_steps() {
+        for (state, pending, expected) in [
+            (ProjectState::Drafting, false, vec!["art_bible_designer"]),
+            (ProjectState::Drafting, true, Vec::new()),
+            (
+                ProjectState::StyleSettled,
+                false,
+                vec!["art_bible_designer"],
+            ),
+            (ProjectState::Ready, false, Vec::new()),
+        ] {
+            let workflow = project_workflow_context(state, pending);
+            assert_eq!(
+                allowed_handoffs_for(
+                    "project",
+                    "studio_director",
+                    "studio_director",
+                    0,
+                    Some(&workflow),
+                    None,
+                    None,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn style_settled_requires_director_handoff_and_designer_naming() {
+        let context = test_project_context(ProjectState::StyleSettled, false);
+        let done = AgentAction {
+            action: AgentActionKind::Done,
+            target_agent: None,
+            reason: "立项完成".to_string(),
+            payload: AgentActionPayload::default(),
+        };
+        assert!(
+            validate_project_workflow_action(
+                &context,
+                "studio_director",
+                "studio_director",
+                &done,
+            )
+            .is_err()
+        );
+        let handoff = AgentAction {
+            action: AgentActionKind::Handoff,
+            target_agent: Some("art_bible_designer".to_string()),
+            reason: "生成项目名称与代号".to_string(),
+            payload: AgentActionPayload::default(),
+        };
+        validate_project_workflow_action(&context, "studio_director", "studio_director", &handoff)
+            .expect("director must hand off naming");
+
+        let naming = AgentAction {
+            action: AgentActionKind::AskUser,
+            target_agent: None,
+            reason: "请选择项目名称与代号".to_string(),
+            payload: AgentActionPayload {
+                choices: Some(vec![
+                    codex_game_domain::ChoiceGroup {
+                        item: "项目名称".to_string(),
+                        options: vec!["西游城战".to_string(), "都市西游记".to_string()],
+                        recommended: vec!["西游城战".to_string()],
+                        multiple: false,
+                    },
+                    codex_game_domain::ChoiceGroup {
+                        item: "项目代号".to_string(),
+                        options: vec![
+                            "xiyou-city-battle".to_string(),
+                            "urban-journey-west".to_string(),
+                        ],
+                        recommended: vec!["xiyou-city-battle".to_string()],
+                        multiple: false,
+                    },
+                ]),
+                ..AgentActionPayload::default()
+            },
+        };
+        validate_project_workflow_action(
+            &context,
+            "art_bible_designer",
+            "studio_director",
+            &naming,
+        )
+        .expect("designer naming must be accepted");
+
+        let mut repeated_art_bible = naming;
+        repeated_art_bible.payload.choices = None;
+        repeated_art_bible.payload.drafts = Some(vec![codex_game_domain::ArtifactDraft {
+            artifact_slot: ArtifactSlot::ProjectArtBible,
+            content: "# 重复 Art Bible".to_string(),
+            based_on_hash: None,
+        }]);
+        assert!(
+            validate_project_workflow_action(
+                &context,
+                "art_bible_designer",
+                "studio_director",
+                &repeated_art_bible,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4504,10 +4915,10 @@ mod tests {
             assert!(
                 allowed_handoffs_for(
                     "character",
-                    "spec",
                     agent,
                     "studio_director",
                     0,
+                    None,
                     Some(&character),
                     Some(&facts),
                 )
@@ -4707,10 +5118,10 @@ mod tests {
             assert_eq!(
                 allowed_handoffs_for(
                     "character",
-                    "spec",
                     "studio_director",
                     "studio_director",
                     0,
+                    None,
                     Some(&character),
                     Some(&facts),
                 ),
@@ -4723,10 +5134,10 @@ mod tests {
         assert!(
             allowed_handoffs_for(
                 "character",
-                "render",
                 "studio_director",
                 "studio_director",
                 0,
+                None,
                 Some(&character),
                 Some(&facts),
             )
@@ -4736,10 +5147,10 @@ mod tests {
         assert_eq!(
             allowed_handoffs_for(
                 "character",
-                "render",
                 "studio_director",
                 "studio_director",
                 0,
+                None,
                 Some(&character),
                 Some(&facts),
             ),
@@ -4749,10 +5160,10 @@ mod tests {
         assert!(
             allowed_handoffs_for(
                 "character",
-                "views",
                 "studio_director",
                 "studio_director",
                 0,
+                None,
                 Some(&character),
                 Some(&facts),
             )

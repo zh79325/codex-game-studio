@@ -1904,76 +1904,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_routes_specialist_completion_back_to_director() {
+    async fn project_director_routes_art_bible_work_to_the_designer() {
         let (_directory, adapter, execution, conversation_id) = setup().await;
         let first_turn = submit(&adapter, &execution, &conversation_id, "定义美术基调").await;
+        let handoff = action(
+            "handoff",
+            Some("art_bible_designer"),
+            "交给项目视觉规范设计师定义美术基调",
+            "{}",
+        );
+        let projection = adapter
+            .observe_turn_completed(&execution, &first_turn, Some(&handoff), None)
+            .await
+            .expect("handoff completion")
+            .expect("projection");
+        assert_eq!(
+            projection.handoff_target.as_deref(),
+            Some("art_bible_designer")
+        );
+        let designer = adapter
+            .continue_handoff(&execution, &conversation_id, "art_bible_designer")
+            .await
+            .expect("continue handoff")
+            .expect("handoff task");
         let ask_user = action(
             "ask_user",
             None,
             "需要用户选择风格",
             r#"{"choices":[{"item":"风格","options":["写实","卡通"],"recommended":["卡通"],"multiple":false}]}"#,
         );
-        adapter
-            .observe_turn_completed(&execution, &first_turn, Some(&ask_user), None)
-            .await
-            .expect("ask user completion")
-            .expect("projection");
-
-        let second_turn = submit(&adapter, &execution, &conversation_id, "选择卡通").await;
-        let handoff = action(
-            "handoff",
-            Some("art_bible_designer"),
-            "交给美术设计师细化",
-            "{}",
-        );
-        adapter
-            .observe_turn_completed(&execution, &second_turn, Some(&handoff), None)
-            .await
-            .expect("handoff completion")
-            .expect("projection");
-        let third = adapter
-            .continue_handoff(&execution, &conversation_id, "art_bible_designer")
-            .await
-            .expect("continue handoff")
-            .expect("handoff task");
-        let specialist_done = action("done", None, "美术基调已完成", "{}");
         let projection = adapter
             .observe_turn_completed(
                 &execution,
-                third.attempt.codex_turn_id.as_deref().expect("turn id"),
-                Some(&specialist_done),
+                designer.attempt.codex_turn_id.as_deref().expect("turn id"),
+                Some(&ask_user),
                 None,
             )
             .await
-            .expect("return completion")
+            .expect("ask user completion")
             .expect("projection");
-        assert_eq!(
-            projection.handoff_target.as_deref(),
-            Some("studio_director")
-        );
-        let director = adapter
-            .continue_handoff(&execution, &conversation_id, "studio_director")
-            .await
-            .expect("continue to director")
-            .expect("director task");
-        let done = action("done", None, "本轮工作已完成", "{}");
-        adapter
-            .observe_turn_completed(
-                &execution,
-                director.attempt.codex_turn_id.as_deref().expect("turn id"),
-                Some(&done),
-                None,
-            )
-            .await
-            .expect("director completion")
-            .expect("projection");
+        assert_eq!(projection.handoff_target, None);
 
         let snapshot = adapter
             .conversation_read(GameConversationReadParams { conversation_id })
             .await
             .expect("snapshot");
         assert_eq!(snapshot.conversation.status, "active");
-        assert_eq!(snapshot.handoffs.len(), 2);
+        assert_eq!(snapshot.handoffs.len(), 1);
         assert_eq!(
             snapshot
                 .messages
@@ -1981,7 +1958,7 @@ mod tests {
                 .and_then(|message| message.action.as_ref())
                 .and_then(|action| action.get("action"))
                 .and_then(serde_json::Value::as_str),
-            Some("done")
+            Some("ask_user")
         );
     }
 
@@ -2141,7 +2118,7 @@ mod tests {
             .find("<game_agent_definition>")
             .expect("definition");
         let contract = model_input
-            .find("<action_contract version=\"4\">")
+            .find("<action_contract version=\"5\">")
             .expect("action contract");
         let task = model_input.find("定义美术基调").expect("task prompt");
         let context = model_input.find("<game_context").expect("game context");
@@ -2150,13 +2127,21 @@ mod tests {
         assert!(model_input.contains("本轮合法完整示例："));
         assert!(model_input.contains("\"agentRoleDescriptions\""));
         assert!(model_input.contains("\"agentCode\":\"art_bible_designer\""));
+        assert!(model_input.contains("\"projectWorkflowContext\""));
+        assert!(model_input.contains("\"nextRequiredAction\":\"draftProjectArtBible\""));
+        assert!(model_input.contains("\"currentTask\""));
         assert!(model_input.contains("这套工具做的是素材设计与生产，不做游戏策划"));
         let retry = adapter
             .observe_turn_completed(&execution, &turn_id, Some("协议格式错误"), None)
             .await
             .expect("contract retry")
             .expect("retry projection");
-        let valid = action("done", None, "美术基调已完成", "{}");
+        let valid = action(
+            "handoff",
+            Some("art_bible_designer"),
+            "交由项目视觉规范设计师定义美术基调",
+            "{}",
+        );
 
         let completion = adapter
             .observe_turn_completed(

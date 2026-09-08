@@ -212,6 +212,8 @@ fn start_request(prompt: &str) -> StartTurnRequest {
             art_bible: None,
             character_context: None,
             workflow_context: None,
+            project_workflow_context: None,
+            current_task: None,
             review_subject: None,
             visual_focus: None,
             recovery_context: None,

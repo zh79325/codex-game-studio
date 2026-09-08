@@ -220,6 +220,25 @@ pub struct WorkflowContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectWorkflowContext {
+    pub project_state: ProjectState,
+    pub art_bible_status: String,
+    pub naming_status: String,
+    pub next_required_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentTaskContext {
+    pub owner_agent: String,
+    pub task_type: String,
+    pub deliverables: Vec<String>,
+    pub completion_condition: String,
+    pub forbidden_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewSubject {
     pub id: String,
     pub target_path: String,
@@ -292,6 +311,10 @@ pub struct ContextPackage {
     #[serde(default)]
     pub workflow_context: Option<WorkflowContext>,
     #[serde(default)]
+    pub project_workflow_context: Option<ProjectWorkflowContext>,
+    #[serde(default)]
+    pub current_task: Option<CurrentTaskContext>,
+    #[serde(default)]
     pub review_subject: Option<ReviewSubject>,
     #[serde(default)]
     pub visual_focus: Option<VisualFocusContext>,
@@ -344,6 +367,26 @@ impl ContextPackage {
                         .as_ref()
                         .is_none_or(|path| path.len() <= MAX_CONTEXT_SUMMARY_BYTES)
             })
+            && self
+                .project_workflow_context
+                .as_ref()
+                .is_none_or(|workflow| {
+                    workflow.art_bible_status.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                        && workflow.naming_status.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                        && workflow.next_required_action.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                })
+            && self.current_task.as_ref().is_none_or(|task| {
+                task.owner_agent.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && task.task_type.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && task.completion_condition.len() <= MAX_CONTEXT_SUMMARY_BYTES
+                    && task.deliverables.len() <= MAX_CONTEXT_SUMMARIES
+                    && task.forbidden_actions.len() <= MAX_CONTEXT_SUMMARIES
+                    && task
+                        .deliverables
+                        .iter()
+                        .chain(task.forbidden_actions.iter())
+                        .all(|item| item.len() <= MAX_CONTEXT_SUMMARY_BYTES)
+            })
             && self.recovery_context.as_ref().is_none_or(|recovery| {
                 recovery.source_task_id.len() <= MAX_CONTEXT_SUMMARY_BYTES
                     && recovery.source_attempt_id.len() <= MAX_CONTEXT_SUMMARY_BYTES
@@ -395,6 +438,8 @@ mod tests {
             art_bible: None,
             character_context: None,
             workflow_context: None,
+            project_workflow_context: None,
+            current_task: None,
             review_subject: Some(ReviewSubject {
                 id: "draft-1".to_string(),
                 target_path: "docs/角色定稿.md".to_string(),

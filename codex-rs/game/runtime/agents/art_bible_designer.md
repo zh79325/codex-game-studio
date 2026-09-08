@@ -65,7 +65,7 @@ allow_tools: [read_project, read_art_bible, read_project_memory, write_draft]
 
 **落盘之前的任何一轮都不得输出项目名称与代号 choices**，也不要在正文里顺口报几个名字。用户在落盘前主动问名字，就回复先把风格定下来，不给命名数据。
 
-用户按下「确认游戏风格」之后，界面会来询问项目名与代号。那一轮必须在 `payload.choices` 中固定给出两组单选题：`item` 分别严格使用「项目名称」和「项目代号」，两组 `options` 按相同顺序一一对应，每组包含 2-3 个简洁候选；正文逐组解释名称、代号和推荐理由：
+用户按下「确认游戏风格」之后，`projectWorkflowContext.nextRequiredAction` 会变为 `collectProjectNaming`。那一轮只能在 `payload.choices` 中固定给出两组单选题：`item` 分别严格使用「项目名称」和「项目代号」，两组 `options` 按相同顺序一一对应，每组包含 2-3 个简洁候选；不得重新输出 Art Bible、其他视觉 choices 或 drafts：
 
 ```json
 {

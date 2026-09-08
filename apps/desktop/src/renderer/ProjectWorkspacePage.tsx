@@ -91,7 +91,7 @@ export default function ProjectWorkspacePage() {
       message.success("游戏风格已确认");
       await refreshProject();
       await conversation.send(
-        "用户已确认项目 Art Bible。请根据已确认结果决定并推进下一步。",
+        "用户已确认项目 Art Bible，项目已进入 styleSettled。必须 handoff 给 art_bible_designer，仅生成 payload.choices 中等长且按顺序配对的「项目名称」「项目代号」候选；禁止自行命名或重新生成 Art Bible。",
         "studio_director",
       );
     },
@@ -172,8 +172,16 @@ export default function ProjectWorkspacePage() {
       ?.values[0];
     const code = submission.answers.find((answer) => answer.item === "项目代号")
       ?.values[0];
-    if (!name || !code) throw new Error("请选择项目名称和项目代号");
-    await finalize.mutateAsync({ name, code });
+    if (!name?.trim() || !code) throw new Error("请选择项目名称和项目代号");
+    if (!isValidProjectCode(code)) throw new Error("项目代号格式不合法");
+    const nameGroup = groups.find((group) => group.item === "项目名称")!;
+    const codeGroup = groups.find((group) => group.item === "项目代号")!;
+    const nameIndex = nameGroup.options.indexOf(name);
+    const codeIndex = codeGroup.options.indexOf(code);
+    if (nameIndex >= 0 && codeIndex >= 0 && nameIndex !== codeIndex) {
+      throw new Error("项目名称与项目代号必须选择同一组建议");
+    }
+    await finalize.mutateAsync({ name: name.trim(), code });
     return true;
   };
   const confirmDraft = async (draft: ArtifactDraft) => {
@@ -493,10 +501,23 @@ export default function ProjectWorkspacePage() {
 }
 
 function isProjectNamingChoice(groups: ChoiceGroup[]) {
+  const nameGroup = groups.find((group) => group.item === "项目名称");
+  const codeGroup = groups.find((group) => group.item === "项目代号");
+  if (!nameGroup || !codeGroup) return false;
   return (
     groups.length === 2 &&
     groups.every((group) => !group.multiple) &&
-    groups.some((group) => group.item === "项目名称") &&
-    groups.some((group) => group.item === "项目代号")
+    nameGroup.options.length > 0 &&
+    nameGroup.options.length === codeGroup.options.length &&
+    nameGroup.options.every((name) => Boolean(name.trim())) &&
+    codeGroup.options.every(isValidProjectCode)
+  );
+}
+
+function isValidProjectCode(code: string) {
+  return (
+    code.length <= 64 &&
+    !code.startsWith("draft-") &&
+    /^[a-z0-9][a-z0-9_-]*$/.test(code)
   );
 }

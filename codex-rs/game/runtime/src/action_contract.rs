@@ -21,16 +21,24 @@ pub fn action_contract_profile(
     stage: &str,
     director_agent: &str,
     allowed_handoffs: &[String],
+    project_task: Option<&str>,
 ) -> ActionContractProfile {
     let schema = serde_json::to_string_pretty(&profile_schema(
         agent_code,
         stage,
         director_agent,
         allowed_handoffs,
+        project_task,
     ))
     .unwrap_or_else(|_| "{}".to_string());
     let instruction = instruction(agent_code, stage, director_agent, allowed_handoffs);
-    let examples = examples(agent_code, stage, director_agent, allowed_handoffs);
+    let examples = examples(
+        agent_code,
+        stage,
+        director_agent,
+        allowed_handoffs,
+        project_task,
+    );
     ActionContractProfile {
         instruction,
         schema,
@@ -164,22 +172,34 @@ fn profile_schema(
     stage: &str,
     _director_agent: &str,
     allowed_handoffs: &[String],
+    project_task: Option<&str>,
 ) -> Value {
     let generated = serde_json::to_value(schema_for!(AgentAction))
         .unwrap_or_else(|_| json!({"definitions": {}}));
     let definitions = filtered_definitions(&generated, agent_code);
-    let branches = match agent_code {
-        "studio_director" => director_schema_branches(allowed_handoffs),
-        "spec_writer" => vec![
+    let branches = match (agent_code, project_task) {
+        ("studio_director", Some("draftProjectArtBible" | "collectProjectNaming")) => {
+            director_handoff_schema_branches(allowed_handoffs)
+        }
+        ("studio_director", Some("confirmArtBible" | "completed")) => vec![
+            action_branch("done", json!({"type": "null"}), empty_payload()),
+            action_branch("blocked", json!({"type": "null"}), empty_payload()),
+        ],
+        ("art_bible_designer", Some("collectProjectNaming")) => vec![
+            action_branch("ask_user", json!({"type": "null"}), choices_payload()),
+            action_branch("blocked", json!({"type": "null"}), empty_payload()),
+        ],
+        ("studio_director", _) => director_schema_branches(allowed_handoffs),
+        ("spec_writer", _) => vec![
             action_branch("ask_user", json!({"type": "null"}), choices_payload()),
             action_branch("done", json!({"type": "null"}), drafts_payload()),
             action_branch("blocked", json!({"type": "null"}), empty_payload()),
         ],
-        "spec_reviewer" => vec![
+        ("spec_reviewer", _) => vec![
             action_branch("done", json!({"type": "null"}), verdict_payload()),
             action_branch("blocked", json!({"type": "null"}), empty_payload()),
         ],
-        "visual_designer" => vec![
+        ("visual_designer", _) => vec![
             action_branch(
                 "done",
                 json!({"type": "null"}),
@@ -192,7 +212,7 @@ fn profile_schema(
             ),
             action_branch("ask_user", json!({"type": "null"}), choices_payload()),
         ],
-        _ => return generated,
+        (_, _) => return generated,
     };
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -226,6 +246,25 @@ fn filtered_definitions(generated: &Value, agent_code: &str) -> Value {
         }
     }
     Value::Object(selected)
+}
+
+fn director_handoff_schema_branches(allowed_handoffs: &[String]) -> Vec<Value> {
+    let mut branches = allowed_handoffs
+        .first()
+        .map(|_| {
+            vec![action_branch(
+                "handoff",
+                json!({"type": "string", "enum": allowed_handoffs}),
+                empty_payload(),
+            )]
+        })
+        .unwrap_or_default();
+    branches.push(action_branch(
+        "blocked",
+        json!({"type": "null"}),
+        empty_payload(),
+    ));
+    branches
 }
 
 fn director_schema_branches(allowed_handoffs: &[String]) -> Vec<Value> {
@@ -393,7 +432,7 @@ fn instruction(
         _ => "只使用 schema 中定义的字段；不需要的 payload 字段必须省略。",
     };
     format!(
-        "当前 Agent：{agent_code}；当前阶段：{stage}；允许 handoff 目标：{targets}。\n请先阅读 game_context.agentRoleDescriptions，按其中的角色说明与职责边界协作；只有 handoffAllowed 为 true 的 Agent 才能作为 handoff 目标，internalExecutor 仅供系统内部执行。\n每次回复末尾必须且只能有一个 Action 块，Action 块后不得再输出内容。顶层必须且只能包含 action、target_agent、reason、payload。{payload_rule}运行时仍会执行严格字段、组合和业务校验。"
+        "当前 Agent：{agent_code}；当前阶段：{stage}；允许 handoff 目标：{targets}。\n请先阅读 game_context.agentRoleDescriptions，按其中的角色说明与职责边界协作；只有 handoffAllowed 为 true 的 Agent 才能作为 handoff 目标，internalExecutor 仅供系统内部执行。项目会话还必须严格遵守 game_context.projectWorkflowContext 和 game_context.currentTask；不得跳步、重做已完成步骤或替 currentTask.ownerAgent 产出专业内容。\n每次回复末尾必须且只能有一个 Action 块，Action 块后不得再输出内容。顶层必须且只能包含 action、target_agent、reason、payload。{payload_rule}运行时仍会执行严格字段、组合和业务校验。"
     )
 }
 
@@ -402,11 +441,22 @@ fn examples(
     stage: &str,
     director_agent: &str,
     allowed_handoffs: &[String],
+    project_task: Option<&str>,
 ) -> String {
-    let values = match agent_code {
-        "studio_director" => director_examples(allowed_handoffs),
-        "spec_writer" => spec_writer_examples(),
-        "spec_reviewer" => vec![json!({
+    let values = match (agent_code, project_task) {
+        ("studio_director", Some("draftProjectArtBible" | "collectProjectNaming")) => {
+            director_handoff_examples(allowed_handoffs)
+        }
+        ("studio_director", Some("confirmArtBible" | "completed")) => vec![json!({
+            "action": "done",
+            "target_agent": null,
+            "reason": "当前项目状态已说明完毕",
+            "payload": {}
+        })],
+        ("art_bible_designer", Some("collectProjectNaming")) => project_naming_examples(),
+        ("studio_director", _) => director_examples(allowed_handoffs),
+        ("spec_writer", _) => spec_writer_examples(),
+        ("spec_reviewer", _) => vec![json!({
             "action": "done",
             "target_agent": null,
             "reason": "规格审校已完成",
@@ -420,7 +470,7 @@ fn examples(
                 }
             }
         })],
-        "visual_designer" => vec![
+        ("visual_designer", _) => vec![
             json!({
                 "action": "done",
                 "target_agent": null,
@@ -455,6 +505,51 @@ fn examples(
         .map(action_block)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn director_handoff_examples(allowed_handoffs: &[String]) -> Vec<Value> {
+    allowed_handoffs
+        .first()
+        .map(|target| {
+            vec![json!({
+                "action": "handoff",
+                "target_agent": target,
+                "reason": "执行当前项目状态要求的唯一专业任务",
+                "payload": {}
+            })]
+        })
+        .unwrap_or_else(|| {
+            vec![json!({
+                "action": "blocked",
+                "target_agent": null,
+                "reason": "当前项目任务没有可用的专业 Agent",
+                "payload": {}
+            })]
+        })
+}
+
+fn project_naming_examples() -> Vec<Value> {
+    vec![json!({
+        "action": "ask_user",
+        "target_agent": null,
+        "reason": "请选择一组对应的项目名称与项目代号",
+        "payload": {
+            "choices": [
+                {
+                    "item": "项目名称",
+                    "options": ["项目名一", "项目名二"],
+                    "recommended": ["项目名一"],
+                    "multiple": false
+                },
+                {
+                    "item": "项目代号",
+                    "options": ["project-one", "project-two"],
+                    "recommended": ["project-one"],
+                    "multiple": false
+                }
+            ]
+        }
+    })]
 }
 
 fn director_examples(allowed_handoffs: &[String]) -> Vec<Value> {

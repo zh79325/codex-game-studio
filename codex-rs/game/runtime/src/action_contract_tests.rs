@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn spec_writer_contract_exposes_exact_draft_shape() {
-    let profile = action_contract_profile("spec_writer", "spec", "studio_director", &[]);
+    let profile = action_contract_profile("spec_writer", "spec", "studio_director", &[], None);
 
     let schema: Value = serde_json::from_str(&profile.schema).expect("profile schema");
     assert_eq!(schema["oneOf"].as_array().map(Vec::len), Some(3));
@@ -24,6 +24,7 @@ fn director_contract_uses_only_current_handoff_targets() {
         "render",
         "studio_director",
         &["visual_designer".to_string()],
+        None,
     );
 
     assert!(profile.instruction.contains("visual_designer"));
@@ -36,12 +37,39 @@ fn director_contract_uses_only_current_handoff_targets() {
 }
 
 #[test]
+fn project_naming_contract_exposes_only_the_required_step() {
+    let director = action_contract_profile(
+        "studio_director",
+        "project",
+        "studio_director",
+        &["art_bible_designer".to_string()],
+        Some("collectProjectNaming"),
+    );
+    let schema: Value = serde_json::from_str(&director.schema).expect("director schema");
+    assert_eq!(schema["oneOf"].as_array().map(Vec::len), Some(2));
+    assert!(director.examples.contains("\"action\": \"handoff\""));
+    assert!(!director.examples.contains("\"action\": \"done\""));
+
+    let designer = action_contract_profile(
+        "art_bible_designer",
+        "project",
+        "studio_director",
+        &[],
+        Some("collectProjectNaming"),
+    );
+    assert!(designer.examples.contains("\"item\": \"项目名称\""));
+    assert!(designer.examples.contains("\"item\": \"项目代号\""));
+    assert!(!designer.examples.contains("\"action\": \"handoff\""));
+}
+
+#[test]
 fn visual_contract_does_not_request_path_echoing() {
     let profile = action_contract_profile(
         "visual_designer",
         "render",
         "studio_director",
         &["studio_director".to_string()],
+        None,
     );
 
     let schema: Value = serde_json::from_str(&profile.schema).expect("profile schema");
@@ -64,7 +92,8 @@ fn every_profile_example_passes_the_runtime_parser() {
     ];
 
     for (agent, stage, allowed_handoffs) in cases {
-        let profile = action_contract_profile(agent, stage, "studio_director", &allowed_handoffs);
+        let profile =
+            action_contract_profile(agent, stage, "studio_director", &allowed_handoffs, None);
         for chunk in profile.examples.split(ACTION_END) {
             if chunk.trim().is_empty() {
                 continue;
